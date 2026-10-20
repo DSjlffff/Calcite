@@ -3796,7 +3796,7 @@ local weapon = require("./weapon")
 
 local main = {}
 
-main.version = "1.27"
+main.version = "1.28"
 
 local sound_packet = "ReplicatedStorage.NetworkRemotes.Sound.ReplicateSound"    -- through which Blox Strike tells about sounds
 -- and about its grenades: a throw, every bounce, the end
