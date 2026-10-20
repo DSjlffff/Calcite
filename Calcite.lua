@@ -3138,6 +3138,36 @@ end
 return hud
 end
 
+__modules["item_asylum"] = function(require)
+-- Item Asylum mode: pure read helpers. Враг = любой другой игрок (FFA, нет команд).
+-- Факты игры из tools/itemasylum_probe.lua:
+--   • игроки = топ-уровень Workspace (не папка), Character:FindFirstChildOfClass("Tool") — тулза в руках
+--   • у тулзы атрибуты: OriginalOwner, ItemColor, EABILITY (имя абилки на E), RABILITY (R),
+--     ToolIconText (патроны формата "11 / 16" где есть), MobileCrosshair
+--   • Humanoid у Character обычный; атрибуты статуса: Status_Ragdolled, Status_OnFire
+local item_asylum = {}
+
+-- для ESP: { name, ammo (opt), eAbility (opt), rAbility (opt) }, nil если тулзы в руке нет
+function item_asylum.weaponInfo(char)
+    if char == nil then return nil end
+    local tool = char:FindFirstChildOfClass('Tool')
+    if tool == nil then return nil end
+    local info = { name = tool.Name }
+    -- ToolIconText часто "N / M" — патроны/макс, иногда просто N или строка-статус
+    local okAmmo, ammoText = pcall(function() return tool:GetAttribute('ToolIconText') end)
+    if okAmmo and type(ammoText) == 'string' and #ammoText > 0 then
+        info.ammo = ammoText
+    end
+    local okE, eAb = pcall(function() return tool:GetAttribute('EABILITY') end)
+    if okE and type(eAb) == 'string' and #eAb > 0 then info.eAbility = eAb end
+    local okR, rAb = pcall(function() return tool:GetAttribute('RABILITY') end)
+    if okR and type(rAb) == 'string' and #rAb > 0 then info.rAbility = rAb end
+    return info
+end
+
+return item_asylum
+end
+
 __modules["item_kinds"] = function(require)
 -- the kinds the item esp of YBA sorts the items of the world into, so that the menu shows or hides a whole kind at
 -- once. The names are the ones of the models in ReplicatedStorage.Tool_Replicas of the game: every item it has
@@ -3727,6 +3757,7 @@ local flier = require("./fly")
 local noclip = require("./noclip")
 local chams = require("./chams")
 local hitbox = require("./hitbox")
+local item_asylum = require("./item_asylum")
 local glider = require("./glider")
 local yba_npcs = require("./yba_npcs")
 local yba_waypoints = require("./yba_waypoints")
@@ -6126,6 +6157,7 @@ function main.start(env)
             else
                 local wantYba = status.wantsEffects(s.statusKinds) or s.stand or s.spec
                 local townWeapon = s.townWeapon and s.townWeapon.enabled
+                local iaWeapon = s.iaWeapon and s.iaWeapon.enabled
                 for _, record in roster do
                     players.refresh(record, wantYba)
                     if townWeapon and record.character ~= nil then
@@ -6136,6 +6168,21 @@ function main.start(env)
                                 label = label .. " reload"
                             elseif info.ammo ~= nil and info.maxAmmo ~= nil then
                                 label = string.format("%s %d/%d", label, info.ammo, info.maxAmmo)
+                            end
+                            record.weapon = label
+                        else
+                            record.weapon = ""
+                        end
+                    elseif iaWeapon and record.character ~= nil then
+                        local info = item_asylum.weaponInfo(record.character)
+                        if info ~= nil then
+                            local label = info.name
+                            if info.ammo ~= nil then
+                                label = label .. " [" .. info.ammo .. "]"
+                            end
+                            if s.iaWeapon.showAbilities then
+                                if info.eAbility then label = label .. " E:" .. info.eAbility end
+                                if info.rAbility then label = label .. " R:" .. info.rAbility end
                             end
                             record.weapon = label
                         else
@@ -6597,8 +6644,8 @@ local orderLabels = { "Ближнего", "Слабого" }
 local pointLabels = { "По списку", "Ближнюю" }
 
 -- the list of the modes as the user reads it
-local choiceLabels = { "Авто", "Universal", "YBA", "Blox Strike", "Steal an Egg", "Town", "MVS" }
-local choiceOf = { ["Авто"] = "Auto", ["Universal"] = "Universal", ["YBA"] = "Yba", ["Blox Strike"] = "Strike", ["Steal an Egg"] = "StealEgg", ["Town"] = "Town", ["MVS"] = "Mvs" }
+local choiceLabels = { "Авто", "Universal", "YBA", "Blox Strike", "Steal an Egg", "Town", "MVS", "Item Asylum" }
+local choiceOf = { ["Авто"] = "Auto", ["Universal"] = "Universal", ["YBA"] = "Yba", ["Blox Strike"] = "Strike", ["Steal an Egg"] = "StealEgg", ["Town"] = "Town", ["MVS"] = "Mvs", ["Item Asylum"] = "ItemAsylum" }
 
 function menu.create(deps)
     local Library = deps.Library
@@ -6735,6 +6782,13 @@ function menu.create(deps)
     toggle(townEspGroup, "TownWeapon", "ESP оружия", settings.townWeapon, "enabled")
     townEspGroup:AddLabel("Показывает Tool в руках чужих + патроны + reload. " ..
         "Данные читаются из Tool.GunScript.ClientAmmo и Tool.Settings, без хуков.", true)
+
+    -- Item Asylum ESP: имя тулзы + патроны (ToolIconText) + E/R абилки
+    local iaEspGroup = visualsTab:AddRightGroupbox("Item Asylum")
+    toggle(iaEspGroup, "IaWeapon", "ESP предметов", settings.iaWeapon, "enabled")
+    toggle(iaEspGroup, "IaWeaponAbilities", "Абилки E/R", settings.iaWeapon, "showAbilities")
+    iaEspGroup:AddLabel("Показывает Tool в руках чужих. ToolIconText = патроны/счётчик. " ..
+        "Абилки берутся из атрибутов EABILITY/RABILITY тулзы.", true)
 
     -- items
     local itemsGroup = visualsTab:AddLeftGroupbox("Предметы")
@@ -7171,6 +7225,7 @@ function menu.create(deps)
         end
         pcall(function() townIgnoreLimitsToggle:SetVisible(modes.has(mode, "TownGun")) end)
         townEspGroup:SetVisible(modes.has(mode, "TownGun"))
+        iaEspGroup:SetVisible(modes.has(mode, "IaWeapon"))
         -- в MVS visibleOnly форсится в settings.inEffect, тоггл прячем
         pcall(function() visibleOnlyToggle:SetVisible(mode ~= "Mvs") end)
         -- Reload bar работает только в MVS (gated через MvsGun), прячем toggle в других режимах
@@ -7326,8 +7381,11 @@ modes.town_universe = 1718755273
 -- Murderers VS Sheriffs; two sides (team check), players carry one of two weapons
 modes.mvs_universe = 7219654364
 
+-- Item Asylum: FFA (no teams), players spawn with random weapons each round
+modes.ia_universe = 1998835206
+
 -- what the user can pick in the menu, in the order of the list there
-modes.choices = { "Auto", "Universal", "Yba", "Strike", "StealEgg", "Town", "Mvs" }
+modes.choices = { "Auto", "Universal", "Yba", "Strike", "StealEgg", "Town", "Mvs", "ItemAsylum" }
 
 -- AutoFarm is taking the items of the world one after another, for the game whose items the script knows (autofarm.lua);
 -- TimeErase is a mark on a player erasing time, whose model the game takes out of the world (King Crimson in YBA);
@@ -7360,6 +7418,8 @@ local features = {
     Town = { Players = true, Health = true, TeamCheck = true, Aim = true, Fullbright = true, TownGun = true, NoClip = true, Crosshair = true },
     -- MVS: team shooter (Murderers VS Sheriffs). Players ESP + aim + team check; Silent Aim/weapon details pending probe
     Mvs = { Players = true, Health = true, TeamCheck = true, Aim = true, MvsGun = true },
+    -- Item Asylum: FFA с random weapons. Players ESP + aim + Weapon ESP (имя тулзы + патроны)
+    ItemAsylum = { Players = true, Health = true, Aim = true, IaWeapon = true },
 }
 
 -- what a mode starts with set otherwise than the settings are written: fields of the table of settings.defaults
@@ -7394,6 +7454,10 @@ function modes.detect(universeId)
 
     if universeId == modes.mvs_universe then
         return "Mvs"
+    end
+
+    if universeId == modes.ia_universe then
+        return "ItemAsylum"
     end
 
     return "Universal"
@@ -7433,6 +7497,10 @@ function modes.name(mode)
 
     if mode == "Mvs" then
         return "MVS"
+    end
+
+    if mode == "ItemAsylum" then
+        return "Item Asylum"
     end
 
     return "Universal"
@@ -8570,6 +8638,11 @@ function settings.defaults(mode)
         townWeapon = {
             enabled = true,
         },
+        -- Item Asylum Weapon ESP: имя тулзы + патроны (ToolIconText) + абилки E/R (item_asylum.lua)
+        iaWeapon = {
+            enabled = true,
+            showAbilities = false,  -- показывать EABILITY/RABILITY (длинно, но полезно)
+        },
         -- MVS Silent Aim: клик ЛКМ зовёт Net:RemoteEvent("GunKill") на цель Аима (mvs.lua).
         -- Rage mode собирается из Aim + Silent + AutoFire на вкладке — отдельного тумблера нет
         mvsSilent = {
@@ -8798,6 +8871,14 @@ function settings.inEffect(s, mode)
     e.mvsSilent = table.clone(s.mvsSilent)
     if not modes.has(mode, "MvsGun") then
         e.mvsSilent.enabled = false
+    end
+
+    e.iaWeapon = table.clone(s.iaWeapon)
+    if not modes.has(mode, "IaWeapon") then
+        e.iaWeapon.enabled = false
+    end
+    if e.iaWeapon.enabled then
+        e.weapon = true
     end
 
     -- whether any Silent Aim (Town/MVS/Strike) is on
