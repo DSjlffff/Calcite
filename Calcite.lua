@@ -3796,7 +3796,7 @@ local weapon = require("./weapon")
 
 local main = {}
 
-main.version = "1.28"
+main.version = "1.29"
 
 local sound_packet = "ReplicatedStorage.NetworkRemotes.Sound.ReplicateSound"    -- through which Blox Strike tells about sounds
 -- and about its grenades: a throw, every bounce, the end
@@ -7384,8 +7384,11 @@ modes.mvs_universe = 7219654364
 -- Item Asylum: FFA (no teams), players spawn with random weapons each round
 modes.ia_universe = 1998835206
 
+-- Rivals: a team shooter, players ESP + aim + team check as the basics
+modes.rivals_universe = 6035872082
+
 -- what the user can pick in the menu, in the order of the list there
-modes.choices = { "Auto", "Universal", "Yba", "Strike", "StealEgg", "Town", "Mvs", "ItemAsylum" }
+modes.choices = { "Auto", "Universal", "Yba", "Strike", "StealEgg", "Town", "Mvs", "ItemAsylum", "Rivals" }
 
 -- AutoFarm is taking the items of the world one after another, for the game whose items the script knows (autofarm.lua);
 -- TimeErase is a mark on a player erasing time, whose model the game takes out of the world (King Crimson in YBA);
@@ -7420,6 +7423,8 @@ local features = {
     Mvs = { Players = true, Health = true, TeamCheck = true, Aim = true, MvsGun = true },
     -- Item Asylum: FFA с random weapons. Players ESP + aim + Weapon ESP (имя тулзы + патроны)
     ItemAsylum = { Players = true, Health = true, Aim = true, IaWeapon = true },
+    -- Rivals: team shooter — пока основа (ESP с здоровьем + aim + team check)
+    Rivals = { Players = true, Health = true, TeamCheck = true, Aim = true },
 }
 
 -- what a mode starts with set otherwise than the settings are written: fields of the table of settings.defaults
@@ -7458,6 +7463,10 @@ function modes.detect(universeId)
 
     if universeId == modes.ia_universe then
         return "ItemAsylum"
+    end
+
+    if universeId == modes.rivals_universe then
+        return "Rivals"
     end
 
     return "Universal"
@@ -7501,6 +7510,10 @@ function modes.name(mode)
 
     if mode == "ItemAsylum" then
         return "Item Asylum"
+    end
+
+    if mode == "Rivals" then
+        return "Rivals"
     end
 
     return "Universal"
