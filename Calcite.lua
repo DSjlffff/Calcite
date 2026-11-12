@@ -16,6 +16,131 @@ local function __require(path)
     return entry.value
 end
 
+__modules["aim_math"] = function(require)
+-- the arithmetic of the aim: who is the nearest to the crosshair, and how far to move the mouse in a frame
+-- the mouse is all the aim has: it sends counts, the game turns the camera by them in its own way, and how many pixels
+-- of the screen a count is worth depends on the game and on the sensitivity the user has set there. The aim finds
+-- that out by itself, from how far the point moved after what was sent
+-- pure logic, checked by tests/aim_math_test.lua
+local num = require("./num")
+
+local aim_math = {}
+
+aim_math.max_step = 200         -- counts in one frame, whatever the error: a wrong guess must not spin the camera
+
+local min_gain = 0.02           -- counts for a pixel: the range a guess is kept in
+local max_gain = 50
+local learn_from = 3            -- counts: a smaller step tells too little about the game to learn from
+local learn_rate = 0.5          -- how far a guess moves to what was just seen: the target moves and the hand of the user too
+local on_point = 1              -- pixels: closer than this the mouse is left alone
+
+-- the share of the error removed in a frame that long: the same path whatever the frame rate
+function aim_math.share(speed, dt)
+    return 1 - math.exp(-speed * dt)
+end
+
+-- the one closest to the crosshair among those inside the circle; each has ex, ey: pixels from the crosshair to it
+function aim_math.nearest(candidates, radius)
+    local best = nil
+    local bestDistance = radius * radius
+
+    for _, candidate in candidates do
+        local distance = candidate.ex * candidate.ex + candidate.ey * candidate.ey
+        if distance <= bestDistance then
+            best = candidate
+            bestDistance = distance
+        end
+    end
+
+    return best
+end
+
+function aim_math.newController()
+    return {
+        gain = 1,           -- counts of the mouse for a pixel of the screen, as far as it is known
+        carryX = 0,         -- what was cut off when the last step was made whole
+        carryY = 0,
+        lastErrorX = nil,   -- where the point was a frame ago, and what was sent then
+        lastErrorY = nil,
+        lastMoveX = 0,
+        lastMoveY = 0,
+    }
+end
+
+-- before another target: what was learnt about the game stays, what was known about the old target goes
+function aim_math.reset(controller)
+    controller.carryX = 0
+    controller.carryY = 0
+    controller.lastErrorX = nil
+    controller.lastErrorY = nil
+    controller.lastMoveX = 0
+    controller.lastMoveY = 0
+end
+
+-- one frame: the point is ex, ey pixels from the crosshair; gives the whole counts to send to the mouse
+function aim_math.step(controller, ex, ey, speed, dt)
+    if not (num.finite(ex) and num.finite(ey)) then
+        aim_math.reset(controller)
+        return 0, 0
+    end
+
+    -- what did the last step do: the point came shiftX, shiftY pixels closer for the counts that were sent
+    if controller.lastErrorX ~= nil then
+        local sentX, sentY = controller.lastMoveX, controller.lastMoveY
+        local sent = sentX * sentX + sentY * sentY
+
+        if sent >= learn_from * learn_from then
+            local shiftX = controller.lastErrorX - ex
+            local shiftY = controller.lastErrorY - ey
+            -- pixels a count, along the way the mouse was sent
+            local perCount = (shiftX * sentX + shiftY * sentY) / sent
+
+            -- a point that got further away although the mouse went after it is running faster than the aim: nothing
+            -- to learn from that
+            if perCount > 0 then
+                local seen = math.clamp(1 / perCount, min_gain, max_gain)
+                controller.gain = controller.gain * (seen / controller.gain) ^ learn_rate
+            end
+        end
+    end
+
+    if ex * ex + ey * ey < on_point * on_point then
+        controller.carryX = 0
+        controller.carryY = 0
+        controller.lastErrorX = ex
+        controller.lastErrorY = ey
+        controller.lastMoveX = 0
+        controller.lastMoveY = 0
+        return 0, 0
+    end
+
+    local share = aim_math.share(speed, dt)
+    local wantX = ex * share * controller.gain + controller.carryX
+    local wantY = ey * share * controller.gain + controller.carryY
+
+    local length = math.sqrt(wantX * wantX + wantY * wantY)
+    if length > aim_math.max_step then
+        wantX = wantX * aim_math.max_step / length
+        wantY = wantY * aim_math.max_step / length
+    end
+
+    -- the mouse takes whole counts; the rest is kept for the next frame, or a slow aim would never move
+    local moveX = math.round(wantX)
+    local moveY = math.round(wantY)
+    controller.carryX = wantX - moveX
+    controller.carryY = wantY - moveY
+
+    controller.lastErrorX = ex
+    controller.lastErrorY = ey
+    controller.lastMoveX = moveX
+    controller.lastMoveY = moveY
+
+    return moveX, moveY
+end
+
+return aim_math
+end
+
 __modules["aim"] = function(require)
 -- the aim: while its key is held, the mouse is moved towards the one nearest to the crosshair
 -- nothing of the game is read or changed here beyond the places of the characters: the mouse is all it moves,
@@ -264,131 +389,6 @@ function Aim:update(targets, a, teamCheck, held, now, d)
 end
 
 return aim
-end
-
-__modules["aim_math"] = function(require)
--- the arithmetic of the aim: who is the nearest to the crosshair, and how far to move the mouse in a frame
--- the mouse is all the aim has: it sends counts, the game turns the camera by them in its own way, and how many pixels
--- of the screen a count is worth depends on the game and on the sensitivity the user has set there. The aim finds
--- that out by itself, from how far the point moved after what was sent
--- pure logic, checked by tests/aim_math_test.lua
-local num = require("./num")
-
-local aim_math = {}
-
-aim_math.max_step = 200         -- counts in one frame, whatever the error: a wrong guess must not spin the camera
-
-local min_gain = 0.02           -- counts for a pixel: the range a guess is kept in
-local max_gain = 50
-local learn_from = 3            -- counts: a smaller step tells too little about the game to learn from
-local learn_rate = 0.5          -- how far a guess moves to what was just seen: the target moves and the hand of the user too
-local on_point = 1              -- pixels: closer than this the mouse is left alone
-
--- the share of the error removed in a frame that long: the same path whatever the frame rate
-function aim_math.share(speed, dt)
-    return 1 - math.exp(-speed * dt)
-end
-
--- the one closest to the crosshair among those inside the circle; each has ex, ey: pixels from the crosshair to it
-function aim_math.nearest(candidates, radius)
-    local best = nil
-    local bestDistance = radius * radius
-
-    for _, candidate in candidates do
-        local distance = candidate.ex * candidate.ex + candidate.ey * candidate.ey
-        if distance <= bestDistance then
-            best = candidate
-            bestDistance = distance
-        end
-    end
-
-    return best
-end
-
-function aim_math.newController()
-    return {
-        gain = 1,           -- counts of the mouse for a pixel of the screen, as far as it is known
-        carryX = 0,         -- what was cut off when the last step was made whole
-        carryY = 0,
-        lastErrorX = nil,   -- where the point was a frame ago, and what was sent then
-        lastErrorY = nil,
-        lastMoveX = 0,
-        lastMoveY = 0,
-    }
-end
-
--- before another target: what was learnt about the game stays, what was known about the old target goes
-function aim_math.reset(controller)
-    controller.carryX = 0
-    controller.carryY = 0
-    controller.lastErrorX = nil
-    controller.lastErrorY = nil
-    controller.lastMoveX = 0
-    controller.lastMoveY = 0
-end
-
--- one frame: the point is ex, ey pixels from the crosshair; gives the whole counts to send to the mouse
-function aim_math.step(controller, ex, ey, speed, dt)
-    if not (num.finite(ex) and num.finite(ey)) then
-        aim_math.reset(controller)
-        return 0, 0
-    end
-
-    -- what did the last step do: the point came shiftX, shiftY pixels closer for the counts that were sent
-    if controller.lastErrorX ~= nil then
-        local sentX, sentY = controller.lastMoveX, controller.lastMoveY
-        local sent = sentX * sentX + sentY * sentY
-
-        if sent >= learn_from * learn_from then
-            local shiftX = controller.lastErrorX - ex
-            local shiftY = controller.lastErrorY - ey
-            -- pixels a count, along the way the mouse was sent
-            local perCount = (shiftX * sentX + shiftY * sentY) / sent
-
-            -- a point that got further away although the mouse went after it is running faster than the aim: nothing
-            -- to learn from that
-            if perCount > 0 then
-                local seen = math.clamp(1 / perCount, min_gain, max_gain)
-                controller.gain = controller.gain * (seen / controller.gain) ^ learn_rate
-            end
-        end
-    end
-
-    if ex * ex + ey * ey < on_point * on_point then
-        controller.carryX = 0
-        controller.carryY = 0
-        controller.lastErrorX = ex
-        controller.lastErrorY = ey
-        controller.lastMoveX = 0
-        controller.lastMoveY = 0
-        return 0, 0
-    end
-
-    local share = aim_math.share(speed, dt)
-    local wantX = ex * share * controller.gain + controller.carryX
-    local wantY = ey * share * controller.gain + controller.carryY
-
-    local length = math.sqrt(wantX * wantX + wantY * wantY)
-    if length > aim_math.max_step then
-        wantX = wantX * aim_math.max_step / length
-        wantY = wantY * aim_math.max_step / length
-    end
-
-    -- the mouse takes whole counts; the rest is kept for the next frame, or a slow aim would never move
-    local moveX = math.round(wantX)
-    local moveY = math.round(wantY)
-    controller.carryX = wantX - moveX
-    controller.carryY = wantY - moveY
-
-    controller.lastErrorX = ex
-    controller.lastErrorY = ey
-    controller.lastMoveX = moveX
-    controller.lastMoveY = moveY
-
-    return moveX, moveY
-end
-
-return aim_math
 end
 
 __modules["autofarm"] = function(require)
@@ -1177,6 +1177,8 @@ function draw.new(env)
     local black = Color3.new(0, 0, 0)
 
     local self = { font_size = font_size, line_height = line_height }
+    local visible = true
+    function self.setVisible(value) visible = value == true end
 
     -- DrawingImmediate cannot measure text; a text object that is never shown can
     local ruler = env.Drawing.new("Text")
@@ -1240,6 +1242,13 @@ function draw.new(env)
     function self.textCentered(x, y, r, g, b, text, opacity)
         opacity = opacity or 1
         immediate.OutlinedText(Vector2.new(x, y), font, font_size, Color3.fromRGB(r, g, b), opacity, black, opacity, text, true)
+    end
+
+    for _, name in { "rect", "filledRect", "dot", "circle", "line", "text", "textCentered" } do
+        local paint = self[name]
+        self[name] = function(...)
+            if visible then paint(...) end
+        end
     end
 
     function self.destroy()
@@ -3138,6 +3147,235 @@ end
 return hud
 end
 
+__modules["i18n"] = function(require)
+-- Canonical source strings stay stable in configs. Only their presentation is translated.
+local i18n = {}
+local rows = {
+    { "Visuals", "Визуалы", "Visuals" }, { "Aim", "Наведение", "Aim" },
+    { "Hitboxes", "Хитбоксы", "Hitboxes" }, { "Settings", "Настройки", "Settings" },
+    { "Player", "Персонаж", "Player" }, { "AutoFarm", "Автофарм", "Auto farm" },
+    { "Teleport", "Телепорт", "Teleport" }, { "Steal", "Сбор яиц", "Egg collection" },
+    { "Search", "Поиск настроек", "Search settings" },
+    { "Search...", "Поиск...", "Search..." },
+    { "Overwrite config", "Сохранить изменения", "Save changes" },
+    { "Overwrite", "Перезаписать", "Overwrite" }, { "Load", "Загрузить", "Load" },
+    { "Delete", "Удалить", "Delete" }, { "Reset", "Сбросить", "Reset" },
+    { "Config already exists", "Профиль уже существует", "Profile already exists" },
+    { "Reset autoload", "Сбросить автозагрузку", "Reset autoload" },
+    { "Reset autoload config", "Сбросить автозагрузку профиля", "Reset profile autoload" },
+    { "Config JSON", "JSON профиля", "Profile JSON" },
+    { "Import config", "Импортировать профиль", "Import profile" },
+    { "Import", "Импортировать", "Import" },
+    { "Export current config", "Экспортировать профиль", "Export profile" },
+    { "Copied config to your clipboard", "Профиль скопирован в буфер обмена", "Profile copied to clipboard" },
+    { "Configuration name cannot be empty.", "Введи название профиля.", "Enter a profile name." },
+    { "Invalid config name provided.", "Недопустимое название профиля.", "Invalid profile name." },
+    { "Please select a config first.", "Сначала выбери профиль.", "Select a profile first." },
+    { "Configuration JSON cannot be empty", "Вставь JSON профиля.", "Paste the profile JSON." },
+    { "Successfully imported config", "Профиль импортирован", "Profile imported" },
+    { "Successfully reset autoload config.", "Автозагрузка отключена.", "Autoload disabled." },
+    { "Are you sure you want to clear the autoload config? No config will be loaded automatically on next launch.", "Отключить автоматическую загрузку профиля при запуске?", "Disable automatic profile loading on startup?" },
+    { "Are you sure you want to import this configuration? Your current settings will be overwritten.", "Импортировать профиль и заменить текущие настройки?", "Import this profile and replace current settings?" },
+    { "Configuration", "Конфигурации", "Configurations" },
+    { "Theme", "Оформление", "Appearance" }, { "Themes", "Темы", "Themes" },
+    { "Config name", "Название профиля", "Profile name" },
+    { "Create config", "Создать профиль", "Create profile" },
+    { "Config list", "Профили", "Profiles" }, { "Load config", "Загрузить", "Load" },
+    { "Save config", "Сохранить", "Save" }, { "Delete config", "Удалить профиль", "Delete profile" },
+    { "Refresh list", "Обновить список", "Refresh list" },
+    { "Set as autoload", "Загружать при запуске", "Load on startup" },
+    { "Delete autoload", "Отключить автозагрузку", "Disable autoload" },
+    { "Cancel", "Отмена", "Cancel" }, { "Confirm", "Подтвердить", "Confirm" },
+    { "None", "Нет", "None" }, { "Always", "Всегда", "Always" },
+    { "Hold", "Удерживать", "Hold" }, { "Toggle", "Переключать", "Toggle" },
+    { "Enabled", "Включено", "Enabled" },
+}
+local pairs = {
+    ["Какую брать"] = "Point priority", ["Сквозь простреливаемые стены"] = "Through penetrable walls",
+    ["Боссы"] = "Bosses", ["Другие"] = "Other", ["Fast Travel"] = "Fast Travel",
+    ["Интерфейс"] = "Interface", ["Применяется сразу"] = "Applies immediately",
+    ["Акцент"] = "Accent", ["Сиреневый"] = "Lilac", ["Голубой"] = "Blue", ["Шалфей"] = "Sage", ["Розовый"] = "Rose",
+    ["Масштаб интерфейса"] = "Interface scale", ["Скрывать оверлей при открытом меню"] = "Hide overlay while menu is open",
+    ["Сохранить настройки интерфейса не удалось."] = "Could not save interface preferences.",
+    ["Язык, оформление и конфигурации"] = "Language, appearance and profiles",
+    ["Игроки, предметы и игровые метки"] = "Players, items and game overlays",
+    ["Выбор цели и управление прицелом"] = "Target selection and aim controls",
+    ["Части тела и точки наведения"] = "Body parts and target points",
+    ["Перемещение персонажа"] = "Character movement", ["Автоматический сбор предметов"] = "Automatic item collection",
+    ["Диалоги и взаимодействия"] = "Dialogues and interactions", ["Зоны и доставка яиц"] = "Areas and egg delivery",
+    ["Быстрое перемещение"] = "Quick travel",
+    ["Включено"] = "Enabled", ["Включить"] = "Enable", ["Рамка"] = "Box", ["Ник"] = "Name",
+    ["Дистанция"] = "Distance", ["Полоска HP"] = "Health bar", ["Цвет рамки"] = "Box color",
+    ["Цвет полного HP"] = "Full health color", ["Цвет пустого HP"] = "Empty health color",
+    ["Неуязвимость"] = "Invulnerability", ["Не отображать неуязвимых"] = "Hide invulnerable players",
+    ["Проверка команды"] = "Team check", ["Цвет текста"] = "Text color", ["Дальность"] = "Range",
+    ["Цвет заливки"] = "Fill color", ["Прозрачность заливки"] = "Fill transparency",
+    ["Цвет контура"] = "Outline color", ["Прозрачность контура"] = "Outline transparency",
+    ["Сквозь стены"] = "Through walls", ["Игроки"] = "Players", ["Предметы"] = "Items",
+    ["Статусы"] = "Statuses", ["Стенд"] = "Stand", ["Спек"] = "Fighting style", ["Пинг"] = "Ping",
+    ["Оружие в руках"] = "Held weapon", ["Спрятанные: последнее место"] = "Last known position",
+    ["Звуки: шаги тех, кого не видно"] = "Unseen footsteps", ["Гранаты: путь и место падения"] = "Grenade trajectories",
+    ["Гранаты: куда полетит своя"] = "Throw preview", ["Дым и огонь: радиус и время"] = "Smoke and fire: area and timer",
+    ["Кто за мной наблюдает"] = "Spectators", ["Прострел стены у прицела"] = "Wall penetration",
+    ["ESP оружия"] = "Weapon ESP", ["ESP предметов"] = "Item ESP", ["Абилки E/R"] = "E/R abilities",
+    ["Цвет меток"] = "Label color", ["Отображать"] = "Show", ["Собирать"] = "Collect",
+    ["Ходить, пока нет цели"] = "Roam while idle", ["Скорость глайдера"] = "Glide speed",
+    ["Наведение"] = "Aim", ["Основное"] = "General", ["Отображение"] = "Display", ["Аим"] = "Aim",
+    ["Игнорировать блокировки (Town)"] = "Ignore action limits (Town)", ["Круг"] = "Radius",
+    ["Радиус"] = "Radius", ["Полный экран"] = "Full screen", ["Скорость"] = "Speed",
+    ["Показывать круг"] = "Show FOV circle", ["Точка наведения"] = "Aim point", ["Цели"] = "Target",
+    ["Сначала"] = "Priority", ["Ближнего"] = "Closest to crosshair", ["Слабого"] = "Lowest health",
+    ["Только видимые"] = "Visible only", ["Не трогать неуязвимых"] = "Skip invulnerable",
+    ["Автовыстрел"] = "Auto fire", ["Только с клавишей аима"] = "Only with aim key",
+    ["Через простреливаемую стену"] = "Through penetrable walls", ["Автостоп"] = "Auto stop",
+    ["Выкл"] = "Off", ["Обычный"] = "On target", ["Ранний"] = "Early", ["Интервал"] = "Interval",
+    ["Шанс попадания"] = "Hit chance", ["Оружие"] = "Weapon", ["Без разброса"] = "No spread",
+    ["Части тела"] = "Body parts", ["Голова"] = "Head", ["Грудь"] = "Chest", ["Живот"] = "Stomach",
+    ["Руки"] = "Arms", ["Ноги"] = "Legs", ["Выбор точки"] = "Point selection",
+    ["По списку"] = "By priority", ["Ближнюю"] = "Closest", ["Мультипоинты"] = "Multipoint",
+    ["До края"] = "Point radius", ["Авто-кража"] = "Auto collection", ["Зоны"] = "Areas",
+    ["Автоопределять базу"] = "Detect own plot", ["Моя база (ручной)"] = "Own plot (manual)",
+    ["Режим перемещения"] = "Movement mode", ["TP Up высота"] = "Teleport ascent height",
+    ["TP Up задержка"] = "Ascent delay", ["TP задержка"] = "Travel delay", ["TP Down задержка"] = "Descent delay",
+    ["Drop задержка"] = "Drop delay", ["WalkSpeed (Walk mode)"] = "Walking speed",
+    ["Скорость глайдера (Glide mode)"] = "Glide speed", ["Z-detour (обход guard-зон)"] = "Avoid guard areas",
+    ["Z коридора обхода"] = "Detour corridor Z", ["Базы"] = "Plots", ["Бхоп"] = "Bunny hop",
+    ["Полёт"] = "Fly", ["Свет"] = "Lighting", ["Прицел"] = "Crosshair", ["Цвет"] = "Color",
+    ["Длина плеча"] = "Arm length", ["Отступ от центра"] = "Center gap", ["Точка в центре"] = "Center dot",
+    ["Ватермарка (FPS/ping)"] = "Watermark (FPS/ping)", ["Индикатор перезарядки (MVS)"] = "Reload indicator (MVS)",
+    ["Hotkeys HUD"] = "Hotkeys HUD", ["Hit logs (Town)"] = "Hit logs (Town)", ["Меню"] = "Menu",
+    ["Режим"] = "Game mode", ["Авто"] = "Auto", ["Клавиша меню"] = "Menu key", ["Выгрузить"] = "Unload",
+    ["Выгрузка: клавиша End или кнопка ниже"] = "Unload with End or the button below",
+    ["Рокаки"] = "Rokakaka", ["Стрелы"] = "Arrows", ["Монеты"] = "Coins", ["Алмазы"] = "Diamonds",
+    ["Маски"] = "Masks", ["Части святого"] = "Saint's corpse parts", ["Ивентовые"] = "Event items",
+    ["Остальные предметы"] = "Other items", ["Не из каталога"] = "Not in catalog",
+    ["Сюжет"] = "Story", ["Тренеры"] = "Trainers", ["Магазины"] = "Shops", ["Прочее"] = "Other",
+    [" ст/с"] = " st/s", [" мс"] = " ms", [" ст"] = " st",
+}
+local catalog = {}
+for source, english in pairs do
+    local entry = { ru = source, en = english }
+    catalog[source] = entry
+    if catalog[english] == nil then catalog[english] = entry end
+end
+for _, row in rows do
+    local entry = { ru = row[2], en = row[3] }
+    catalog[row[1]] = entry
+    if catalog[row[2]] == nil then catalog[row[2]] = entry end
+    -- Do not reverse-map generic English words onto a different source context.
+    if catalog[row[3]] == nil then catalog[row[3]] = entry end
+end
+
+local help = {
+    { "Бхоп: переключатель", "Бхоп: переключатель прыжка не найден.", "Bunny hop: jump control not found." },
+    { "Бхоп: игра не слушается", "Бхоп недоступен: игра не принимает управление прыжком.", "Bunny hop unavailable: the game does not accept jump input." },
+    { "Бхоп: движение", "Бхоп: зайди в матч и включи его снова.", "Bunny hop: enter a match and enable it again." },
+    { "Автостоп: управление", "Автостоп: управление движением не найдено.", "Auto stop: movement control not found." },
+    { "Автостоп: движение", "Автостоп: зайди в матч и выбери режим снова.", "Auto stop: enter a match and select the mode again." },
+    { "Автостоп: персонаж", "Автостоп: персонаж не найден. Зайди в матч.", "Auto stop: character not found. Enter a match." },
+    { "Ошибка аима,", "Наведение остановлено из-за ошибки. Подробности в консоли. Выключи и включи его снова.", "Aim stopped after an error. See the console, then toggle it off and on to retry." },
+    { "Ошибка автовыстрела,", "Автовыстрел остановлен из-за ошибки. Подробности в консоли. Включи его снова.", "Auto fire stopped after an error. See the console, then enable it again." },
+    { "Ошибка автофарма,", "Автофарм остановлен из-за ошибки. Подробности в консоли. Включи его снова.", "Auto farm stopped after an error. See the console, then enable it again." },
+    { "Ошибка бхопа,", "Бхоп остановлен из-за ошибки. Подробности в консоли. Включи его снова.", "Bunny hop stopped after an error. See the console, then enable it again." },
+    { "Ошибка автостопа,", "Автостоп остановлен из-за ошибки. Подробности в консоли. Выбери режим снова.", "Auto stop stopped after an error. See the console, then select its mode again." },
+    { "Ошибка отрисовки,", "Отрисовка остановлена из-за ошибки. Подробности в консоли. Включи визуалы снова.", "Drawing stopped after an error. See the console, then enable visuals again." },
+    { "Нет папки Workspace.Dialogues", "Диалоги NPC не найдены. Этот раздел предназначен для YBA.", "NPC dialogues not found. This section is for YBA." },
+    { "executor не предоставляет", "Executor не поддерживает взаимодействие с NPC.", "The executor does not support NPC interaction." },
+    { "Нативный Highlight", "Подсветка модели и контура. Можно показывать сквозь стены.", "Highlight player models and outlines, optionally through walls." },
+    { "Показывает Tool в руках чужих +", "Оружие, патроны и перезарядка других игроков.", "Other players' weapons, ammo and reload state." },
+    { "Показывает Tool в руках чужих.", "Предмет в руках, патроны и доступные способности.", "Held items, ammo and available abilities." },
+    { "«Не из каталога»", "Неизвестные предметы, магазины и квестовые метки.", "Unknown items, shops and quest markers." },
+    { "Персонаж идёт глайдером", "Собирает ближайшие предметы. В режиме поиска перемещается по окрестностям.", "Collects nearby items and roams the area while idle." },
+    { "Silent Aim: при выстреле", "Направляет выстрел в выбранную цель. Для отключения движения мыши выключи наведение.", "Directs shots at the selected target. Disable aim assistance to keep the mouse still." },
+    { "Silent Aim: клик ЛКМ отправляет выстрел в", "Использует настройки цели и видимости. Движение мыши включается отдельно.", "Uses target and visibility settings. Mouse assistance is controlled separately." },
+    { "Silent Aim: клик ЛКМ отправляет выстрел по", "Только видимые цели и пистолет. Автовыстрел включается отдельно.", "Visible targets and the pistol only. Auto fire is enabled separately." },
+    { "Своих пропускает", "Проверка команды находится на вкладке «Визуалы».", "Team check is on the Visuals tab." },
+    { "Автостоп: выстрел ждёт", "Обычный: остановка на цели. Ранний: остановка при входе цели в круг.", "On target: stop when aiming at an enemy. Early: stop when an enemy enters the FOV." },
+    { "Темп — как у оружия", "Учитывает темп оружия и разброс. Шанс попадания: 0 отключает проверку.", "Uses weapon timing and spread. Set hit chance to 0 to skip the check." },
+    { "Кликает ЛКМ сам", "Стреляет, когда прицел на выбранной части тела противника.", "Fires when the crosshair is over a selected enemy body part." },
+    { "Blox Strike. Угол отклонения", "Убирает разброс выстрела. Доступно в Blox Strike.", "Removes shot spread. Available in Blox Strike." },
+    { "Ничего не выбрано:", "Выбери хотя бы одну часть тела.", "Select at least one body part." },
+    { "«По списку»: части тела", "По списку: первая доступная часть тела. Ближнюю: ближайшая к прицелу точка.", "By priority: first available body part. Closest: point nearest the crosshair." },
+    { "Кроме центра части тела", "Проверяет края части тела, если центр закрыт препятствием.", "Checks body edges when the center is behind cover." },
+    { "Z-detour: все 13", "Прокладывает путь в обход промежуточных зон со стражами.", "Routes around intermediate guard areas." },
+    { "TP — 3 фазы", "TP: телепорт с паузами. Walk: пешком. Glide: прямой полёт.", "TP: teleport in stages. Walk: move on foot. Glide: fly directly." },
+    { "Глайдер летит в точку", "Перемещение к выбранной точке со скоростью автофарма.", "Travel to the selected point at the auto farm speed." },
+    { "Держи пробел:", "Удерживай пробел для прыжка сразу после приземления.", "Hold Space to jump immediately on landing." },
+    { "WASD + Пробел", "WASD — направление, пробел — вверх, левый Shift — вниз. ПКМ по переключателю — назначить клавишу.", "WASD to move, Space to ascend, left Shift to descend. Right-click the toggle to bind a key." },
+    { "Проходишь сквозь стены", "Позволяет проходить сквозь стены. Выключение возвращает столкновения.", "Walk through walls. Disabling restores collisions." },
+    { "Ставит ClockTime", "Постоянное дневное освещение. Выключение возвращает прежнее время.", "Keep daylight enabled. Disabling restores the original time." },
+    { "Рисует крестик", "Показывает прицел по центру экрана от первого лица.", "Show a centered crosshair in first person." },
+    { "Ватермарка —", "FPS и пинг, активные клавиши и игровые уведомления.", "FPS and ping, active keybinds and game notifications." },
+}
+for _, row in help do
+    local entry = { ru = row[2], en = row[3] }
+    catalog[row[2]], catalog[row[3]] = entry, entry
+end
+
+local configPatterns = {
+    { "^Successfully created config (.+)$", "Профиль %s создан" },
+    { "^Successfully loaded config (.+)$", "Профиль %s загружен" },
+    { "^Successfully overwrote config (.+)$", "Профиль %s сохранён" },
+    { "^Successfully deleted config (.+)$", "Профиль %s удалён" },
+    { "^Successfully set autoload config to (.+)$", "Автозагрузка: %s" },
+    { "^Current autoload config: (.+)$", "Автозагрузка: %s" },
+    { "^Are you sure you want to load (.+)%? Your current settings will be overwritten%.$", "Загрузить %s и заменить текущие настройки?" },
+    { "^Are you sure you want to overwrite (.+) with your current settings%? This cannot be undone%.$", "Заменить профиль %s текущими настройками? Это действие нельзя отменить." },
+    { "^Are you sure you want to delete (.+)%? This cannot be undone%.$", "Удалить профиль %s? Это действие нельзя отменить." },
+    { "^A config named (.+) already exists%. Overwriting will replace it with your current settings%.$", "Профиль %s уже существует. Заменить его текущими настройками?" },
+    { "^Failed to create config (.+)$", "Не удалось создать профиль %s" },
+    { "^Failed to load config (.+)$", "Не удалось загрузить профиль %s" },
+    { "^Failed to overwrite config (.+)$", "Не удалось сохранить профиль %s" },
+    { "^Failed to delete config (.+)$", "Не удалось удалить профиль %s" },
+    { "^Failed to set autoload config (.+)$", "Не удалось включить автозагрузку %s" },
+    { "^Failed to load autoload config: (.+)$", "Не удалось загрузить стартовый профиль: %s" },
+    { "^Failed to reset autoload config: (.+)$", "Не удалось сбросить автозагрузку: %s" },
+    { "^Failed to import config: (.+)$", "Не удалось импортировать профиль: %s" },
+    { "^Failed to load config list: (.+)$", "Не удалось получить список профилей: %s" },
+}
+
+function i18n.new(language)
+    local self = { language = if language == "en" then "en" else "ru", bindings = {}, listeners = {} }
+    function self:text(source)
+        if type(source) ~= "string" then return source end
+        local entry = catalog[source]
+        if entry then return entry[self.language] end
+        for _, row in help do
+            if source:sub(1, #row[1]) == row[1] then return if self.language == "en" then row[3] else row[2] end
+        end
+        if self.language == "en" then
+            local a, b = string.match(source, "^Предметов: (%d+), показано: (%d+)$")
+            if a then return "Items: " .. a .. ", shown: " .. b end
+            local n = string.match(source, "^Подобрано: (%d+)$")
+            if n then return "Collected: " .. n end
+            return (source:gsub(" %(авто%)", " (auto)"))
+        end
+        local name = string.match(source, "^Current autoload config: (.*)$")
+        if name then return "Автозагрузка: " .. name end
+        for _, row in configPatterns do
+            local value = string.match(source, row[1])
+            if value then return string.format(row[2], value) end
+        end
+        return source
+    end
+    function self:bind(source, setter)
+        local binding = { source = source, setter = setter }
+        table.insert(self.bindings, binding)
+        setter(self:text(source))
+        return binding
+    end
+    function self:onChanged(callback) table.insert(self.listeners, callback) end
+    function self:set(value)
+        self.language = if value == "en" then "en" else "ru"
+        for _, binding in self.bindings do binding.setter(self:text(binding.source)) end
+        for _, callback in self.listeners do callback() end
+    end
+    return self
+end
+
+return i18n
+end
+
 __modules["item_asylum"] = function(require)
 -- Item Asylum mode: pure read helpers. Враг = любой другой игрок (FFA, нет команд).
 -- Факты игры из tools/itemasylum_probe.lua:
@@ -3793,10 +4031,11 @@ local strike_net = require("./strike_net")
 local throw = require("./throw")
 local trigger = require("./trigger")
 local weapon = require("./weapon")
+local ui_preferences = require("./ui_preferences")
 
 local main = {}
 
-main.version = "1.29"
+main.version = "1.30"
 
 local sound_packet = "ReplicatedStorage.NetworkRemotes.Sound.ReplicateSound"    -- through which Blox Strike tells about sounds
 -- and about its grenades: a throw, every bounce, the end
@@ -3868,6 +4107,16 @@ function main.start(env)
 
     -- as the mode the game is told to be starts; a config the menu loads later may set anything otherwise
     local settings = settingsModule.defaults(modes.detect(universeId))
+    local interfaceIO = {
+        read = function() return env.readfile("Calcite/ui.json") end,
+        write = function(value)
+            if not env.isfolder("Calcite") then env.makefolder("Calcite") end
+            env.writefile("Calcite/ui.json", value)
+        end,
+        encode = function(value) return HttpService:JSONEncode(value) end,
+        decode = function(value) return HttpService:JSONDecode(value) end,
+    }
+    settings.interface = ui_preferences.load(interfaceIO)
 
     -- what the script is doing, written to workspace\Calcite\diag.txt while the user has asked for it, see diag.lua
     local D = diag.new({
@@ -4712,6 +4961,13 @@ function main.start(env)
         settings = settings,
         universeId = universeId,
         version = main.version,
+        env = env,
+        username = localPlayer.Name,
+        userId = localPlayer.UserId,
+        onInterfaceChanged = function(preferences)
+            local ok, problem = ui_preferences.save(interfaceIO, preferences)
+            if not ok then warn("Calcite: could not save interface preferences: " .. tostring(problem)) end
+        end,
         onUnload = unload,
         onLibraryUnload = function()
             libraryGone = true
@@ -6124,6 +6380,8 @@ function main.start(env)
         -- what the mode does not have is off here, whatever its switch says
         local mode = modes.resolve(settings.modeChoice, universeId)
         local s = settingsModule.inEffect(settings, mode)
+        local overlayHidden = settings.interface.hideOverlay and ui.menuOpen()
+        d.setVisible(not overlayHidden)
         current = s
         frameNumber += 1
         -- whether the characters are the ones the game builds by itself, and not the stock ones of the players
@@ -6273,7 +6531,7 @@ function main.start(env)
         -- Если targets не собирались (needTargets false), пропускаем, иначе chammer:step cleanup'нёт
         -- все Highlight'ы кадра зря
         if chammer ~= nil and needTargets then
-            chammer:step(targets, s)
+            if overlayHidden then chammer:cleanup() else chammer:step(targets, s) end
         end
 
         if D.on then
@@ -6433,8 +6691,8 @@ function main.start(env)
         -- HUD overlays: watermark (всегда), reload bar (MVS), hotkeys панель
         if s.watermark ~= nil then
             local dt = 1 / 60
-            hud.step(dt, now, s.watermark.enabled == true, s.reloadBar and s.reloadBar.enabled == true)
-            if s.hotkeys and s.hotkeys.enabled then
+            hud.step(dt, now, not overlayHidden and s.watermark.enabled == true, not overlayHidden and s.reloadBar and s.reloadBar.enabled == true)
+            if not overlayHidden and s.hotkeys and s.hotkeys.enabled then
                 hud.setHotkeys(ui.hotkeys(s), true)
             else
                 hud.setHotkeys(nil, false)
@@ -6628,6 +6886,10 @@ local modes = require("./modes")
 local status = require("./status")
 local steal_egg_data = require("./steal_egg_data")
 local yba_npcs = require("./yba_npcs")
+local i18n = require("./i18n")
+local ui_localize = require("./ui_localize")
+local ui_style = require("./ui_style")
+local ui_preferences = require("./ui_preferences")
 
 local menu = {}
 
@@ -6644,13 +6906,16 @@ local orderLabels = { "Ближнего", "Слабого" }
 local pointLabels = { "По списку", "Ближнюю" }
 
 -- the list of the modes as the user reads it
-local choiceLabels = { "Авто", "Universal", "YBA", "Blox Strike", "Steal an Egg", "Town", "MVS", "Item Asylum" }
-local choiceOf = { ["Авто"] = "Auto", ["Universal"] = "Universal", ["YBA"] = "Yba", ["Blox Strike"] = "Strike", ["Steal an Egg"] = "StealEgg", ["Town"] = "Town", ["MVS"] = "Mvs", ["Item Asylum"] = "ItemAsylum" }
+local choiceLabels = { "Авто", "Universal", "YBA", "Blox Strike", "Steal an Egg", "Town", "MVS", "Item Asylum", "Rivals" }
+local choiceOf = { ["Авто"] = "Auto", ["Universal"] = "Universal", ["YBA"] = "Yba", ["Blox Strike"] = "Strike", ["Steal an Egg"] = "StealEgg", ["Town"] = "Town", ["MVS"] = "Mvs", ["Item Asylum"] = "ItemAsylum", ["Rivals"] = "Rivals" }
 
 function menu.create(deps)
     local Library = deps.Library
     local Color3 = deps.Color3
     local settings = deps.settings
+    settings.interface = ui_preferences.normalize(settings.interface)
+    local translator = i18n.new(settings.interface.language)
+    ui_localize.attach(Library, translator)
     local itemSettings = settings.items
     local Options = Library.Options
     local Toggles = Library.Toggles
@@ -6692,23 +6957,53 @@ function menu.create(deps)
         return element
     end
 
-    local Window = Library:CreateWindow({
-        Title = "Calcite",
-        Footer = "",
-        NotifySide = "Right",
-        ShowCustomCursor = false,
-    })
+    local Window = Library:CreateWindow(ui_style.configure(deps))
 
     -- the auto farm, the user's own character, then what is drawn, the aim, and the menu itself
-    local farmTab = Window:AddTab("AutoFarm", "bot")
-    local playerTab = Window:AddTab("Player", "user")
-    local visualsTab = Window:AddTab("Visuals", "eye")
-    local aimTab = Window:AddTab("Aim", "crosshair")
-    local hitboxTab = Window:AddTab("Hitboxes", "scan")
-    local npcTab = Window:AddTab("NPC", "message-circle")
-    local stealTab = Window:AddTab("Steal", "egg")
-    local teleportTab = Window:AddTab("Teleport", "map-pin")
-    local settingsTab = Window:AddTab("Settings", "settings")
+    local visualsTab = Window:AddTab("Visuals", "eye", "Игроки, предметы и игровые метки")
+    local aimTab = Window:AddTab("Aim", "crosshair", "Выбор цели и управление прицелом")
+    local hitboxTab = Window:AddTab("Hitboxes", "scan", "Части тела и точки наведения")
+    local playerTab = Window:AddTab("Player", "user", "Перемещение персонажа")
+    local farmTab = Window:AddTab("AutoFarm", "bot", "Автоматический сбор предметов")
+    local npcTab = Window:AddTab("NPC", "message-circle", "Диалоги и взаимодействия")
+    local stealTab = Window:AddTab("Steal", "egg", "Зоны и доставка яиц")
+    local teleportTab = Window:AddTab("Teleport", "map-pin", "Быстрое перемещение")
+    local settingsTab = Window:AddTab("Settings", "settings", "Язык, оформление и конфигурации")
+
+    local presentation
+    local function saveInterface()
+        if deps.onInterfaceChanged then deps.onInterfaceChanged(settings.interface) end
+    end
+    local interfaceGroup = settingsTab:AddLeftGroupbox("Интерфейс")
+    interfaceGroup:AddDropdown("InterfaceLanguage", {
+        Text = "Язык / Language", Values = { "Русский", "English" },
+        Default = if settings.interface.language == "en" then 2 else 1,
+    })
+    interfaceGroup:AddLabel("Применяется сразу", true)
+    local accentNames = { "Сиреневый", "Голубой", "Шалфей", "Розовый" }
+    local accentIds = { "Lilac", "Blue", "Sage", "Rose" }
+    interfaceGroup:AddDropdown("InterfaceAccent", {
+        Text = "Акцент", Values = accentNames, Default = table.find(accentIds, settings.interface.accent) or 1,
+    })
+    Options.InterfaceAccent:OnChanged(function()
+        settings.interface.accent = accentIds[table.find(accentNames, Options.InterfaceAccent.Value) or 1]
+        if presentation then presentation:setAccent(settings.interface.accent) end
+        saveInterface()
+    end)
+    interfaceGroup:AddDropdown("InterfaceScale", {
+        Text = "Масштаб интерфейса", Values = { "80%", "90%", "100%", "110%", "120%" }, Default = tostring(settings.interface.scale) .. "%",
+    })
+    Options.InterfaceScale:OnChanged(function()
+        settings.interface.scale = tonumber(string.match(Options.InterfaceScale.Value or "", "%d+")) or 100
+        if presentation then presentation:setScale(settings.interface.scale) end
+        saveInterface()
+    end)
+    interfaceGroup:AddLabel("Клавиша меню"):AddKeyPicker("MenuKeybind", { Default = "RightShift", NoUI = true, Text = "Клавиша меню" })
+    toggle(interfaceGroup, "InterfaceHideOverlay", "Скрывать оверлей при открытом меню", settings.interface, "hideOverlay")
+    Toggles.InterfaceHideOverlay:OnChanged(function()
+        settings.interface.hideOverlay = Toggles.InterfaceHideOverlay.Value
+        saveInterface()
+    end)
 
     -- players
     local espGroup = visualsTab:AddLeftGroupbox("Игроки")
@@ -7192,7 +7487,6 @@ function menu.create(deps)
         Values = choiceLabels,
         Default = table.find(modes.choices, settings.modeChoice) or 1,
     })
-    menuGroup:AddLabel("Клавиша меню"):AddKeyPicker("MenuKeybind", { Default = "RightShift", NoUI = true, Text = "Клавиша меню" })
     menuGroup:AddLabel("Выгрузка: клавиша End или кнопка ниже")
     menuGroup:AddButton({ Text = "Выгрузить", Func = deps.onUnload, DoubleClick = true })
 
@@ -7250,12 +7544,19 @@ function menu.create(deps)
             footer = footer .. " | v" .. deps.version
         end
 
-        Window:SetFooter(footer)
+        Window:SetFooter(translator:text(footer))
     end
 
     Options.ModeChoice:OnChanged(function()
         settings.modeChoice = choiceOf[Options.ModeChoice.Value] or "Auto"
         ui.applyMode()
+    end)
+
+    Options.InterfaceLanguage:OnChanged(function()
+        settings.interface.language = if Options.InterfaceLanguage.Value == "English" then "en" else "ru"
+        translator:set(settings.interface.language)
+        ui.applyMode()
+        saveInterface()
     end)
 
     -- how many items the auto farm has taken
@@ -7311,14 +7612,14 @@ function menu.create(deps)
             return ok and v or "?"
         end
         if settings.aim.enabled then
-            table.insert(out, { id = "aim", name = "Aim", key = keyOf(Options.AimKey), active = ui.aimHeld() })
+            table.insert(out, { id = "aim", name = translator:text("Aim"), key = keyOf(Options.AimKey), active = ui.aimHeld() })
         end
         if settings.fly and settings.fly.enabled then
-            table.insert(out, { id = "fly", name = "Fly", key = keyOf(Options.FlyKey), active = ui.flyHeld() })
+            table.insert(out, { id = "fly", name = translator:text("Полёт"), key = keyOf(Options.FlyKey), active = ui.flyHeld() })
         end
         if settings.aim.autoFire then
             local needsKey = settings.aim.autoFireNeedsKey
-            table.insert(out, { id = "autofire", name = "Auto fire", key = needsKey and keyOf(Options.AimKey) or "ON", active = not needsKey or ui.aimHeld() })
+            table.insert(out, { id = "autofire", name = translator:text("Автовыстрел"), key = needsKey and keyOf(Options.AimKey) or "ON", active = not needsKey or ui.aimHeld() })
         end
         return out
     end
@@ -7343,12 +7644,15 @@ function menu.create(deps)
     deps.ThemeManager:SetLibrary(Library)
     deps.SaveManager:SetLibrary(Library)
     deps.SaveManager:IgnoreThemeSettings()
-    deps.SaveManager:SetIgnoreIndexes({ "MenuKeybind" })
+    deps.SaveManager:SetIgnoreIndexes({ "MenuKeybind", "InterfaceLanguage", "InterfaceAccent", "InterfaceScale", "InterfaceHideOverlay" })
     deps.ThemeManager:SetFolder("Calcite")
     deps.SaveManager:SetFolder("Calcite")
     deps.SaveManager:SetSubFolder(modes.detect(deps.universeId))
     deps.SaveManager:BuildConfigSection(settingsTab)
-    deps.ThemeManager:ApplyToTab(settingsTab)
+    -- Four accent presets replace the external theme editor, which otherwise
+    -- reloads its own theme over the approved Calcite palette on every startup.
+    presentation = ui_style.mount(deps, Window)
+    ui.profile = presentation.profile
 
     ui.applyMode()
 
@@ -8551,6 +8855,7 @@ local settings = {}
 function settings.defaults(mode)
     local s = {
         modeChoice = "Auto",                -- one of modes.choices
+        interface = { language = "ru", accent = "Lilac", scale = 100, hideOverlay = true },
         enabled = true,
         box = true,
         name = true,
@@ -9830,6 +10135,276 @@ end
 return Mover
 end
 
+__modules["strike_move"] = function(require)
+-- finds what the bhop needs of Blox Strike among the tables of the game; known from the code of the game itself
+-- (tools/strike_probe4.lua):
+--   the runtime of its movement (MovementV2.Client.Runtime), one for the whole session; its _state is the state of
+--   the user after the last tick: OnGround, MovementMode, PreviousButtons (the buttons of the last command);
+--   the table of Controllers.CharacterController.LocalCharacter, whose jump(pressed) is what the handler of the jump
+--   key calls when the key goes down and up;
+--   the bits of a movement command (MovementV2.Buttons), for checking that the game follows the switch;
+--   the table of Controllers.InventoryController (tools/strike_probe10.lua), for the weapon in the hands: its
+--   getCurrentEquipped breaks the module when an executor calls it, so it is never called; the loadout is what
+--   peekCurrentEquippedForMovement holds on to, and the weapon its CurrentEquipped, read raw
+-- nothing of the game is replaced: the state is read, and the switch is called the way the game calls it
+-- takes the functions of the executor as a table, so tests/strike_move_test.lua runs it without one
+local strike_move = {}
+
+local yield_every = 20000       -- tables looked at between two pauses: a game has two hundred thousand of them
+
+local function isFunction(value)
+    return type(value) == "function"
+end
+
+-- looks for all of it in a thread of its own: the frame does not wait
+-- onFound({ state = function, setJump = function or nil, setMove = function or nil, jumpDown = function or nil,
+-- weapon = function or nil }) or onMissing() is called once; weapon() gives the object of the weapon in the hands as the
+-- game keeps it (see weapon.lua), nil when nothing is; setMove(x, z) tells the character of the user to walk that way,
+-- a direction in the world,
+-- and gives back whether there was a character to tell:
+-- the same method the controls of Roblox tell it the keys with (Classes.Character:MoveFunction), reached through what
+-- the jump of the controller holds on to
+-- the state alone is worth having: the way of a grenade starts from it. Without the switch of the jump there is no
+-- bhop, and setJump is nil
+function strike_move.find(env, onFound, onMissing)
+    env.task.spawn(function()
+        local ok, objects = pcall(function()
+            return env.getgc(true)
+        end)
+
+        if not ok or type(objects) ~= "table" then
+            onMissing()
+            return
+        end
+
+        local runtime = nil
+        local controller = nil
+        local buttons = nil
+        local inventory = nil
+        local checked = 0
+
+        local function look(object)
+            if type(rawget(object, "_remotePresentations")) == "table" and type(rawget(object, "_remotePresentationPool")) == "table" then
+                -- a runtime that was stopped may still lie around; the one that runs wins
+                if runtime == nil or rawget(object, "_started") == true then
+                    runtime = object
+                end
+            elseif isFunction(rawget(object, "jump")) and isFunction(rawget(object, "crouch"))
+                and isFunction(rawget(object, "PlantBomb")) and isFunction(rawget(object, "CancelBombPlant")) then
+                controller = object
+            elseif isFunction(rawget(object, "has")) and isFunction(rawget(object, "with")) and rawget(object, "Scoped") ~= nil
+                and rawget(object, "Jump") ~= nil then
+                buttons = object
+            elseif isFunction(rawget(object, "peekCurrentEquippedForMovement")) and isFunction(rawget(object, "getCurrentEquipped")) then
+                inventory = object
+            end
+        end
+
+        for _, object in objects do
+            if type(object) == "table" then
+                checked += 1
+
+                -- a table may refuse to be read; that is not the one looked for
+                pcall(look, object)
+
+                if checked % yield_every == 0 then
+                    env.task.wait()
+                end
+            end
+        end
+
+        if runtime == nil then
+            onMissing()
+            return
+        end
+
+        local jump = if controller ~= nil then rawget(controller, "jump") else nil
+
+        -- whether the jump is down in the buttons of a command: asked of the game, which alone knows how it packs them
+        local jumpDown = nil
+        if buttons ~= nil then
+            local has = rawget(buttons, "has")
+            local bit = rawget(buttons, "Jump")
+            jumpDown = function(mask)
+                local okHas, down = pcall(has, mask, bit)
+                return okHas and down == true
+            end
+        end
+
+        -- the character of the user right now: a life is a new one, the jump of the controller holds on to the current
+        local function character()
+            local ok, values = pcall(env.getupvalues, jump)
+            if not ok or type(values) ~= "table" then
+                return nil
+            end
+
+            for _, value in values do
+                if type(value) == "table" then
+                    local okMove, move = pcall(function()
+                        return value.MoveFunction
+                    end)
+
+                    if okMove and type(move) == "function" then
+                        return value
+                    end
+                end
+            end
+
+            return nil
+        end
+
+        -- the weapon in the hands: the loadout is a new one every round, so it is read anew every time
+        local peek = if inventory ~= nil then rawget(inventory, "peekCurrentEquippedForMovement") else nil
+        local function weapon()
+            local okUp, values = pcall(env.getupvalues, peek)
+            if not okUp or type(values) ~= "table" then
+                return nil
+            end
+
+            for _, value in values do
+                if type(value) == "table" then
+                    return rawget(value, "CurrentEquipped")
+                end
+            end
+
+            return nil
+        end
+
+        onFound({
+            state = function()
+                return rawget(runtime, "_state")
+            end,
+            weapon = if peek ~= nil then weapon else nil,
+            setMove = if jump ~= nil then function(x, z)
+                local walker = character()
+                if walker == nil then
+                    return false
+                end
+
+                -- false: a direction in the world, which the game turns by the camera itself
+                walker:MoveFunction(env.Vector3.new(x, 0, z), false)
+                return true
+            end else nil,
+            setJump = if jump ~= nil then function(pressed)
+                jump(pressed)
+            end else nil,
+            jumpDown = jumpDown,
+        })
+    end)
+end
+
+return strike_move
+end
+
+__modules["strike_net"] = function(require)
+-- finds a packet of Blox Strike among the tables of the game
+-- the game talks to its server through packet objects of its own (ReplicatedStorage.Database.Security.Network);
+-- every one has Listen(callback), which hands the decoded content of what the server sent to whoever asks, and gives
+-- back a function that takes the listener away. A packet is told by the remote its functions hold on to
+-- only listening is done through it: nothing is sent and nothing of the game is replaced
+-- takes the functions of the executor as a table, so tests/strike_net_test.lua runs it without one
+local strike_net = {}
+
+local yield_every = 20000       -- tables looked at between two pauses: a game has a hundred thousand of them
+
+local function isFunction(value)
+    return type(value) == "function"
+end
+
+-- the full name of the remote a packet goes through, nil for what is not a packet
+local function remoteName(env, object)
+    local name = nil
+
+    pcall(function()
+        for _, value in env.getupvalues(object.Listen) do
+            local kind = type(value)
+            if kind == "userdata" or kind == "table" then
+                local found = nil
+                pcall(function()
+                    if value:IsA("BaseRemoteEvent") then
+                        found = value:GetFullName()
+                    end
+                end)
+
+                if found ~= nil then
+                    name = found
+                    break
+                end
+            end
+        end
+    end)
+
+    return name
+end
+
+-- looks for the packets whose remotes have those full names, all in one pass over the tables of the game, in a
+-- thread of its own: the frame does not wait for it
+-- onDone({ [name] = packet }) is called once; a packet that is not there is not in the table
+function strike_net.findMany(env, wantedNames, onDone)
+    env.task.spawn(function()
+        local found = {}
+
+        local ok, objects = pcall(function()
+            return env.getgc(true)
+        end)
+
+        if not ok or type(objects) ~= "table" then
+            onDone(found)
+            return
+        end
+
+        local wanted = {}
+        local left = 0
+        for _, name in wantedNames do
+            if not wanted[name] then
+                wanted[name] = true
+                left += 1
+            end
+        end
+
+        local checked = 0
+        for _, object in objects do
+            if left == 0 then
+                break
+            end
+
+            if type(object) == "table" then
+                checked += 1
+
+                local okGet, listen = pcall(rawget, object, "Listen")
+                if okGet and isFunction(listen) and isFunction(rawget(object, "Connect")) and isFunction(rawget(object, "SendToProximity")) then
+                    local name = remoteName(env, object)
+                    if name ~= nil and wanted[name] and found[name] == nil then
+                        found[name] = object
+                        left -= 1
+                    end
+                end
+
+                if checked % yield_every == 0 then
+                    env.task.wait()
+                end
+            end
+        end
+
+        onDone(found)
+    end)
+end
+
+-- the same for one packet: onFound(packet) or onMissing() is called once
+function strike_net.find(env, wantedName, onFound, onMissing)
+    strike_net.findMany(env, { wantedName }, function(found)
+        local packet = found[wantedName]
+        if packet ~= nil then
+            onFound(packet)
+        else
+            onMissing()
+        end
+    end)
+end
+
+return strike_net
+end
+
 __modules["strike"] = function(require)
 -- what Blox Strike tells about its characters; found out from the code of the game itself (tools/strike_probe.lua)
 -- the game builds every character on the client: a model in Workspace.Characters, named after the player, without
@@ -10137,276 +10712,6 @@ function Source:targets(out, haveLocal, localX, localY, localZ, now)
 end
 
 return strike
-end
-
-__modules["strike_move"] = function(require)
--- finds what the bhop needs of Blox Strike among the tables of the game; known from the code of the game itself
--- (tools/strike_probe4.lua):
---   the runtime of its movement (MovementV2.Client.Runtime), one for the whole session; its _state is the state of
---   the user after the last tick: OnGround, MovementMode, PreviousButtons (the buttons of the last command);
---   the table of Controllers.CharacterController.LocalCharacter, whose jump(pressed) is what the handler of the jump
---   key calls when the key goes down and up;
---   the bits of a movement command (MovementV2.Buttons), for checking that the game follows the switch;
---   the table of Controllers.InventoryController (tools/strike_probe10.lua), for the weapon in the hands: its
---   getCurrentEquipped breaks the module when an executor calls it, so it is never called; the loadout is what
---   peekCurrentEquippedForMovement holds on to, and the weapon its CurrentEquipped, read raw
--- nothing of the game is replaced: the state is read, and the switch is called the way the game calls it
--- takes the functions of the executor as a table, so tests/strike_move_test.lua runs it without one
-local strike_move = {}
-
-local yield_every = 20000       -- tables looked at between two pauses: a game has two hundred thousand of them
-
-local function isFunction(value)
-    return type(value) == "function"
-end
-
--- looks for all of it in a thread of its own: the frame does not wait
--- onFound({ state = function, setJump = function or nil, setMove = function or nil, jumpDown = function or nil,
--- weapon = function or nil }) or onMissing() is called once; weapon() gives the object of the weapon in the hands as the
--- game keeps it (see weapon.lua), nil when nothing is; setMove(x, z) tells the character of the user to walk that way,
--- a direction in the world,
--- and gives back whether there was a character to tell:
--- the same method the controls of Roblox tell it the keys with (Classes.Character:MoveFunction), reached through what
--- the jump of the controller holds on to
--- the state alone is worth having: the way of a grenade starts from it. Without the switch of the jump there is no
--- bhop, and setJump is nil
-function strike_move.find(env, onFound, onMissing)
-    env.task.spawn(function()
-        local ok, objects = pcall(function()
-            return env.getgc(true)
-        end)
-
-        if not ok or type(objects) ~= "table" then
-            onMissing()
-            return
-        end
-
-        local runtime = nil
-        local controller = nil
-        local buttons = nil
-        local inventory = nil
-        local checked = 0
-
-        local function look(object)
-            if type(rawget(object, "_remotePresentations")) == "table" and type(rawget(object, "_remotePresentationPool")) == "table" then
-                -- a runtime that was stopped may still lie around; the one that runs wins
-                if runtime == nil or rawget(object, "_started") == true then
-                    runtime = object
-                end
-            elseif isFunction(rawget(object, "jump")) and isFunction(rawget(object, "crouch"))
-                and isFunction(rawget(object, "PlantBomb")) and isFunction(rawget(object, "CancelBombPlant")) then
-                controller = object
-            elseif isFunction(rawget(object, "has")) and isFunction(rawget(object, "with")) and rawget(object, "Scoped") ~= nil
-                and rawget(object, "Jump") ~= nil then
-                buttons = object
-            elseif isFunction(rawget(object, "peekCurrentEquippedForMovement")) and isFunction(rawget(object, "getCurrentEquipped")) then
-                inventory = object
-            end
-        end
-
-        for _, object in objects do
-            if type(object) == "table" then
-                checked += 1
-
-                -- a table may refuse to be read; that is not the one looked for
-                pcall(look, object)
-
-                if checked % yield_every == 0 then
-                    env.task.wait()
-                end
-            end
-        end
-
-        if runtime == nil then
-            onMissing()
-            return
-        end
-
-        local jump = if controller ~= nil then rawget(controller, "jump") else nil
-
-        -- whether the jump is down in the buttons of a command: asked of the game, which alone knows how it packs them
-        local jumpDown = nil
-        if buttons ~= nil then
-            local has = rawget(buttons, "has")
-            local bit = rawget(buttons, "Jump")
-            jumpDown = function(mask)
-                local okHas, down = pcall(has, mask, bit)
-                return okHas and down == true
-            end
-        end
-
-        -- the character of the user right now: a life is a new one, the jump of the controller holds on to the current
-        local function character()
-            local ok, values = pcall(env.getupvalues, jump)
-            if not ok or type(values) ~= "table" then
-                return nil
-            end
-
-            for _, value in values do
-                if type(value) == "table" then
-                    local okMove, move = pcall(function()
-                        return value.MoveFunction
-                    end)
-
-                    if okMove and type(move) == "function" then
-                        return value
-                    end
-                end
-            end
-
-            return nil
-        end
-
-        -- the weapon in the hands: the loadout is a new one every round, so it is read anew every time
-        local peek = if inventory ~= nil then rawget(inventory, "peekCurrentEquippedForMovement") else nil
-        local function weapon()
-            local okUp, values = pcall(env.getupvalues, peek)
-            if not okUp or type(values) ~= "table" then
-                return nil
-            end
-
-            for _, value in values do
-                if type(value) == "table" then
-                    return rawget(value, "CurrentEquipped")
-                end
-            end
-
-            return nil
-        end
-
-        onFound({
-            state = function()
-                return rawget(runtime, "_state")
-            end,
-            weapon = if peek ~= nil then weapon else nil,
-            setMove = if jump ~= nil then function(x, z)
-                local walker = character()
-                if walker == nil then
-                    return false
-                end
-
-                -- false: a direction in the world, which the game turns by the camera itself
-                walker:MoveFunction(env.Vector3.new(x, 0, z), false)
-                return true
-            end else nil,
-            setJump = if jump ~= nil then function(pressed)
-                jump(pressed)
-            end else nil,
-            jumpDown = jumpDown,
-        })
-    end)
-end
-
-return strike_move
-end
-
-__modules["strike_net"] = function(require)
--- finds a packet of Blox Strike among the tables of the game
--- the game talks to its server through packet objects of its own (ReplicatedStorage.Database.Security.Network);
--- every one has Listen(callback), which hands the decoded content of what the server sent to whoever asks, and gives
--- back a function that takes the listener away. A packet is told by the remote its functions hold on to
--- only listening is done through it: nothing is sent and nothing of the game is replaced
--- takes the functions of the executor as a table, so tests/strike_net_test.lua runs it without one
-local strike_net = {}
-
-local yield_every = 20000       -- tables looked at between two pauses: a game has a hundred thousand of them
-
-local function isFunction(value)
-    return type(value) == "function"
-end
-
--- the full name of the remote a packet goes through, nil for what is not a packet
-local function remoteName(env, object)
-    local name = nil
-
-    pcall(function()
-        for _, value in env.getupvalues(object.Listen) do
-            local kind = type(value)
-            if kind == "userdata" or kind == "table" then
-                local found = nil
-                pcall(function()
-                    if value:IsA("BaseRemoteEvent") then
-                        found = value:GetFullName()
-                    end
-                end)
-
-                if found ~= nil then
-                    name = found
-                    break
-                end
-            end
-        end
-    end)
-
-    return name
-end
-
--- looks for the packets whose remotes have those full names, all in one pass over the tables of the game, in a
--- thread of its own: the frame does not wait for it
--- onDone({ [name] = packet }) is called once; a packet that is not there is not in the table
-function strike_net.findMany(env, wantedNames, onDone)
-    env.task.spawn(function()
-        local found = {}
-
-        local ok, objects = pcall(function()
-            return env.getgc(true)
-        end)
-
-        if not ok or type(objects) ~= "table" then
-            onDone(found)
-            return
-        end
-
-        local wanted = {}
-        local left = 0
-        for _, name in wantedNames do
-            if not wanted[name] then
-                wanted[name] = true
-                left += 1
-            end
-        end
-
-        local checked = 0
-        for _, object in objects do
-            if left == 0 then
-                break
-            end
-
-            if type(object) == "table" then
-                checked += 1
-
-                local okGet, listen = pcall(rawget, object, "Listen")
-                if okGet and isFunction(listen) and isFunction(rawget(object, "Connect")) and isFunction(rawget(object, "SendToProximity")) then
-                    local name = remoteName(env, object)
-                    if name ~= nil and wanted[name] and found[name] == nil then
-                        found[name] = object
-                        left -= 1
-                    end
-                end
-
-                if checked % yield_every == 0 then
-                    env.task.wait()
-                end
-            end
-        end
-
-        onDone(found)
-    end)
-end
-
--- the same for one packet: onFound(packet) or onMissing() is called once
-function strike_net.find(env, wantedName, onFound, onMissing)
-    strike_net.findMany(env, { wantedName }, function(found)
-        local packet = found[wantedName]
-        if packet ~= nil then
-            onFound(packet)
-        else
-            onMissing()
-        end
-    end)
-end
-
-return strike_net
 end
 
 __modules["throw"] = function(require)
@@ -11189,6 +11494,450 @@ function trigger.onTarget(targets, a, teamCheck, cast, ignored, trace)
 end
 
 return trigger
+end
+
+__modules["ui_localize"] = function(require)
+-- Adapt Obsidian's exposed API, preserving canonical IDs and dropdown values.
+local localized = {}
+
+function localized.attach(Library, t)
+    local seen = {}
+    local function textElement(element, source)
+        if not element or type(source) ~= "string" or type(element.SetText) ~= "function" then return end
+        local set = element.SetText
+        local binding = t:bind(source, function(text) set(element, text) end)
+        element.SetText = function(_, text)
+            binding.source = text
+            set(element, t:text(text))
+        end
+    end
+
+    local wrap
+    wrap = function(scope)
+        if not scope or seen[scope] then return scope end
+        seen[scope] = true
+        for _, method in { "AddLeftGroupbox", "AddRightGroupbox", "AddGroupbox" } do
+            local add = scope[method]
+            if type(add) == "function" then
+                scope[method] = function(self, name, ...)
+                    local group = add(self, name, ...)
+                    local source = if type(name) == "table" then name.Name else name
+                    if source then t:bind(source, function(text) group.Name = text end) end
+                    return wrap(group)
+                end
+            end
+        end
+        for _, method in { "AddToggle", "AddSlider", "AddDropdown", "AddInput" } do
+            local add = scope[method]
+            if type(add) == "function" then
+                scope[method] = function(self, id, info)
+                    local copy = table.clone(info)
+                    local literalValues = type(id) == "string" and id:sub(1, 12) == "SaveManager_"
+                    if method == "AddDropdown" then
+                        local function format(original, value)
+                            local rendered = tostring(if original then original(value) else value)
+                            if literalValues then
+                                return if t.language == "ru" then (rendered:gsub(" %(autoload%)$", " (автозагрузка)")) else rendered
+                            end
+                            return t:text(rendered)
+                        end
+                        copy.FormatDisplayValue = function(value) return format(info.FormatDisplayValue, value) end
+                        copy.FormatListValue = function(value) return format(info.FormatListValue, value) end
+                    end
+                    if method == "AddSlider" then
+                        copy.HideMax = true
+                        copy.AllowRightClickInput = false
+                    end
+                    local element = add(self, id, copy)
+                    if method == "AddDropdown" and literalValues and element.Holder then
+                        element.Holder:SetAttribute("CalciteValuesLiteral", true)
+                        if element.Menu then element.Menu.Menu:SetAttribute("CalciteValuesLiteral", true) end
+                        element:Display()
+                        element:BuildDropdownList()
+                    end
+                    textElement(element, info.Text)
+                    if method == "AddDropdown" then
+                        t:onChanged(function()
+                            if element.BuildDropdownList then element:BuildDropdownList() end
+                            if element.Display then element:Display() end
+                        end)
+                    elseif method == "AddSlider" and element.SetSuffix and info.Suffix then
+                        t:bind(info.Suffix, function(suffix) element:SetSuffix(suffix) end)
+                    end
+                    return wrap(element)
+                end
+            end
+        end
+        if type(scope.AddLabel) == "function" then
+            local add = scope.AddLabel
+            scope.AddLabel = function(self, text, ...)
+                local element = add(self, text, ...)
+                textElement(element, text)
+                return wrap(element)
+            end
+        end
+        if type(scope.AddButton) == "function" then
+            local add = scope.AddButton
+            scope.AddButton = function(self, info, ...)
+                local element = add(self, info, ...)
+                textElement(element, if type(info) == "table" then info.Text else info)
+                return wrap(element)
+            end
+        end
+        return scope
+    end
+
+    local create = Library.CreateWindow
+    Library.CreateWindow = function(self, info)
+        local window = create(self, info)
+        local add = window.AddTab
+        window.AddTab = function(owner, name, ...)
+            local tab = add(owner, name, ...)
+            local source = if type(name) == "table" then name.Name else name
+            t:bind(source, function(text) tab.Name = text end)
+            return wrap(tab)
+        end
+        return window
+    end
+
+    local notify = Library.Notify
+    Library.Notify = function(self, info, ...)
+        if type(info) == "table" then
+            info = table.clone(info)
+            info.Title = t:text(info.Title)
+            info.Description = t:text(info.Description)
+        else
+            info = t:text(info)
+        end
+        return notify(self, info, ...)
+    end
+
+    -- The library creates key menus, dialogs and dropdown rows lazily. Watch their
+    -- labels too, but never translate editable text or user-supplied config names.
+    local root = Library.ScreenGui
+    if root and root.GetDescendants then
+        local watched = {}
+        local function watch(object)
+            if watched[object] then return end
+            local props = {}
+            if object:IsA("TextLabel") or object:IsA("TextButton") then table.insert(props, "Text") end
+            if object:IsA("TextBox") then table.insert(props, "PlaceholderText") end
+            if #props == 0 then return end
+            local records = {}
+            watched[object] = records
+            for _, property in props do
+                local busy = false
+                local source = object[property]
+                local rendered = nil
+                local function update()
+                    if busy then return end
+                    if object:GetAttribute("CalciteLiteral") then return end
+                    if property == "Text" and object:IsA("TextButton") then
+                        local parent = object
+                        while parent and parent ~= root do
+                            if parent:GetAttribute("CalciteValuesLiteral") then return end
+                            parent = parent.Parent
+                        end
+                    end
+                    local value = object[property]
+                    if value ~= rendered then source = value end
+                    rendered = t:text(source)
+                    busy = true
+                    object[property] = rendered
+                    busy = false
+                end
+                table.insert(records, { update = update, connection = object:GetPropertyChangedSignal(property):Connect(update) })
+                update()
+            end
+        end
+        local function unwatch(object)
+            local records = watched[object]
+            if not records then return end
+            for _, record in records do record.connection:Disconnect() end
+            watched[object] = nil
+        end
+        for _, object in root:GetDescendants() do watch(object) end
+        Library:GiveSignal(root.DescendantAdded:Connect(watch))
+        Library:GiveSignal(root.DescendantRemoving:Connect(unwatch))
+        if Library.OnUnload then
+            Library:OnUnload(function()
+                for object in watched do unwatch(object) end
+            end)
+        end
+        t:onChanged(function()
+            for object, records in watched do
+                if object.Parent then
+                    for _, record in records do record.update() end
+                end
+            end
+            if Library.UpdateSearch then Library:UpdateSearch(Library.SearchText or "") end
+        end)
+    end
+end
+
+return localized
+end
+
+__modules["ui_preferences"] = function(require)
+-- Global interface preferences, deliberately separate from per-game feature configs.
+local preferences = {}
+local accents = { Lilac = true, Blue = true, Sage = true, Rose = true }
+local scales = { [80] = true, [90] = true, [100] = true, [110] = true, [120] = true }
+
+function preferences.normalize(value)
+    local s = if type(value) == "table" then value else {}
+    return {
+        language = if s.language == "en" then "en" else "ru",
+        accent = if accents[s.accent] then s.accent else "Lilac",
+        scale = if scales[s.scale] then s.scale else 100,
+        hideOverlay = if type(s.hideOverlay) == "boolean" then s.hideOverlay else true,
+    }
+end
+
+function preferences.load(io)
+    local ok, value = pcall(function() return io.decode(io.read()) end)
+    return preferences.normalize(if ok then value else nil)
+end
+
+function preferences.save(io, value)
+    local ok, problem = pcall(function() io.write(io.encode(preferences.normalize(value))) end)
+    return ok, if ok then nil else tostring(problem)
+end
+
+return preferences
+end
+
+__modules["ui_style"] = function(require)
+-- Calcite's presentation layer over the pinned Obsidian controls.
+local style = {}
+style.accents = { Lilac = { 173, 156, 245 }, Blue = { 123, 169, 208 }, Sage = { 133, 181, 146 }, Rose = { 210, 150, 170 } }
+
+function style.configure(deps)
+    local Library, env = deps.Library, deps.env
+    local info = {
+        Title = "Calcite", Footer = "", NotifySide = "Right", ShowCustomCursor = false,
+        CornerRadius = 10, EnableCompacting = false, EnableSidebarResize = false,
+        GlobalSearch = true, TabButtonsStyle = { Gap = 5, Padding = 10, CornerRadius = 6, Indicator = false },
+    }
+    if env and env.UDim2 and env.Enum and env.Enum.Font then
+        info.Size = env.UDim2.fromOffset(980, 680)
+        info.Font = env.Enum.Font.SourceSans
+        info.Icon = "gem"
+        info.IconSize = env.UDim2.fromOffset(26, 26)
+    end
+    if Library.Scheme then
+        for key, rgb in {
+            BackgroundColor = { 24, 27, 35 }, MainColor = { 34, 38, 49 },
+            OutlineColor = { 52, 57, 70 }, FontColor = { 236, 238, 245 }, DarkColor = { 17, 19, 25 },
+        } do Library.Scheme[key] = deps.Color3.fromRGB(table.unpack(rgb)) end
+        Library.Scheme.AccentColor = deps.Color3.fromRGB(table.unpack(style.accents[deps.settings.interface.accent]))
+    end
+    return info
+end
+
+function style.mount(deps, Window)
+    local Library, env = deps.Library, deps.env
+    local preferences = deps.settings.interface
+    local requestedScale = preferences.scale
+    local self = { profile = { username = deps.username or "Player", subscription = "Free" } }
+    function self:setAccent(name)
+        if not style.accents[name] then return end
+        if Library.Scheme then
+            Library.Scheme.AccentColor = deps.Color3.fromRGB(table.unpack(style.accents[name]))
+            Library:UpdateColorsUsingRegistry()
+        end
+    end
+    function self:setScale(percent)
+        requestedScale = percent
+        local actual = percent
+        local frame = Window.MainFrame
+        local camera = env and env.workspace and env.workspace.CurrentCamera
+        if frame and camera then
+            local viewport = camera.ViewportSize
+            actual = math.min(percent, (viewport.X - 48) / frame.Size.X.Offset * 100,
+                (viewport.Y - 48) / frame.Size.Y.Offset * 100)
+            actual = math.max(25, actual)
+            frame.Position = env.UDim2.new(0.5, -frame.Size.X.Offset * actual / 200,
+                0.5, -frame.Size.Y.Offset * actual / 200)
+        end
+        if Library.SetDPIScale then Library:SetDPIScale(actual) end
+    end
+    if not env or not env.Instance or not Window.MainFrame then return self end
+
+    local UDim2, UDim, Enum = env.UDim2, env.UDim, env.Enum
+    local Vector2, Color3 = env.Vector2, deps.Color3
+    local function new(class, props, parent, colors)
+        local object = env.Instance.new(class)
+        for key, value in props do object[key] = value end
+        object.Parent = parent
+        if colors then
+            Library:AddToRegistry(object, colors)
+            for property, key in colors do object[property] = Library.Scheme[key] end
+        end
+        return object
+    end
+    local function round(parent, radius)
+        return new("UICorner", { CornerRadius = UDim.new(0, radius) }, parent)
+    end
+    local function text(parent, value, x, y, width, size, muted)
+        return new("TextLabel", {
+            BackgroundTransparency = 1, Position = UDim2.fromOffset(x, y), Size = UDim2.new(1, -width, 0, size + 6),
+            Font = Enum.Font.SourceSans, Text = value, TextSize = size, TextTransparency = muted and 0.35 or 0,
+            TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 6,
+        }, parent, { TextColor3 = "FontColor" })
+    end
+
+    local main = Window.MainFrame
+    Window:SetSidebarWidth(196)
+    local topbar
+    for _, child in main:GetChildren() do
+        if child:IsA("Frame") and child.Size and child.Size.Y.Offset == 48 then
+            topbar = child
+            child.Size = UDim2.new(1, 0, 0, 72)
+        elseif child:IsA("Frame") and child.Position and child.Position.Y.Offset == 48 then
+            child.Position = UDim2.fromOffset(0, 72)
+        end
+    end
+    local container = main:FindFirstChild("Container")
+    if container then
+        container.Position = UDim2.new(1, 0, 0, 73)
+        container.Size = UDim2.new(1, -197, 1, -94)
+        local padding = container:FindFirstChildOfClass("UIPadding")
+        if padding then
+            padding.PaddingLeft = UDim.new(0, 14)
+            padding.PaddingRight = UDim.new(0, 14)
+            padding.PaddingTop = UDim.new(0, 10)
+        end
+    end
+
+    local sidebar
+    for _, child in main:GetChildren() do
+        if child:IsA("ScrollingFrame") then sidebar = child break end
+    end
+    if sidebar then
+        local function reserveProfile()
+            sidebar.Position = UDim2.fromOffset(0, 73)
+            sidebar.Size = UDim2.new(0, 196, 1, -146)
+        end
+        reserveProfile()
+        Library:GiveSignal(main:GetPropertyChangedSignal("Size"):Connect(reserveProfile))
+    end
+
+    local profile = new("Frame", {
+        Name = "CalciteProfile", BackgroundTransparency = 0, AnchorPoint = Vector2.new(0, 1),
+        Position = UDim2.new(0, 1, 1, -21), Size = UDim2.fromOffset(194, 52), ZIndex = 5,
+    }, main, { BackgroundColor3 = "BackgroundColor" })
+    new("Frame", { BorderSizePixel = 0, Size = UDim2.new(1, 0, 0, 1), ZIndex = 6 }, profile,
+        { BackgroundColor3 = "OutlineColor" })
+    local avatar = new("ImageLabel", {
+        BackgroundTransparency = 0, Position = UDim2.fromOffset(12, 9), Size = UDim2.fromOffset(34, 34),
+        Image = if deps.userId then "rbxthumb://type=AvatarHeadShot&id=" .. tostring(deps.userId) .. "&w=150&h=150" else "",
+        ZIndex = 6,
+    }, profile, { BackgroundColor3 = "MainColor" })
+    round(avatar, 17)
+    local username = text(profile, "", 56, 6, 64, 16, false)
+    username:SetAttribute("CalciteLiteral", true)
+    username.Text = self.profile.username
+    text(profile, "Free", 56, 27, 64, 13, true)
+
+    for _, entry in Library.TabButtons do
+        if entry.Label then entry.Label.TextSize = 17 end
+    end
+    for _, tab in Library.Tabs do
+        if tab.Sides then
+            for _, side in tab.Sides do
+                local layout = side:FindFirstChildOfClass("UIListLayout")
+                if layout then layout.Padding = UDim.new(0, 8) end
+            end
+        end
+        for _, group in tab.Groupboxes or {} do
+            for _, label in group.Holder:GetDescendants() do
+                if label:IsA("TextLabel") and label.Text == group.Name then label.TextSize = 17 end
+            end
+        end
+    end
+    if topbar then
+        for _, label in topbar:GetDescendants() do
+            if not label:IsA("TextLabel") then continue end
+            if label.Text == "Calcite" then
+                label.TextSize = 24
+            elseif label.Parent and label.Parent.Parent and label.Parent.Parent.Parent == topbar then
+                label.TextSize = if label.TextTransparency == 0.5 then 13 else 22
+            end
+        end
+        Window:RefreshTitleSize()
+    end
+    local hideToggle = Library.Toggles.InterfaceHideOverlay
+    if hideToggle and hideToggle.Holder then
+        hideToggle.Holder.Size = UDim2.new(1, 0, 0, 36)
+        local label = hideToggle.Holder:FindFirstChildOfClass("TextLabel")
+        if label then label.TextWrapped = true end
+        local switch = hideToggle.Holder:FindFirstChildOfClass("Frame")
+        if switch then
+            switch.AnchorPoint = Vector2.new(1, 0.5)
+            switch.Position = UDim2.fromScale(1, 0.5)
+        end
+    end
+    -- Reuse the native slider's drag behavior, but move its value into an editable
+    -- field and give its fill a thin track and a handle.
+    for _, option in Library.Options do
+        if option.Type ~= "Slider" or not option.Holder then continue end
+        local holder = option.Holder
+        local bar = holder:FindFirstChildOfClass("TextButton")
+        if not bar then continue end
+        holder.Size = UDim2.new(1, 0, 0, 43)
+        bar.Size = UDim2.new(1, -80, 0, 6)
+        bar.Position = UDim2.new(0, 0, 1, -7)
+        local fill = bar:FindFirstChildOfClass("Frame")
+        if not fill then continue end
+        local handle = new("Frame", {
+            AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(1, 0.5),
+            Size = UDim2.fromOffset(12, 12), BorderSizePixel = 0, ZIndex = bar.ZIndex + 3,
+        }, fill, { BackgroundColor3 = "AccentColor" })
+        round(handle, 6)
+        for _, child in bar:GetChildren() do
+            if child:IsA("TextLabel") then child.Visible = false end
+        end
+        local input = new("TextBox", {
+            AnchorPoint = Vector2.new(1, 1), Position = UDim2.fromScale(1, 1), Size = UDim2.fromOffset(70, 24),
+            ClearTextOnFocus = false, Font = Enum.Font.SourceSans, TextSize = 14, Text = "", ZIndex = bar.ZIndex + 3,
+        }, holder, { BackgroundColor3 = "MainColor", TextColor3 = "FontColor" })
+        round(input, 5)
+        new("UIStroke", { Thickness = 1 }, input, { Color = "OutlineColor" })
+        local function display()
+            if not input:IsFocused() then input.Text = tostring(option.Value) .. (option.Suffix or "") end
+        end
+        local nativeDisplay = option.Display
+        option.Display = function(slider) nativeDisplay(slider) display() end
+        Library:GiveSignal(input.Focused:Connect(function() input.Text = tostring(option.Value) end))
+        Library:GiveSignal(input.FocusLost:Connect(function()
+            local value = tonumber(input.Text)
+            if not option.Disabled and value and value == value and math.abs(value) < math.huge then
+                value = math.clamp(value, option.Min, option.Max)
+                local factor = 10 ^ option.Rounding
+                option:SetValue(math.round(value * factor) / factor)
+            end
+            display()
+        end))
+        display()
+    end
+    -- Small layout refinements for the library's stock text widgets.
+    for _, object in main:GetDescendants() do
+        if object:IsA("TextBox") and (object.PlaceholderText == "Search" or object.PlaceholderText == "Поиск настроек" or object.PlaceholderText == "Search settings") then
+            object.TextScaled = false
+            object.TextSize = 15
+        end
+    end
+    self:setAccent(preferences.accent)
+    self:setScale(preferences.scale)
+    local camera = env.workspace and env.workspace.CurrentCamera
+    if camera and camera.GetPropertyChangedSignal then
+        Library:GiveSignal(camera:GetPropertyChangedSignal("ViewportSize"):Connect(function() self:setScale(requestedScale) end))
+    end
+    return self
+end
+
+return style
 end
 
 __modules["waypoints"] = function(require)
