@@ -4035,7 +4035,7 @@ local ui_preferences = require("./ui_preferences")
 
 local main = {}
 
-main.version = "1.30.2"
+main.version = "1.30.3"
 
 local sound_packet = "ReplicatedStorage.NetworkRemotes.Sound.ReplicateSound"    -- through which Blox Strike tells about sounds
 -- and about its grenades: a throw, every bounce, the end
@@ -11603,10 +11603,17 @@ function controls.mount(Library, env, Window)
                     if element.DoesWrap then element:Display() else height(element.TextLabel,22) end
                 end
             end
-            for _, label in group.Holder:GetDescendants() do
-                if label:IsA("TextLabel") and label.Name ~= "__IconFont" and label.Text == group.Name then
-                    typography(label,20,true)
-                end
+            -- Obsidian's header has a text frame containing the title, then the optional description.
+            -- Use that structure so a translation or a matching control caption cannot change the styling.
+            local header = group.Holder:FindFirstChildOfClass("Frame")
+            local texts = header and header:FindFirstChildOfClass("Frame")
+            local title = texts and texts:FindFirstChildOfClass("TextLabel")
+            if title then
+                typography(title,18,true)
+                title.AutomaticSize = Enum.AutomaticSize.None
+                title.TextWrapped = false
+                title.TextTruncate = Enum.TextTruncate.AtEnd
+                height(title,22)
             end
             group:Resize()
         end
@@ -11878,8 +11885,6 @@ function style.configure(deps)
         info.Size = env.UDim2.fromOffset(1040, 740)
         info.Font = env.Enum.Font.Gotham
         info.SearchbarSize = env.UDim2.new(0, 280, 0, 34)
-        info.Icon = "gem"
-        info.IconSize = env.UDim2.fromOffset(26, 26)
     end
     if Library.Scheme then
         for key, rgb in {
@@ -11949,15 +11954,11 @@ function style.mount(deps, Window)
     for _, child in main:GetChildren() do
         if child:IsA("Frame") and child.Size and child.Size.Y.Offset == 48 then
             topbar = child
-            child.Size = UDim2.new(1, 0, 0, 72)
-        elseif child:IsA("Frame") and child.Position and child.Position.Y.Offset == 48 then
-            child.Position = UDim2.fromOffset(0, 72)
+            break
         end
     end
     local container = main:FindFirstChild("Container")
     if container then
-        container.Position = UDim2.new(1, 0, 0, 73)
-        container.Size = UDim2.new(1, -197, 1, -94)
         local padding = container:FindFirstChildOfClass("UIPadding")
         if padding then
             padding.PaddingLeft = UDim.new(0, 14)
@@ -11972,8 +11973,7 @@ function style.mount(deps, Window)
     end
     if sidebar then
         local function reserveProfile()
-            sidebar.Position = UDim2.fromOffset(0, 73)
-            sidebar.Size = UDim2.new(0, 196, 1, -146)
+            sidebar.Size = UDim2.new(0, 196, 1, -122)
         end
         reserveProfile()
         Library:GiveSignal(main:GetPropertyChangedSignal("Size"):Connect(reserveProfile))
@@ -12006,19 +12006,18 @@ function style.mount(deps, Window)
                 if layout then layout.Padding = UDim.new(0, 8) end
             end
         end
-        for _, group in tab.Groupboxes or {} do
-            for _, label in group.Holder:GetDescendants() do
-                if label:IsA("TextLabel") and label.Text == group.Name then label.TextSize = 17 end
-            end
-        end
     end
     if topbar then
         for _, label in topbar:GetDescendants() do
             if not label:IsA("TextLabel") then continue end
             if label.Text == "Calcite" then
-                label.TextSize = 26
+                label.TextSize = 22
             elseif label.Parent and label.Parent.Parent and label.Parent.Parent.Parent == topbar then
-                label.TextSize = if label.TextTransparency == 0.5 then 14 else 24
+                if label.TextTransparency == 0.5 then
+                    label.Visible = false
+                else
+                    label.TextSize = 20
+                end
             end
         end
         Window:RefreshTitleSize()
