@@ -4035,7 +4035,7 @@ local ui_preferences = require("./ui_preferences")
 
 local main = {}
 
-main.version = "1.30.1"
+main.version = "1.30.2"
 
 local sound_packet = "ReplicatedStorage.NetworkRemotes.Sound.ReplicateSound"    -- through which Blox Strike tells about sounds
 -- and about its grenades: a throw, every bounce, the end
@@ -11487,6 +11487,155 @@ end
 return trigger
 end
 
+__modules["ui_controls"] = function(require)
+-- Readable control metrics for the pinned Obsidian GUI. Keep its behavior and
+-- input handling, but replace its compact Code-font dimensions consistently.
+local controls = {}
+
+function controls.mount(Library, env, Window)
+    local UDim2, UDim, Enum, Vector2 = env.UDim2, env.UDim, env.Enum, env.Vector2
+    local function typography(object, size, medium)
+        if object.Name == "__IconFont" then return end
+        object.TextScaled = false
+        object.TextSize = size
+        object.Font = if medium then Enum.Font.GothamMedium else Enum.Font.Gotham
+        if medium and Library.Registry[object] then Library.Registry[object].FontFace = nil end
+    end
+    local function height(object, value)
+        if object.Size.Y.Offset ~= value or object.Size.Y.Scale ~= 0 then
+            object.Size = UDim2.new(object.Size.X.Scale, object.Size.X.Offset, 0, value)
+        end
+    end
+    local function caption(holder)
+        local label = holder:FindFirstChildOfClass("TextLabel")
+        if label then typography(label,16) end
+        return label
+    end
+    local function keepLayout(holder, layout)
+        local busy = false
+        local function update()
+            if busy then return end
+            busy = true
+            layout()
+            busy = false
+        end
+        update()
+        Library:GiveSignal(holder:GetPropertyChangedSignal("Size"):Connect(update))
+    end
+
+    for _, toggle in Library.Toggles do
+        local holder = toggle.Holder
+        if not holder then continue end
+        local label = caption(holder)
+        height(holder,32)
+        if label then label.TextWrapped = true end
+        local switch = holder:FindFirstChildOfClass("Frame")
+        if switch then
+            switch.Size = UDim2.fromOffset(38,22)
+            switch.AnchorPoint = Vector2.new(1,0.5)
+            switch.Position = UDim2.fromScale(1,0.5)
+            if label then label.Size = UDim2.new(1,-46,1,0) end
+        end
+        if label and Library.GetTextBounds then
+            local function fitCaption()
+                local width = label.AbsoluteSize.X / (Library.DPIScale or 1)
+                if width <= 0 then return end
+                local _, lines = Library:GetTextBounds(label.Text,label.FontFace,16,width)
+                height(holder,math.max(32,lines + 6))
+            end
+            Library:GiveSignal(label:GetPropertyChangedSignal("Text"):Connect(fitCaption))
+            Library:GiveSignal(label:GetPropertyChangedSignal("AbsoluteSize"):Connect(fitCaption))
+            fitCaption()
+        end
+    end
+
+    for _, option in Library.Options do
+        local holder = option.Holder
+        if not holder then continue end
+        if option.Type == "Dropdown" then
+            local label = caption(holder)
+            if label then height(label,20) end
+            local display = holder:FindFirstChildOfClass("TextButton")
+            if display then
+                height(display,32)
+                for _, child in display:GetChildren() do
+                    if child:IsA("TextButton") then
+                        typography(child,16)
+                        keepLayout(child,function() height(child,32) end)
+                    end
+                end
+            end
+            keepLayout(holder,function() height(holder,if option.Text then 58 else 32) end)
+            if option.Menu then
+                for _, child in option.Menu.Menu:GetDescendants() do
+                    if child:IsA("TextButton") and child.Name ~= "__IconFont" then typography(child,16) end
+                end
+            end
+        elseif option.Type == "Input" then
+            local label = caption(holder)
+            if label then height(label,20) end
+            height(holder,58)
+            local input = holder:FindFirstChildOfClass("TextBox")
+            if input then typography(input,16) height(input,32) end
+        elseif option.Type == "Slider" then
+            local label = caption(holder)
+            if label then height(label,20) end
+        end
+    end
+
+    for _, button in Library.Buttons or {} do
+        if button.Holder then height(button.Holder,34) end
+        if button.Label then typography(button.Label,16) height(button.Label,22) end
+    end
+    for _, tab in Library.Tabs do
+        for _, group in tab.Groupboxes or {} do
+            local padding = group.Container:FindFirstChildOfClass("UIPadding")
+            if padding then
+                padding.PaddingLeft, padding.PaddingRight = UDim.new(0,12), UDim.new(0,12)
+                -- Native Resize reserves 14px around this container's content.
+                padding.PaddingTop, padding.PaddingBottom = UDim.new(0,7), UDim.new(0,7)
+            end
+            local list = group.Container:FindFirstChildOfClass("UIListLayout")
+            if list then list.Padding = UDim.new(0,12) end
+            for _, element in group.Elements do
+                if element.Type == "Label" and element.TextLabel then
+                    typography(element.TextLabel,14)
+                    if element.DoesWrap then element:Display() else height(element.TextLabel,22) end
+                end
+            end
+            for _, label in group.Holder:GetDescendants() do
+                if label:IsA("TextLabel") and label.Name ~= "__IconFont" and label.Text == group.Name then
+                    typography(label,20,true)
+                end
+            end
+            group:Resize()
+        end
+    end
+
+    for _, object in Window.MainFrame:GetDescendants() do
+        if not object:IsA("TextBox") or (object.PlaceholderText ~= "Search" and object.PlaceholderText ~= "Поиск настроек"
+            and object.PlaceholderText ~= "Search settings") then continue end
+        typography(object,16)
+        object.TextXAlignment = Enum.TextXAlignment.Left
+        object.Size = UDim2.new(0,280,0,34)
+        local padding = object:FindFirstChildOfClass("UIPadding")
+        if padding then
+            padding.PaddingLeft, padding.PaddingRight = UDim.new(0,34), UDim.new(0,10)
+            padding.PaddingTop, padding.PaddingBottom = UDim.new(0,0), UDim.new(0,0)
+        end
+        local icon = object:FindFirstChildOfClass("ImageLabel")
+        if icon then
+            icon.Size = UDim2.fromOffset(18,18)
+            icon.SizeConstraint = Enum.SizeConstraint.RelativeXY
+            icon.AnchorPoint = Vector2.new(0,0.5)
+            icon.Position = UDim2.new(0,-24,0.5,0)
+        end
+    end
+end
+
+return controls
+end
+
 __modules["ui_localize"] = function(require)
 -- Adapt Obsidian's exposed API, preserving canonical IDs and dropdown values.
 local localized = {}
@@ -11715,6 +11864,7 @@ end
 __modules["ui_style"] = function(require)
 -- Calcite's presentation layer over the pinned Obsidian controls.
 local style = {}
+local controls = require("./ui_controls")
 style.accents = { Lilac = { 173, 156, 245 }, Blue = { 123, 169, 208 }, Sage = { 133, 181, 146 }, Rose = { 210, 150, 170 } }
 
 function style.configure(deps)
@@ -11725,8 +11875,9 @@ function style.configure(deps)
         GlobalSearch = true, TabButtonsStyle = { Gap = 5, Padding = 10, CornerRadius = 6, Indicator = false },
     }
     if env and env.UDim2 and env.Enum and env.Enum.Font then
-        info.Size = env.UDim2.fromOffset(980, 680)
-        info.Font = env.Enum.Font.SourceSans
+        info.Size = env.UDim2.fromOffset(1040, 740)
+        info.Font = env.Enum.Font.Gotham
+        info.SearchbarSize = env.UDim2.new(0, 280, 0, 34)
         info.Icon = "gem"
         info.IconSize = env.UDim2.fromOffset(26, 26)
     end
@@ -11787,7 +11938,7 @@ function style.mount(deps, Window)
     local function text(parent, value, x, y, width, size, muted)
         return new("TextLabel", {
             BackgroundTransparency = 1, Position = UDim2.fromOffset(x, y), Size = UDim2.new(1, -width, 0, size + 6),
-            Font = Enum.Font.SourceSans, Text = value, TextSize = size, TextTransparency = muted and 0.35 or 0,
+            Font = Enum.Font.Gotham, Text = value, TextSize = size, TextTransparency = muted and 0.35 or 0,
             TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 6,
         }, parent, { TextColor3 = "FontColor" })
     end
@@ -11843,10 +11994,10 @@ function style.mount(deps, Window)
     local username = text(profile, "", 56, 6, 64, 16, false)
     username:SetAttribute("CalciteLiteral", true)
     username.Text = self.profile.username
-    text(profile, "Free", 56, 27, 64, 13, true)
+    text(profile, "Free", 56, 27, 64, 14, true)
 
     for _, entry in Library.TabButtons do
-        if entry.Label then entry.Label.TextSize = 17 end
+        if entry.Label then entry.Label.TextSize = 18 end
     end
     for _, tab in Library.Tabs do
         if tab.Sides then
@@ -11865,9 +12016,9 @@ function style.mount(deps, Window)
         for _, label in topbar:GetDescendants() do
             if not label:IsA("TextLabel") then continue end
             if label.Text == "Calcite" then
-                label.TextSize = 24
+                label.TextSize = 26
             elseif label.Parent and label.Parent.Parent and label.Parent.Parent.Parent == topbar then
-                label.TextSize = if label.TextTransparency == 0.5 then 13 else 22
+                label.TextSize = if label.TextTransparency == 0.5 then 14 else 24
             end
         end
         Window:RefreshTitleSize()
@@ -11890,22 +12041,31 @@ function style.mount(deps, Window)
         local holder = option.Holder
         local bar = holder:FindFirstChildOfClass("TextButton")
         if not bar then continue end
-        holder.Size = UDim2.new(1, 0, 0, 43)
-        bar.Size = UDim2.new(1, -80, 0, 6)
-        bar.Position = UDim2.new(0, 0, 1, -7)
+        holder.Size = UDim2.new(1, 0, 0, 56)
+        bar.Size = UDim2.new(1, -92, 0, 30)
+        bar.Position = UDim2.fromScale(0, 1)
         local fill = bar:FindFirstChildOfClass("Frame")
         if not fill then continue end
+        bar.BackgroundTransparency = 1
+        local stroke = bar:FindFirstChildOfClass("UIStroke")
+        if stroke then stroke.Enabled = false end
+        local track = new("Frame", {
+            AnchorPoint = Vector2.new(0,0.5), Position = UDim2.fromScale(0,0.5),
+            Size = UDim2.new(1,0,0,6), BorderSizePixel = 0, ZIndex = bar.ZIndex,
+        },bar,{BackgroundColor3="OutlineColor"})
+        round(track,3)
+        fill.Parent = track
         local handle = new("Frame", {
             AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(1, 0.5),
-            Size = UDim2.fromOffset(12, 12), BorderSizePixel = 0, ZIndex = bar.ZIndex + 3,
+            Size = UDim2.fromOffset(14, 14), BorderSizePixel = 0, ZIndex = bar.ZIndex + 3,
         }, fill, { BackgroundColor3 = "AccentColor" })
-        round(handle, 6)
+        round(handle, 7)
         for _, child in bar:GetChildren() do
             if child:IsA("TextLabel") then child.Visible = false end
         end
         local input = new("TextBox", {
-            AnchorPoint = Vector2.new(1, 1), Position = UDim2.fromScale(1, 1), Size = UDim2.fromOffset(70, 24),
-            ClearTextOnFocus = false, Font = Enum.Font.SourceSans, TextSize = 14, Text = "", ZIndex = bar.ZIndex + 3,
+            AnchorPoint = Vector2.new(1, 1), Position = UDim2.fromScale(1, 1), Size = UDim2.fromOffset(80, 30),
+            ClearTextOnFocus = false, Font = Enum.Font.Gotham, TextSize = 16, Text = "", ZIndex = bar.ZIndex + 3,
         }, holder, { BackgroundColor3 = "MainColor", TextColor3 = "FontColor" })
         round(input, 5)
         new("UIStroke", { Thickness = 1 }, input, { Color = "OutlineColor" })
@@ -11926,13 +12086,7 @@ function style.mount(deps, Window)
         end))
         display()
     end
-    -- Small layout refinements for the library's stock text widgets.
-    for _, object in main:GetDescendants() do
-        if object:IsA("TextBox") and (object.PlaceholderText == "Search" or object.PlaceholderText == "Поиск настроек" or object.PlaceholderText == "Search settings") then
-            object.TextScaled = false
-            object.TextSize = 15
-        end
-    end
+    controls.mount(Library,env,Window)
     self:setAccent(preferences.accent)
     self:setScale(preferences.scale)
     local camera = env.workspace and env.workspace.CurrentCamera
