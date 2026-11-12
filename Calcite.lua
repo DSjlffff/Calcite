@@ -4035,7 +4035,7 @@ local ui_preferences = require("./ui_preferences")
 
 local main = {}
 
-main.version = "1.30"
+main.version = "1.30.1"
 
 local sound_packet = "ReplicatedStorage.NetworkRemotes.Sound.ReplicateSound"    -- through which Blox Strike tells about sounds
 -- and about its grenades: a throw, every bounce, the end
@@ -4107,16 +4107,7 @@ function main.start(env)
 
     -- as the mode the game is told to be starts; a config the menu loads later may set anything otherwise
     local settings = settingsModule.defaults(modes.detect(universeId))
-    local interfaceIO = {
-        read = function() return env.readfile("Calcite/ui.json") end,
-        write = function(value)
-            if not env.isfolder("Calcite") then env.makefolder("Calcite") end
-            env.writefile("Calcite/ui.json", value)
-        end,
-        encode = function(value) return HttpService:JSONEncode(value) end,
-        decode = function(value) return HttpService:JSONDecode(value) end,
-    }
-    settings.interface = ui_preferences.load(interfaceIO)
+    settings.interface = ui_preferences.load(ui_preferences.executorIO(env, HttpService))
 
     -- what the script is doing, written to workspace\Calcite\diag.txt while the user has asked for it, see diag.lua
     local D = diag.new({
@@ -4965,7 +4956,7 @@ function main.start(env)
         username = localPlayer.Name,
         userId = localPlayer.UserId,
         onInterfaceChanged = function(preferences)
-            local ok, problem = ui_preferences.save(interfaceIO, preferences)
+            local ok, problem = ui_preferences.save(ui_preferences.executorIO(env, HttpService), preferences)
             if not ok then warn("Calcite: could not save interface preferences: " .. tostring(problem)) end
         end,
         onUnload = unload,
@@ -11702,6 +11693,20 @@ end
 function preferences.save(io, value)
     local ok, problem = pcall(function() io.write(io.encode(preferences.normalize(value))) end)
     return ok, if ok then nil else tostring(problem)
+end
+
+-- Construct on demand so main.start does not retain another local register.
+-- That function is close to the executor compiler's unoptimized register limit.
+function preferences.executorIO(env, http)
+    return {
+        read = function() return env.readfile("Calcite/ui.json") end,
+        write = function(value)
+            if not env.isfolder("Calcite") then env.makefolder("Calcite") end
+            env.writefile("Calcite/ui.json", value)
+        end,
+        encode = function(value) return http:JSONEncode(value) end,
+        decode = function(value) return http:JSONDecode(value) end,
+    }
 end
 
 return preferences
