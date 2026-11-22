@@ -6090,21 +6090,26 @@ function main.start(env)
                 return fb.X, fb.Y, fb.Z
             end,
             interactPetyr = function(openEvent)
+                -- Если нужно открыть именно доску баунти — используем только OpenRequested:Fire(),
+                -- чтобы не открывать одновременно диалог Petyr ("wanna start bounty" / "1. yes | 2. Bye") под доской.
+                if openEvent ~= nil and openEvent.Fire ~= nil then
+                    pcall(function() openEvent:Fire() end)
+                    return
+                end
+                -- Для сдачи награды (openEvent == nil) открываем диалог Petyr через ClickDetector / ProximityPrompt
                 local gf = workspace:FindFirstChild("Game")
                 local npcs = gf and gf:FindFirstChild("NPCs")
                 local petyr = npcs and npcs:FindFirstChild("Petyr")
                 if petyr ~= nil then
+                    local cd = petyr:FindFirstChild("ClickDetector")
+                    if cd ~= nil and type(env.fireclickdetector) == "function" then
+                        pcall(env.fireclickdetector, cd)
+                        return
+                    end
                     local pp = petyr:FindFirstChild("ProximityPrompt")
                     if pp ~= nil and type(env.fireproximityprompt) == "function" then
                         pcall(env.fireproximityprompt, pp)
                     end
-                    local cd = petyr:FindFirstChild("ClickDetector")
-                    if cd ~= nil and type(env.fireclickdetector) == "function" then
-                        pcall(env.fireclickdetector, cd)
-                    end
-                end
-                if openEvent ~= nil and openEvent.Fire ~= nil then
-                    pcall(function() openEvent:Fire() end)
                 end
             end,
             teleportTo = function(x, y, z)
@@ -10497,6 +10502,8 @@ function stand_out_bounty.readUi(playerGui)
                     if string.find(low, "claim", 1, true) ~= nil and string.find(low, "reward", 1, true) ~= nil then
                         info.claimBtn = d
                         break
+                    elseif string.match(low, "^%s*1%.%s*yes%s*$") ~= nil then
+                        info.yesBtn = d
                     end
                 end
             end
@@ -10569,10 +10576,12 @@ function stand_out_bounty.readUi(playerGui)
                     title = tostring(tl.Text or "")
                 end
                 if title ~= "" then
+                    local isComplete = safeAttr(btn, "BountyComplete") == true
+                        or string.find(string.upper(title), "| COMPLETE", 1, true) ~= nil
                     table.insert(info.bounties, {
                         button = btn,
                         title = title,
-                        complete = safeAttr(btn, "BountyComplete") == true,
+                        complete = isComplete,
                         isIncident = stand_out_bounty.isIncident(title),
                     })
                 end
@@ -11042,7 +11051,12 @@ function Runner:update(now, opts, meX, meY, meZ)
         if self.state ~= "opening" or now - self.lastAction >= stand_out_bounty.open_retry then
             self.state = "opening"
             self.lastAction = now
-            self.deps.interactPetyr(ui.openEvent)
+            -- Если уже открыт диалог Petyr "wanna start bounty" -> жмём "1. yes", чтобы он сам открыл доску без наложения
+            if ui.yesBtn ~= nil then
+                self.deps.activateButton(ui.yesBtn)
+            else
+                self.deps.interactPetyr(ui.openEvent)
+            end
             self.statusText = "Открываю Petyr"
         end
         return
