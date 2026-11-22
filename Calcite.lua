@@ -10556,6 +10556,11 @@ function stand_out_bounty.readUi(playerGui)
         local startBox = sel:FindFirstChild("Start")
         info.beginBtn = startBox and startBox:FindFirstChild("Begin") or nil
 
+        local rot = sel:FindFirstChild("RotationTimer")
+        if rot ~= nil and (safeIsA(rot, "TextLabel") or type(rot.Text) == "string") then
+            info.rotationText = tostring(rot.Text or "")
+        end
+
         local objectives = sel:FindFirstChild("Objectives")
         if objectives ~= nil and objectives.GetChildren ~= nil then
             local buttons = {}
@@ -11112,22 +11117,15 @@ function Runner:update(now, opts, meX, meY, meZ)
     end
 
     -- Шаг 2: выбрать лучший баунти на этом тире
+    -- В Stand Out завершённый баунти помечается COMPLETE сразу для всех тиров до обновления ротации,
+    -- поэтому вниз по тирам не спускаемся — ждём обновления доски на максимальном доступном тире.
     if self.state == "picking" then
         local chosen = stand_out_bounty.pickBounty(ui.bounties, opts.skipIncidents ~= false)
         if chosen == nil then
-            -- Если в режиме Max все не-инциденты пройдены на этом тире — спускаемся на 1 тир ниже
-            if (opts.tier == nil or opts.tier == "Max") and cur ~= nil and cur > 1 and ui.prevBtn ~= nil then
-                self.fallbackTier = cur - 1
-                self.state = "seeking_tier"
-                self.lastTierSeen = nil
-                self.tierStuckCount = 0
-                self.lastAction = now
-                self.deps.activateButton(ui.prevBtn)
-                self.statusText = string.format("Тир %d пройден -> Тир %d", cur, cur - 1)
-                return
-            end
-            self.statusText = "Нет доступных баунти"
-            self.lastAction = now + 2.0
+            local timer = (type(ui.rotationText) == "string" and ui.rotationText ~= "")
+                and (string.match(ui.rotationText, "REFRESH IN%s*[%d:]+") or ui.rotationText) or ""
+            self.statusText = timer ~= "" and ("Все пройдены (" .. timer .. ")") or "Все баунти пройдены (жду обнову)"
+            self.lastAction = now + 3.0
             return
         end
 
