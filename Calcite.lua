@@ -1312,6 +1312,9 @@ function env.fromGlobals()
         isrbxactive = isrbxactive,
         -- presses a prompt of the world without walking up to it: for the NPCs of YBA and the eggs of Steal an Egg
         fireproximityprompt = fireproximityprompt,
+        fireclickdetector = fireclickdetector,
+        firesignal = firesignal,
+        getconnections = getconnections,
         getupvalues = debug and debug.getupvalues,
         -- require as the executor gives it: the modules of the script are glued with a require of their own, which
         -- would shadow it; for reading what a module of the game says about a weapon
@@ -3224,6 +3227,8 @@ local pairs = {
     ["Без боссов"] = "No bosses", ["Только боссы"] = "Bosses only",
     ["Имя моба"] = "Mob name", ["Скиллы"] = "Skills",
     ["M1 на кулдауне"] = "M1 on cooldown", ["Метод"] = "Method",
+    ["Тир"] = "Tier", ["Максимум (авто)"] = "Best unlocked (auto)",
+    ["Пропускать мини-игры"] = "Skip minigame incidents",
     ["Цвет меток"] = "Label color", ["Отображать"] = "Show", ["Собирать"] = "Collect",
     ["Ходить, пока нет цели"] = "Roam while idle", ["Скорость глайдера"] = "Glide speed",
     ["Наведение"] = "Aim", ["Основное"] = "General", ["Отображение"] = "Display", ["Аим"] = "Aim",
@@ -4005,6 +4010,7 @@ local item_asylum = require("./item_asylum")
 local stand_out = require("./stand_out")
 local stand_out_pickup = require("./stand_out_pickup")
 local stand_out_mobs = require("./stand_out_mobs")
+local stand_out_bounty = require("./stand_out_bounty")
 local glider = require("./glider")
 local yba_npcs = require("./yba_npcs")
 local yba_waypoints = require("./yba_waypoints")
@@ -4186,10 +4192,11 @@ function main.start(env)
     -- or the hook on the shot of a game, goes by these, never by the switches as they are written
     local current = nil
     local shooter = nil             -- the auto fire, see trigger.lua
-    -- pre-allocated so feature state (_soPick / _soMob) stays under Luau's 200-local limit in main.start
+    -- pre-allocated so feature state (_soPick / _soMob / _soBounty) stays under Luau's 200-local limit in main.start
     local handle = {
         _soPick = { picker = nil, entries = {}, wasOn = false },
         _soMob = { farmer = nil, noclip = nil, entries = {}, wasOn = false },
+        _soBounty = { runner = nil, mobs = {}, wasOn = false, mod = nil, modTried = false },
     }
 
     -- what the executor gives back for a connection is known from its documentation only: one that cannot be
@@ -4947,6 +4954,11 @@ function main.start(env)
         if handle._soMob.noclip ~= nil then
             pcall(function()
                 handle._soMob.noclip:step(false)
+            end)
+        end
+        if handle._soBounty.runner ~= nil then
+            pcall(function()
+                handle._soBounty.runner:stop()
             end)
         end
 
@@ -6039,6 +6051,153 @@ function main.start(env)
                 return stand_out_mobs.guiCooldowns(pg)
             end,
         })
+
+        handle._soBounty.runner = stand_out_bounty.new({
+            readUi = function()
+                local pg = localPlayer:FindFirstChildOfClass("PlayerGui")
+                return stand_out_bounty.readUi(pg)
+            end,
+            unlockedTier = function()
+                if not handle._soBounty.modTried then
+                    handle._soBounty.modTried = true
+                    local mods = ReplicatedStorage and ReplicatedStorage:FindFirstChild("Modules")
+                    local bMod = mods and mods:FindFirstChild("Bounty")
+                    if bMod ~= nil and type(env.gameRequire) == "function" then
+                        local ok, res = pcall(env.gameRequire, bMod)
+                        if ok and type(res) == "table" then
+                            handle._soBounty.mod = res
+                        end
+                    end
+                end
+                local m = handle._soBounty.mod
+                if m ~= nil and type(m.GetUnlockedTier) == "function" then
+                    local ok, t = pcall(m.GetUnlockedTier, localPlayer)
+                    if ok and type(t) == "number" and t >= 1 then
+                        return t
+                    end
+                end
+                return nil
+            end,
+            petyrPosition = function()
+                local gf = workspace:FindFirstChild("Game")
+                local npcs = gf and gf:FindFirstChild("NPCs")
+                local petyr = npcs and npcs:FindFirstChild("Petyr")
+                local hrp = petyr and (petyr:FindFirstChild("HumanoidRootPart") or petyr.PrimaryPart)
+                if hrp ~= nil and hrp.Position ~= nil then
+                    return hrp.Position.X, hrp.Position.Y, hrp.Position.Z
+                end
+                local fb = stand_out_bounty.petyr_fallback
+                return fb.X, fb.Y, fb.Z
+            end,
+            interactPetyr = function(openEvent)
+                local gf = workspace:FindFirstChild("Game")
+                local npcs = gf and gf:FindFirstChild("NPCs")
+                local petyr = npcs and npcs:FindFirstChild("Petyr")
+                if petyr ~= nil then
+                    local pp = petyr:FindFirstChild("ProximityPrompt")
+                    if pp ~= nil and type(env.fireproximityprompt) == "function" then
+                        pcall(env.fireproximityprompt, pp)
+                    end
+                    local cd = petyr:FindFirstChild("ClickDetector")
+                    if cd ~= nil and type(env.fireclickdetector) == "function" then
+                        pcall(env.fireclickdetector, cd)
+                    end
+                end
+                if openEvent ~= nil and openEvent.Fire ~= nil then
+                    pcall(function() openEvent:Fire() end)
+                end
+            end,
+            teleportTo = function(x, y, z)
+                local character = localPlayer.Character
+                local root = character and character:FindFirstChild("HumanoidRootPart")
+                if root ~= nil then
+                    root.CFrame = env.CFrame.new(x, y, z)
+                    root.AssemblyLinearVelocity = env.Vector3.new(0, 0, 0)
+                end
+            end,
+            activateButton = function(btn)
+                if btn == nil then return end
+                local fired = false
+                if type(env.firesignal) == "function" then
+                    local ok = pcall(env.firesignal, btn.Activated)
+                    if ok then fired = true end
+                end
+                if not fired and type(env.getconnections) == "function" then
+                    local ok, conns = pcall(env.getconnections, btn.Activated)
+                    if ok and type(conns) == "table" and #conns > 0 then
+                        for _, conn in conns do
+                            if conn.Fire ~= nil then
+                                pcall(function() conn:Fire() end)
+                                fired = true
+                            elseif type(conn.Function) == "function" then
+                                pcall(conn.Function)
+                                fired = true
+                            end
+                        end
+                    end
+                end
+                if not fired and env.virtualInputManager ~= nil and btn.AbsolutePosition ~= nil and btn.AbsoluteSize ~= nil then
+                    local cx = math.floor(btn.AbsolutePosition.X + btn.AbsoluteSize.X * 0.5)
+                    local cy = math.floor(btn.AbsolutePosition.Y + btn.AbsoluteSize.Y * 0.5)
+                    pcall(function() env.virtualInputManager:SendMouseButtonEvent(cx, cy, 0, true, game, 1) end)
+                    if env.task and env.task.delay then
+                        env.task.delay(0.03, function()
+                            pcall(function() env.virtualInputManager:SendMouseButtonEvent(cx, cy, 0, false, game, 1) end)
+                        end)
+                    else
+                        pcall(function() env.virtualInputManager:SendMouseButtonEvent(cx, cy, 0, false, game, 1) end)
+                    end
+                end
+            end,
+            trackerPosition = function()
+                local ok, pos = pcall(function() return localPlayer:GetAttribute("VisibleBountyTrackerPosition") end)
+                if ok and pos ~= nil and pos.X ~= nil and pos.Y ~= nil and pos.Z ~= nil then
+                    return pos.X, pos.Y, pos.Z
+                end
+                return nil, nil, nil
+            end,
+            myMobs = function()
+                return handle._soBounty.mobs
+            end,
+            myPrompt = function()
+                return stand_out_bounty.findMyPrompt(workspace, localPlayer.UserId)
+            end,
+            triggerPrompt = function(prompt)
+                if prompt == nil then return end
+                if type(env.fireproximityprompt) == "function" then
+                    pcall(env.fireproximityprompt, prompt)
+                end
+                pcall(function() prompt:InputHoldBegin() end)
+                local hold = (type(prompt.HoldDuration) == "number" and prompt.HoldDuration > 0) and prompt.HoldDuration or 0.1
+                if env.task and env.task.delay then
+                    env.task.delay(hold + 0.1, function()
+                        pcall(function() prompt:InputHoldEnd() end)
+                    end)
+                else
+                    pcall(function() prompt:InputHoldEnd() end)
+                end
+            end,
+            fightMobs = function(now, mobEntries, meX, meY, meZ)
+                if handle._soMob.farmer == nil then return nil end
+                local base = (current and current.standOutMobs) or settings.standOutMobs
+                local fightOpts = {
+                    filter = "All",
+                    nameFilter = "",
+                    autoSummon = base.autoSummon,
+                    autoSkill = base.autoSkill,
+                    skills = base.skills,
+                    autoM1 = base.autoM1,
+                    distance = base.distance,
+                    method = base.method,
+                }
+                return handle._soMob.farmer:update(now, mobEntries, fightOpts, meX, meY, meZ)
+            end,
+            stopFighting = function()
+                if handle._soMob.farmer ~= nil then
+                    handle._soMob.farmer:stop()
+                end
+            end,
+        })
     end
 
     -- what follows listens to Steal an Egg and looks through its plots: in any other game there is nothing of it
@@ -6613,6 +6772,13 @@ function main.start(env)
                 end
                 handle._soMob.entries = stand_out_mobs.scan(workspace, pNames)
             end
+            if s.standOutBounty ~= nil and s.standOutBounty.enabled then
+                local pNames = {}
+                for _, pl in Players:GetPlayers() do
+                    pNames[pl.Name] = true
+                end
+                handle._soBounty.mobs = stand_out_bounty.scanMyMobs(workspace, localPlayer.UserId, pNames)
+            end
 
             if itemsOn then
                 if now - lastSettle >= settle_interval then
@@ -6975,7 +7141,37 @@ function main.start(env)
         end
         local itemBusy = s.standOutPickup ~= nil and s.standOutPickup.enabled
             and soPick.picker ~= nil and soPick.picker.target ~= nil
-        if s.standOutMobs ~= nil and s.standOutMobs.enabled and localAlive and soMob.farmer ~= nil then
+        -- Stand Out Auto Bounty (использует Farm Config для боя с мобами баунти; уступает Item farm на подбор)
+        local soBounty = handle._soBounty
+        local bountyOn = s.standOutBounty ~= nil and s.standOutBounty.enabled and localAlive and soBounty.runner ~= nil
+        if bountyOn then
+            if not soBounty.wasOn then
+                local pNames = {}
+                for _, pl in Players:GetPlayers() do
+                    pNames[pl.Name] = true
+                end
+                soBounty.mobs = stand_out_bounty.scanMyMobs(workspace, localPlayer.UserId, pNames)
+                soBounty.wasOn = true
+            end
+            if not itemBusy then
+                local okB, errB = pcall(function()
+                    soBounty.runner:update(now, s.standOutBounty, localX, localY, localZ)
+                end)
+                if not okB then
+                    warn("Calcite StandOutBounty: " .. tostring(errB))
+                end
+                ui.setStandOutBounty(soBounty.runner.completed, soBounty.runner.statusText)
+            end
+        elseif soBounty.wasOn then
+            soBounty.wasOn = false
+            if soBounty.runner ~= nil then
+                soBounty.runner:stop()
+                ui.setStandOutBounty(soBounty.runner.completed, "")
+            end
+        end
+
+        -- Stand Out Mob Farming (уступает Item farm и Auto Bounty)
+        if s.standOutMobs ~= nil and s.standOutMobs.enabled and localAlive and soMob.farmer ~= nil and not bountyOn then
             if not soMob.wasOn then
                 local pNames = {}
                 for _, pl in Players:GetPlayers() do
@@ -7438,6 +7634,23 @@ function menu.create(deps)
         end)
     end
 
+    soFarm.bountyGroup = farmTab:AddRightGroupbox("Auto Bounty")
+    toggle(soFarm.bountyGroup, "StandOutBountyEnabled", "Включить", settings.standOutBounty, "enabled")
+    do
+        local tierLabels = { "Максимум (авто)", "1", "2", "3", "4", "5", "6", "7", "8" }
+        local tierDefault = if settings.standOutBounty.tier == "Max" then 1
+            else (table.find(tierLabels, tostring(settings.standOutBounty.tier)) or 1)
+        soFarm.bountyGroup:AddDropdown("StandOutBountyTier", {
+            Text = "Тир", Values = tierLabels, Default = tierDefault,
+        })
+        Options.StandOutBountyTier:OnChanged(function()
+            local v = Options.StandOutBountyTier.Value
+            settings.standOutBounty.tier = if v == "Максимум (авто)" then "Max" else tostring(v or "Max")
+        end)
+    end
+    toggle(soFarm.bountyGroup, "StandOutBountySkipIncidents", "Пропускать мини-игры", settings.standOutBounty, "skipIncidents")
+    soFarm.bountyStatus = soFarm.bountyGroup:AddLabel("Завершено: 0")
+
     -- aim
     local aimGroup = aimTab:AddLeftGroupbox("Наведение")
     -- the keypicker is attached to the toggle so a right-click on "Включено" opens its binding and mode (Always,
@@ -7826,11 +8039,13 @@ function menu.create(deps)
         npcTab:SetVisible(modes.has(mode, "Npc"))
         stealTab:SetVisible(modes.has(mode, "Steal"))
         teleportTab:SetVisible(modes.has(mode, "Teleport"))
-        farmTab:SetVisible(modes.has(mode, "AutoFarm") or modes.has(mode, "StandOutPickup") or modes.has(mode, "StandOutMobs"))
+        farmTab:SetVisible(modes.has(mode, "AutoFarm") or modes.has(mode, "StandOutPickup")
+            or modes.has(mode, "StandOutMobs") or modes.has(mode, "StandOutBounty"))
         farmGroup:SetVisible(modes.has(mode, "AutoFarm"))
         soFarm.itemGroup:SetVisible(modes.has(mode, "StandOutPickup"))
         soFarm.mobGroup:SetVisible(modes.has(mode, "StandOutMobs"))
-        soFarm.cfgGroup:SetVisible(modes.has(mode, "StandOutMobs"))
+        soFarm.cfgGroup:SetVisible(modes.has(mode, "StandOutMobs") or modes.has(mode, "StandOutBounty"))
+        soFarm.bountyGroup:SetVisible(modes.has(mode, "StandOutBounty"))
         teamCheck:SetVisible(modes.has(mode, "TeamCheck"))
         throughWalls:SetVisible(modes.has(mode, "Wallbang"))
         autoStop:SetVisible(modes.has(mode, "AutoStop"))
@@ -7889,6 +8104,17 @@ function menu.create(deps)
         if text ~= soFarm.shownMob then
             soFarm.shownMob = text
             soFarm.mobStatus:SetText(text)
+        end
+    end
+
+    function ui.setStandOutBounty(completed, statusText)
+        local text = string.format("Завершено: %d", completed)
+        if statusText ~= nil and statusText ~= "" then
+            text = text .. " | " .. statusText
+        end
+        if text ~= soFarm.shownBounty then
+            soFarm.shownBounty = text
+            soFarm.bountyStatus:SetText(text)
         end
     end
 
@@ -8056,8 +8282,8 @@ local features = {
     ItemAsylum = { Players = true, Health = true, Aim = true, IaWeapon = true },
     -- Rivals: team shooter — пока основа (ESP с здоровьем + aim + team check)
     Rivals = { Players = true, Health = true, TeamCheck = true, Aim = true },
-    -- Stand Out: без команд; ESP игроков (stand_out.lua) + автоподбор (stand_out_pickup.lua) + фарм мобов (stand_out_mobs.lua)
-    StandOut = { Players = true, Health = true, StandOutInfo = true, StandOutPickup = true, StandOutMobs = true },
+    -- Stand Out: без команд; ESP игроков + автоподбор + фарм мобов + авто-баунти
+    StandOut = { Players = true, Health = true, StandOutInfo = true, StandOutPickup = true, StandOutMobs = true, StandOutBounty = true },
 }
 
 -- what a mode starts with set otherwise than the settings are written: fields of the table of settings.defaults
@@ -9323,6 +9549,12 @@ function settings.defaults(mode)
             distance = 6,
             method = "Behind",    -- "Behind" | "Below" | "Over" | "Front"
         },
+        -- Stand Out Auto Bounty: баунти у Petyr на лучшем доступном тире (stand_out_bounty.lua)
+        standOutBounty = {
+            enabled = false,
+            tier = "Max",         -- "Max" | "1".."8"
+            skipIncidents = true, -- пропускать инциденты с ручными мини-играми
+        },
         -- MVS Silent Aim: клик ЛКМ зовёт Net:RemoteEvent("GunKill") на цель Аима (mvs.lua).
         -- Rage mode собирается из Aim + Silent + AutoFire на вкладке — отдельного тумблера нет
         mvsSilent = {
@@ -9582,6 +9814,11 @@ function settings.inEffect(s, mode)
     end
     if not modes.has(mode, "StandOutMobs") then
         e.standOutMobs.enabled = false
+    end
+
+    e.standOutBounty = table.clone(s.standOutBounty)
+    if not modes.has(mode, "StandOutBounty") then
+        e.standOutBounty.enabled = false
     end
 
     -- whether any Silent Aim (Town/MVS/Strike) is on
@@ -10037,6 +10274,541 @@ function stand_out.format(info, showStand, showSub, showWeapon)
 end
 
 return stand_out
+end
+
+__modules["stand_out_bounty"] = function(require)
+-- Stand Out Auto Bounty: берёт баунти у Petyr на максимальном доступном тире (до Tier 8)
+-- и выполняет его автоматически (боевые баунти через stand_out_mobs + Farm Config, поисковые — телепортом к промпту).
+-- Факты игры из tools/standout_probe_bounty.lua и standout_probe_bounty2.lua:
+--   • Petyr: Workspace.Game.NPCs.Petyr, позиция (-219.7, 19.9, 1688.5), ProximityPrompt + ClickDetector
+--   • UI: PlayerGui.Bounty -> OpenRequested (BindableEvent), BountySelect (TierSelector.Label/Next/Previous,
+--     Objectives.Bounty_1..7 с attr BountyComplete, Start.Begin с Activated), BountyTracker (Title/TitleAlt)
+--   • Активный трекер: Player:GetAttribute("VisibleBountyTrackerPosition") (Vector3)
+--   • Мои мобы баунти: Workspace.Game.Players.<Mob> с FightableNPC=true и BountyOwnerId == LocalPlayer.UserId
+--   • Мои объекты баунти: Workspace.Game.BountyWorld.Party_<UserId>
+--   • Модуль игры: ReplicatedStorage.Modules.Bounty (MaxTier=8, GetUnlockedTier, IncidentRules.Names)
+-- Чистая логика поверх deps, проверяется tests/stand_out_bounty_test.lua.
+local stand_out_bounty = {}
+
+stand_out_bounty.petyr_fallback = { X = -219.7, Y = 19.9, Z = 1688.5 }
+stand_out_bounty.max_tier = 8
+stand_out_bounty.step_delay = 0.25
+stand_out_bounty.open_retry = 1.2
+stand_out_bounty.begin_wait = 1.8
+stand_out_bounty.travel_retry = 2.0
+
+-- Инциденты с ручными мини-играми (рисование, слайдеры ювелирки, караоке и т.п.) из Modules.Bounty.IncidentRules.Names
+local INCIDENT_NAMES = {
+    ["iced tea run"] = true,
+    ["usagi's karaoke night"] = true,
+    ["paco's challenge"] = true,
+    ["trust me on this one"] = true,
+    ["rohan's drawing contest"] = true,
+    ["your personal helper friend"] = true,
+    ["cheap jewelry, expensive problem"] = true,
+    ["small change, big problem"] = true,
+}
+
+local Runner = {}
+Runner.__index = Runner
+
+local function finite(v)
+    return type(v) == "number" and v == v and v ~= math.huge and v ~= -math.huge
+end
+
+local function safeAttr(obj, name)
+    if obj == nil or obj.GetAttribute == nil then
+        return nil
+    end
+    local ok, val = pcall(function()
+        return obj:GetAttribute(name)
+    end)
+    if ok then
+        return val
+    end
+    return nil
+end
+
+local function safeIsA(obj, cls)
+    if obj == nil or obj.IsA == nil then
+        return false
+    end
+    local ok, res = pcall(function()
+        return obj:IsA(cls)
+    end)
+    return ok and res == true
+end
+
+function stand_out_bounty.isIncident(title)
+    if type(title) ~= "string" then
+        return false
+    end
+    local clean = string.lower(string.match(title, "^%s*(.-)%s*$") or "")
+    return INCIDENT_NAMES[clean] == true
+end
+
+-- Парсит номер тира из текста вида "TIER 3" или "TIER 1  |  LV 0-9"
+function stand_out_bounty.parseTier(labelText)
+    if type(labelText) ~= "string" then
+        return nil
+    end
+    local num = string.match(string.upper(labelText), "TIER%s*(%d+)")
+    return num and tonumber(num) or nil
+end
+
+-- Читает состояние Bounty UI (открыта ли доска, какой тир выбран, активен ли трекер, список баунти).
+function stand_out_bounty.readUi(playerGui)
+    local info = {
+        trackerActive = false,
+        trackerTitle = "",
+        trackerObjective = "",
+        selectOpen = false,
+        currentTier = nil,
+        nextBtn = nil,
+        prevBtn = nil,
+        beginBtn = nil,
+        openEvent = nil,
+        bounties = {}, -- { button, title, complete, isIncident }
+    }
+    if playerGui == nil then
+        return info
+    end
+
+    pcall(function()
+        local bountyGui = playerGui:FindFirstChild("Bounty")
+        if bountyGui == nil then
+            return
+        end
+        info.openEvent = bountyGui:FindFirstChild("OpenRequested")
+
+        local tracker = bountyGui:FindFirstChild("BountyTracker")
+        if tracker ~= nil and (safeIsA(tracker, "GuiObject") or tracker.Visible ~= nil) and tracker.Visible == true then
+            info.trackerActive = true
+            local t1 = tracker:FindFirstChild("Title")
+            local t1l = t1 and t1:FindFirstChild("TextLabel")
+            if t1l ~= nil and (safeIsA(t1l, "TextLabel") or type(t1l.Text) == "string") then
+                info.trackerTitle = tostring(t1l.Text or "")
+            end
+            local t2 = tracker:FindFirstChild("TitleAlt")
+            local t2l = t2 and t2:FindFirstChild("TextLabel")
+            if t2l ~= nil and (safeIsA(t2l, "TextLabel") or type(t2l.Text) == "string") then
+                info.trackerObjective = tostring(t2l.Text or "")
+            end
+        end
+
+        local sel = bountyGui:FindFirstChild("BountySelect")
+        if sel == nil then
+            return
+        end
+        info.selectOpen = sel.Visible == true
+
+        local ts = sel:FindFirstChild("TierSelector")
+        if ts ~= nil then
+            local lbl = ts:FindFirstChild("Label")
+            if lbl ~= nil and (safeIsA(lbl, "TextLabel") or type(lbl.Text) == "string") then
+                info.currentTier = stand_out_bounty.parseTier(lbl.Text)
+            end
+            info.nextBtn = ts:FindFirstChild("Next")
+            info.prevBtn = ts:FindFirstChild("Previous")
+        end
+
+        local startBox = sel:FindFirstChild("Start")
+        info.beginBtn = startBox and startBox:FindFirstChild("Begin") or nil
+
+        local objectives = sel:FindFirstChild("Objectives")
+        if objectives ~= nil and objectives.GetChildren ~= nil then
+            local buttons = {}
+            for _, child in objectives:GetChildren() do
+                if string.match(child.Name or "", "^Bounty_%d+$") and child.Visible ~= false then
+                    table.insert(buttons, child)
+                end
+            end
+            table.sort(buttons, function(a, b)
+                local na = tonumber(string.match(a.Name, "%d+")) or 0
+                local nb = tonumber(string.match(b.Name, "%d+")) or 0
+                return na < nb
+            end)
+            for _, btn in buttons do
+                local tl = btn:FindFirstChild("Title")
+                local title = ""
+                if tl ~= nil and (safeIsA(tl, "TextLabel") or type(tl.Text) == "string") then
+                    title = tostring(tl.Text or "")
+                end
+                if title ~= "" then
+                    table.insert(info.bounties, {
+                        button = btn,
+                        title = title,
+                        complete = safeAttr(btn, "BountyComplete") == true,
+                        isIncident = stand_out_bounty.isIncident(title),
+                    })
+                end
+            end
+        end
+    end)
+
+    return info
+end
+
+-- Выбирает лучший незавершённый баунти на текущем тире.
+-- Если skipIncidents == true, берёт только не-инциденты (боевые + поиск).
+function stand_out_bounty.pickBounty(bounties, skipIncidents)
+    if bounties == nil then
+        return nil
+    end
+    for _, b in bounties do
+        if not b.complete and not b.isIncident then
+            return b
+        end
+    end
+    if not skipIncidents then
+        for _, b in bounties do
+            if not b.complete then
+                return b
+            end
+        end
+    end
+    return nil
+end
+
+-- Ищет живых мобов, принадлежащих НАШЕМУ баунти (BountyOwnerId / BountyLeaderId == userId).
+function stand_out_bounty.scanMyMobs(workspace, userId, playerNames)
+    local out = {}
+    if workspace == nil or userId == nil then
+        return out
+    end
+    local gameFolder = workspace:FindFirstChild("Game")
+    if gameFolder == nil then
+        return out
+    end
+
+    local function checkModel(m)
+        if not safeIsA(m, "Model") then return end
+        if playerNames ~= nil and playerNames[m.Name] then return end
+        if safeAttr(m, "Stand") == true then return end
+        if safeAttr(m, "FightableNPC") ~= true then return end
+
+        local ownerId = safeAttr(m, "BountyOwnerId") or safeAttr(m, "BountyLeaderId")
+        if ownerId ~= userId then return end
+
+        local hum = m:FindFirstChildOfClass("Humanoid")
+        if hum == nil or not finite(hum.Health) or hum.Health <= 0 then return end
+        local root = m:FindFirstChild("HumanoidRootPart") or m.PrimaryPart
+        if root == nil then return end
+
+        local cfg = safeAttr(m, "Config")
+        local name = (type(cfg) == "string" and cfg ~= "") and cfg or (string.match(m.Name or "Mob", "^(.-)_%d+$") or m.Name)
+        table.insert(out, {
+            model = m,
+            humanoid = hum,
+            root = root,
+            name = name,
+            rawName = m.Name or "",
+            isBoss = safeAttr(m, "BossNPC") == true or safeAttr(m, "CommandBoss") == true,
+        })
+    end
+
+    local pf = gameFolder:FindFirstChild("Players")
+    if pf ~= nil and pf.GetChildren ~= nil then
+        for _, c in pf:GetChildren() do
+            checkModel(c)
+        end
+    end
+
+    local bw = gameFolder:FindFirstChild("BountyWorld")
+    local partyFolder = bw and bw:FindFirstChild("Party_" .. tostring(userId))
+    if partyFolder ~= nil and partyFolder.GetDescendants ~= nil then
+        for _, d in partyFolder:GetDescendants() do
+            if safeIsA(d, "Model") then
+                checkModel(d)
+            end
+        end
+    end
+
+    return out
+end
+
+-- Ищет активный ProximityPrompt внутри Workspace.Game.BountyWorld.Party_<userId> (например MISSING FROG / Stash).
+function stand_out_bounty.findMyPrompt(workspace, userId)
+    if workspace == nil or userId == nil then
+        return nil, nil, nil, nil
+    end
+    local gameFolder = workspace:FindFirstChild("Game")
+    local bw = gameFolder and gameFolder:FindFirstChild("BountyWorld")
+    local partyFolder = bw and bw:FindFirstChild("Party_" .. tostring(userId))
+    if partyFolder == nil or partyFolder.GetDescendants == nil then
+        return nil, nil, nil, nil
+    end
+
+    for _, d in partyFolder:GetDescendants() do
+        if safeIsA(d, "ProximityPrompt") then
+            local reach = d.MaxActivationDistance
+            local avail = safeAttr(d, "StoryPromptAvailable")
+            if d.Enabled == true and avail ~= false and finite(reach) and reach > 0 then
+                local holder = d.Parent
+                local pos = nil
+                if holder ~= nil then
+                    if safeIsA(holder, "Attachment") and holder.WorldPosition ~= nil then
+                        pos = holder.WorldPosition
+                    elseif safeIsA(holder, "BasePart") and holder.Position ~= nil then
+                        pos = holder.Position
+                    end
+                end
+                if pos ~= nil and finite(pos.X) and finite(pos.Y) and finite(pos.Z) then
+                    return d, pos.X, pos.Y, pos.Z
+                end
+            end
+        end
+    end
+
+    return nil, nil, nil, nil
+end
+
+-- deps:
+--   readUi() -> table from stand_out_bounty.readUi
+--   unlockedTier() -> number | nil (optional, from Modules.Bounty.GetUnlockedTier)
+--   petyrPosition() -> x, y, z
+--   interactPetyr(openEvent)
+--   teleportTo(x, y, z)
+--   activateButton(btn)
+--   trackerPosition() -> x, y, z | nil
+--   myMobs() -> entries
+--   myPrompt() -> prompt, x, y, z | nil
+--   triggerPrompt(prompt)
+--   fightMobs(now, mobEntries, meX, meY, meZ) -> target | nil
+--   stopFighting()
+function stand_out_bounty.new(deps)
+    return setmetatable({
+        deps = deps,
+        state = "idle",         -- "idle" | "opening" | "seeking_tier" | "picking" | "starting" | "active"
+        since = 0,
+        lastAction = -99,
+        lastTierSeen = nil,
+        tierStuckCount = 0,
+        fallbackTier = nil,     -- если на max tier все не-инциденты пройдены, пробуем тир ниже
+        completed = 0,
+        statusText = "",
+        wasTrackerActive = false,
+        promptHolding = nil,
+        promptSince = 0,
+    }, Runner)
+end
+
+function Runner:stop()
+    if self.deps.stopFighting ~= nil then
+        pcall(self.deps.stopFighting)
+    end
+    self.state = "idle"
+    self.lastTierSeen = nil
+    self.tierStuckCount = 0
+    self.fallbackTier = nil
+    self.statusText = ""
+    self.promptHolding = nil
+end
+
+function Runner:_desiredTier(opts)
+    local pref = opts.tier or "Max"
+    if pref ~= "Max" then
+        local n = tonumber(pref)
+        if n ~= nil and n >= 1 and n <= stand_out_bounty.max_tier then
+            return n
+        end
+    end
+    if self.fallbackTier ~= nil then
+        return self.fallbackTier
+    end
+    if self.deps.unlockedTier ~= nil then
+        local ok, unlocked = pcall(self.deps.unlockedTier)
+        if ok and type(unlocked) == "number" and unlocked >= 1 then
+            return math.min(math.floor(unlocked), stand_out_bounty.max_tier)
+        end
+    end
+    return stand_out_bounty.max_tier
+end
+
+function Runner:update(now, opts, meX, meY, meZ)
+    if meX == nil or meY == nil or meZ == nil then
+        self:stop()
+        return
+    end
+
+    local ui = self.deps.readUi()
+
+    -- Отслеживаем завершение баунти (трекер был активен -> исчез)
+    if self.wasTrackerActive and not ui.trackerActive then
+        self.completed += 1
+        self.fallbackTier = nil
+        if self.deps.stopFighting ~= nil then
+            pcall(self.deps.stopFighting)
+        end
+        self.state = "idle"
+    end
+    self.wasTrackerActive = ui.trackerActive
+
+    -- Если баунти уже активно — выполняем его!
+    if ui.trackerActive then
+        self.state = "active"
+        local title = ui.trackerTitle ~= "" and ui.trackerTitle or "Bounty"
+
+        -- 1) Если есть наши баунти-мобы — фармим их через stand_out_mobs + Farm Config
+        local mobs = self.deps.myMobs()
+        if mobs ~= nil and #mobs > 0 then
+            local target = self.deps.fightMobs(now, mobs, meX, meY, meZ)
+            if target ~= nil then
+                self.statusText = title .. " | " .. (target.name or "Mob")
+                return
+            end
+        else
+            if self.deps.stopFighting ~= nil then
+                pcall(self.deps.stopFighting)
+            end
+        end
+
+        -- 2) Если в BountyWorld.Party_<UserId> есть активный промпт (MISSING FROG / Stash) — тепаемся и берём
+        local prompt, px, py, pz = self.deps.myPrompt()
+        if prompt ~= nil and px ~= nil then
+            self.deps.teleportTo(px, py + 3, pz)
+            if now - self.lastAction >= 0.35 then
+                self.lastAction = now
+                self.deps.triggerPrompt(prompt)
+            end
+            self.statusText = title .. " | подбор"
+            return
+        end
+
+        -- 3) Иначе летим на VisibleBountyTrackerPosition, чтобы простримить мобов / предмет
+        local tx, ty, tz = self.deps.trackerPosition()
+        if tx ~= nil then
+            local dx, dy, dz = tx - meX, ty - meY, tz - meZ
+            if dx * dx + dy * dy + dz * dz > 225 and now - self.lastAction >= stand_out_bounty.travel_retry then
+                self.lastAction = now
+                self.deps.teleportTo(tx, ty + 4, tz)
+            end
+            self.statusText = title .. " | лечу к цели"
+        else
+            self.statusText = title
+        end
+        return
+    end
+
+    -- Баунти НЕ активно: идём к Petyr, открываем доску, выбираем лучший тир и запускаем баунти!
+    if not ui.selectOpen then
+        local px, py, pz = self.deps.petyrPosition()
+        local dx, dy, dz = px - meX, py - meY, pz - meZ
+        if dx * dx + dy * dy + dz * dz > 64 then
+            self.deps.teleportTo(px, py + 2.5, pz + 3)
+            self.statusText = "Лечу к Petyr"
+            self.lastAction = now
+            self.state = "opening"
+            return
+        end
+
+        if self.state ~= "opening" or now - self.lastAction >= stand_out_bounty.open_retry then
+            self.state = "opening"
+            self.lastAction = now
+            self.deps.interactPetyr(ui.openEvent)
+            self.statusText = "Открываю Petyr"
+        end
+        return
+    end
+
+    -- Доска Petyr открыта!
+    if now - self.lastAction < stand_out_bounty.step_delay then
+        return
+    end
+
+    local desired = self:_desiredTier(opts)
+    local cur = ui.currentTier
+
+    -- Шаг 1: дойти до нужного (максимально доступного) тира
+    if self.state == "opening" or self.state == "idle" then
+        self.state = "seeking_tier"
+        self.lastTierSeen = nil
+        self.tierStuckCount = 0
+    end
+
+    if self.state == "seeking_tier" then
+        if cur ~= nil and cur < desired and ui.nextBtn ~= nil then
+            if self.lastTierSeen == cur then
+                self.tierStuckCount += 1
+            else
+                self.lastTierSeen = cur
+                self.tierStuckCount = 0
+            end
+
+            -- Если два клика по Next не увеличили тир — значит это максимальный открытый тир!
+            if self.tierStuckCount < 2 then
+                self.lastAction = now
+                self.deps.activateButton(ui.nextBtn)
+                self.statusText = string.format("Тир %d -> %d", cur, desired)
+                return
+            end
+        elseif cur ~= nil and cur > desired and ui.prevBtn ~= nil then
+            if self.lastTierSeen == cur then
+                self.tierStuckCount += 1
+            else
+                self.lastTierSeen = cur
+                self.tierStuckCount = 0
+            end
+            if self.tierStuckCount < 2 then
+                self.lastAction = now
+                self.deps.activateButton(ui.prevBtn)
+                self.statusText = string.format("Тир %d -> %d", cur, desired)
+                return
+            end
+        end
+
+        self.state = "picking"
+    end
+
+    -- Шаг 2: выбрать лучший баунти на этом тире
+    if self.state == "picking" then
+        local chosen = stand_out_bounty.pickBounty(ui.bounties, opts.skipIncidents ~= false)
+        if chosen == nil then
+            -- Если в режиме Max все не-инциденты пройдены на этом тире — спускаемся на 1 тир ниже
+            if (opts.tier == nil or opts.tier == "Max") and cur ~= nil and cur > 1 and ui.prevBtn ~= nil then
+                self.fallbackTier = cur - 1
+                self.state = "seeking_tier"
+                self.lastTierSeen = nil
+                self.tierStuckCount = 0
+                self.lastAction = now
+                self.deps.activateButton(ui.prevBtn)
+                self.statusText = string.format("Тир %d пройден -> Тир %d", cur, cur - 1)
+                return
+            end
+            self.statusText = "Нет доступных баунти"
+            self.lastAction = now + 2.0
+            return
+        end
+
+        self.lastAction = now
+        self.deps.activateButton(chosen.button)
+        self.state = "starting"
+        self.since = now
+        self.statusText = string.format("Tier %s: %s", tostring(cur or "?"), chosen.title)
+        return
+    end
+
+    -- Шаг 3: нажать Begin
+    if self.state == "starting" then
+        if ui.beginBtn ~= nil then
+            self.lastAction = now
+            self.deps.activateButton(ui.beginBtn)
+        end
+        if now - self.since >= stand_out_bounty.begin_wait then
+            -- Не запустилось (например, не хватило уровня на этот тир) — пробуем тир ниже
+            if (opts.tier == nil or opts.tier == "Max") and cur ~= nil and cur > 1 then
+                self.fallbackTier = cur - 1
+                self.state = "seeking_tier"
+                self.lastTierSeen = nil
+                self.tierStuckCount = 0
+            else
+                self.state = "picking"
+            end
+        end
+    end
+end
+
+return stand_out_bounty
 end
 
 __modules["stand_out_mobs"] = function(require)
