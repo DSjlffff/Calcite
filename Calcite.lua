@@ -6234,7 +6234,7 @@ function main.start(env)
             end,
             fightMobs = function(now, mobEntries, meX, meY, meZ)
                 if handle._soMob.farmer == nil then return nil end
-                local base = (current and current.standOutMobs) or settings.standOutMobs
+                local base = settings.standOutMobs
                 local fightOpts = {
                     filter = "All",
                     nameFilter = "",
@@ -6833,7 +6833,13 @@ function main.start(env)
                     pNames[pl.Name] = true
                 end
                 local sb = handle._soBounty
-                sb.mobs = stand_out_bounty.scanMyMobs(workspace, localPlayer.UserId, pNames)
+                local tx, ty, tz = nil, nil, nil
+                local okT, pos = pcall(function() return localPlayer:GetAttribute("VisibleBountyTrackerPosition") end)
+                if okT and pos ~= nil and pos.X ~= nil and pos.Y ~= nil and pos.Z ~= nil then
+                    tx, ty, tz = pos.X, pos.Y, pos.Z
+                end
+                local uiSnap = stand_out_bounty.readUi(localPlayer:FindFirstChildOfClass("PlayerGui"))
+                sb.mobs = stand_out_bounty.scanMyMobs(workspace, localPlayer.UserId, pNames, localPlayer.Name, tx, ty, tz, uiSnap.trackerObjective)
                 -- Промпт сканируем редко (раз в 1.0 с, и только когда текущего валидного промпта нет в кэше),
                 -- чтобы не просаживать FPS обходом Workspace.Game:GetDescendants()
                 local cachedOk = sb.prompt ~= nil and sb.prompt.Parent ~= nil and sb.prompt.Enabled == true
@@ -6843,11 +6849,6 @@ function main.start(env)
                 end
                 if not cachedOk and now - sb.lastPromptScan >= 1.0 then
                     sb.lastPromptScan = now
-                    local tx, ty, tz = nil, nil, nil
-                    local okT, pos = pcall(function() return localPlayer:GetAttribute("VisibleBountyTrackerPosition") end)
-                    if okT and pos ~= nil and pos.X ~= nil and pos.Y ~= nil and pos.Z ~= nil then
-                        tx, ty, tz = pos.X, pos.Y, pos.Z
-                    end
                     sb.prompt, sb.px, sb.py, sb.pz = stand_out_bounty.findMyPrompt(workspace, localPlayer.UserId, tx, ty, tz)
                 end
             end
@@ -7222,7 +7223,13 @@ function main.start(env)
                 for _, pl in Players:GetPlayers() do
                     pNames[pl.Name] = true
                 end
-                soBounty.mobs = stand_out_bounty.scanMyMobs(workspace, localPlayer.UserId, pNames)
+                local tx, ty, tz = nil, nil, nil
+                local okT, pos = pcall(function() return localPlayer:GetAttribute("VisibleBountyTrackerPosition") end)
+                if okT and pos ~= nil and pos.X ~= nil and pos.Y ~= nil and pos.Z ~= nil then
+                    tx, ty, tz = pos.X, pos.Y, pos.Z
+                end
+                local uiSnap = stand_out_bounty.readUi(localPlayer:FindFirstChildOfClass("PlayerGui"))
+                soBounty.mobs = stand_out_bounty.scanMyMobs(workspace, localPlayer.UserId, pNames, localPlayer.Name, tx, ty, tz, uiSnap.trackerObjective)
                 soBounty.wasOn = true
             end
             if not itemBusy then
@@ -10586,25 +10593,35 @@ function stand_out_bounty.pickBounty(bounties, skipIncidents)
     return nil
 end
 
--- Ищет живых мобов, принадлежащих НАШЕМУ баунти (BountyOwnerId / BountyLeaderId == userId).
-function stand_out_bounty.scanMyMobs(workspace, userId, playerNames)
-    local out = {}
+-- Ищет живых мобов, принадлежащих НАШЕМУ баунти:
+--   1) Приоритет 1: BountyOwnerId / BountyLeaderId == userId (число или строка) или ForcedTargetName == playerName
+--   2) Приоритет 2: имя моба (напр. "Hubert") встречается в тексте цели трекера ("Defeat Hubert (0/1)")
+--      либо моб имеет BountyId и находится в радиусе 80 студов от VisibleBountyTrackerPosition
+--   3) Приоритет 3: любой живой FightableNPC (кроме мирных диалоговых NPC) в радиусе 45 студов от точки трекера
+function stand_out_bounty.scanMyMobs(workspace, userId, playerNames, playerName, tx, ty, tz, trackerObjective)
+    local owned, matched, nearby = {}, {}, {}
     if workspace == nil or userId == nil then
-        return out
+        return owned
     end
     local gameFolder = workspace:FindFirstChild("Game")
     if gameFolder == nil then
-        return out
+        return owned
     end
 
-    local function checkModel(m)
-        if not safeIsA(m, "Model") then return end
+    local uidStr = tostring(userId)
+    local objLow = type(trackerObjective) == "string" and string.lower(trackerObjective) or ""
+    local seen = {}
+
+    local function checkModel(m, requireNoDialogue)
+        if m == nil or seen[m] or not safeIsA(m, "Model") then return end
+        seen[m] = true
         if playerNames ~= nil and playerNames[m.Name] then return end
         if safeAttr(m, "Stand") == true then return end
         if safeAttr(m, "FightableNPC") ~= true then return end
-
-        local ownerId = safeAttr(m, "BountyOwnerId") or safeAttr(m, "BountyLeaderId")
-        if ownerId ~= userId then return end
+        if requireNoDialogue then
+            if safeAttr(m, "DialogueOverride") ~= nil then return end
+            if m.FindFirstChildWhichIsA ~= nil and m:FindFirstChildWhichIsA("ClickDetector", true) ~= nil then return end
+        end
 
         local hum = m:FindFirstChildOfClass("Humanoid")
         if hum == nil or not finite(hum.Health) or hum.Health <= 0 then return end
@@ -10612,35 +10629,81 @@ function stand_out_bounty.scanMyMobs(workspace, userId, playerNames)
         if root == nil then return end
 
         local cfg = safeAttr(m, "Config")
-        local name = (type(cfg) == "string" and cfg ~= "") and cfg or (string.match(m.Name or "Mob", "^(.-)_%d+$") or m.Name)
-        table.insert(out, {
+        local stripped = string.match(m.Name or "Mob", "^(.-)_%d+$") or (m.Name or "Mob")
+        local name = (type(cfg) == "string" and cfg ~= "" and cfg ~= "Default") and cfg or stripped
+
+        local entry = {
             model = m,
             humanoid = hum,
             root = root,
             name = name,
             rawName = m.Name or "",
             isBoss = safeAttr(m, "BossNPC") == true or safeAttr(m, "CommandBoss") == true,
-        })
+        }
+
+        -- Приоритет 1: прямой владелец баунти или ForcedTargetName == мой ник
+        local ownerId = safeAttr(m, "BountyOwnerId") or safeAttr(m, "BountyLeaderId")
+        local forced = safeAttr(m, "ForcedTargetName")
+        if (ownerId ~= nil and (ownerId == userId or tostring(ownerId) == uidStr))
+            or (type(playerName) == "string" and playerName ~= "" and forced == playerName) then
+            table.insert(owned, entry)
+            return
+        end
+
+        -- Приоритет 2: имя моба прямо названо в цели трекера ("Defeat Hubert (0/1)" -> Hubert)
+        if objLow ~= "" then
+            local sLow = string.lower(stripped)
+            local cLow = string.lower(name)
+            if (#sLow >= 3 and string.find(objLow, sLow, 1, true) ~= nil)
+                or (#cLow >= 3 and string.find(objLow, cLow, 1, true) ~= nil) then
+                table.insert(matched, entry)
+                return
+            end
+        end
+
+        -- Приоритет 2b / 3: близость к точке трекера VisibleBountyTrackerPosition
+        if tx ~= nil and ty ~= nil and tz ~= nil and root.Position ~= nil then
+            local p = root.Position
+            if finite(p.X) and finite(p.Y) and finite(p.Z) then
+                local dx, dy, dz = p.X - tx, p.Y - ty, p.Z - tz
+                local d2 = dx * dx + dy * dy + dz * dz
+                local hasBountyId = safeAttr(m, "BountyId") ~= nil
+                if hasBountyId and d2 <= 80 * 80 then
+                    table.insert(matched, entry)
+                elseif d2 <= 45 * 45 and safeAttr(m, "BeachSeal") ~= true then
+                    table.insert(nearby, entry)
+                end
+            end
+        end
     end
 
     local pf = gameFolder:FindFirstChild("Players")
     if pf ~= nil and pf.GetChildren ~= nil then
         for _, c in pf:GetChildren() do
-            checkModel(c)
+            checkModel(c, false)
         end
     end
 
     local bw = gameFolder:FindFirstChild("BountyWorld")
-    local partyFolder = bw and bw:FindFirstChild("Party_" .. tostring(userId))
+    local partyFolder = bw and bw:FindFirstChild("Party_" .. uidStr)
     if partyFolder ~= nil and partyFolder.GetDescendants ~= nil then
         for _, d in partyFolder:GetDescendants() do
             if safeIsA(d, "Model") then
-                checkModel(d)
+                checkModel(d, false)
             end
         end
     end
 
-    return out
+    local npcs = gameFolder:FindFirstChild("NPCs")
+    if npcs ~= nil and npcs.GetChildren ~= nil then
+        for _, c in npcs:GetChildren() do
+            checkModel(c, true)
+        end
+    end
+
+    if #owned > 0 then return owned end
+    if #matched > 0 then return matched end
+    return nearby
 end
 
 -- Ищет активный ProximityPrompt баунти: сначала в Workspace.Game.BountyWorld.Party_<userId>,
@@ -10690,19 +10753,24 @@ function stand_out_bounty.findMyPrompt(workspace, userId, tx, ty, tz)
     end
 
     -- 2) Фолбэк: любой включённый ProximityPrompt в радиусе 25 студов от VisibleBountyTrackerPosition
+    -- (пропускаем NPC-промпты Petyr/магазинов, чтобы не перехватывали бой, когда моб вроде Hubert спавнится у Petyr)
     if tx ~= nil and ty ~= nil and tz ~= nil and gameFolder.GetDescendants ~= nil then
+        local npcsFolder = gameFolder:FindFirstChild("NPCs")
         local bestPrompt, bestX, bestY, bestZ = nil, nil, nil, nil
         local bestDist2 = 25 * 25
         for _, d in gameFolder:GetDescendants() do
             if promptUsable(d) then
-                local pos = promptPosition(d)
-                if pos ~= nil and finite(pos.X) and finite(pos.Y) and finite(pos.Z) then
-                    local dx, dy, dz = pos.X - tx, pos.Y - ty, pos.Z - tz
-                    local dist2 = dx * dx + dy * dy + dz * dz
-                    if dist2 <= bestDist2 then
-                        bestDist2 = dist2
-                        bestPrompt = d
-                        bestX, bestY, bestZ = pos.X, pos.Y, pos.Z
+                local inNpcs = npcsFolder ~= nil and d.IsDescendantOf ~= nil and d:IsDescendantOf(npcsFolder)
+                if not inNpcs then
+                    local pos = promptPosition(d)
+                    if pos ~= nil and finite(pos.X) and finite(pos.Y) and finite(pos.Z) then
+                        local dx, dy, dz = pos.X - tx, pos.Y - ty, pos.Z - tz
+                        local dist2 = dx * dx + dy * dy + dz * dz
+                        if dist2 <= bestDist2 then
+                            bestDist2 = dist2
+                            bestPrompt = d
+                            bestX, bestY, bestZ = pos.X, pos.Y, pos.Z
+                        end
                     end
                 end
             end
