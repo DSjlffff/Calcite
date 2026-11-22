@@ -3220,6 +3220,10 @@ local pairs = {
     ["ESP оружия"] = "Weapon ESP", ["ESP предметов"] = "Item ESP", ["Абилки E/R"] = "E/R abilities",
     ["Автоподбор"] = "Auto pick up", ["Предметы на карте"] = "World items",
     ["Закопанные припасы"] = "Buried supplies", ["Возвращаться назад"] = "Return to start",
+    ["Фильтр мобов"] = "Mob filter", ["Все мобы"] = "All mobs",
+    ["Без боссов"] = "No bosses", ["Только боссы"] = "Bosses only",
+    ["Имя моба"] = "Mob name", ["Скиллы"] = "Skills",
+    ["M1 на кулдауне"] = "M1 on cooldown", ["Метод"] = "Method",
     ["Цвет меток"] = "Label color", ["Отображать"] = "Show", ["Собирать"] = "Collect",
     ["Ходить, пока нет цели"] = "Roam while idle", ["Скорость глайдера"] = "Glide speed",
     ["Наведение"] = "Aim", ["Основное"] = "General", ["Отображение"] = "Display", ["Аим"] = "Aim",
@@ -4000,6 +4004,7 @@ local hitbox = require("./hitbox")
 local item_asylum = require("./item_asylum")
 local stand_out = require("./stand_out")
 local stand_out_pickup = require("./stand_out_pickup")
+local stand_out_mobs = require("./stand_out_mobs")
 local glider = require("./glider")
 local yba_npcs = require("./yba_npcs")
 local yba_waypoints = require("./yba_waypoints")
@@ -4181,8 +4186,11 @@ function main.start(env)
     -- or the hook on the shot of a game, goes by these, never by the switches as they are written
     local current = nil
     local shooter = nil             -- the auto fire, see trigger.lua
-    -- pre-allocated so feature state (e.g. _soPick) stays under Luau's 200-local limit in main.start
-    local handle = { _soPick = { picker = nil, entries = {}, wasOn = false } }
+    -- pre-allocated so feature state (_soPick / _soMob) stays under Luau's 200-local limit in main.start
+    local handle = {
+        _soPick = { picker = nil, entries = {}, wasOn = false },
+        _soMob = { farmer = nil, noclip = nil, entries = {}, wasOn = false },
+    }
 
     -- what the executor gives back for a connection is known from its documentation only: one that cannot be
     -- taken back the expected way must not stop the others from being taken back
@@ -4928,6 +4936,17 @@ function main.start(env)
         if handle._soPick.picker ~= nil then
             pcall(function()
                 handle._soPick.picker:stop()
+            end)
+        end
+
+        if handle._soMob.farmer ~= nil then
+            pcall(function()
+                handle._soMob.farmer:stop()
+            end)
+        end
+        if handle._soMob.noclip ~= nil then
+            pcall(function()
+                handle._soMob.noclip:step(false)
             end)
         end
 
@@ -5916,6 +5935,103 @@ function main.start(env)
         end,
     })
 
+    do
+        local keyMap = {
+            E = "E",
+            ["1"] = "One", ["2"] = "Two", ["3"] = "Three", ["4"] = "Four", ["5"] = "Five",
+            ["6"] = "Six", ["7"] = "Seven", ["8"] = "Eight", ["9"] = "Nine",
+        }
+        handle._soMob.noclip = noclip.new({
+            character = function() return localPlayer.Character end,
+        })
+        handle._soMob.farmer = stand_out_mobs.new({
+            setPose = function(px, py, pz, lx, ly, lz)
+                local character = localPlayer.Character
+                local root = character and character:FindFirstChild("HumanoidRootPart")
+                if root ~= nil then
+                    local p = env.Vector3.new(px, py, pz)
+                    local t = env.Vector3.new(lx, ly, lz)
+                    if env.CFrame.lookAt ~= nil then
+                        root.CFrame = env.CFrame.lookAt(p, t)
+                    else
+                        root.CFrame = env.CFrame.new(p, t)
+                    end
+                    root.AssemblyLinearVelocity = env.Vector3.new(0, 0, 0)
+                    pcall(function() root.AssemblyAngularVelocity = env.Vector3.new(0, 0, 0) end)
+                end
+            end,
+            setNoclip = function(on)
+                if handle._soMob.noclip ~= nil then
+                    handle._soMob.noclip:step(on)
+                end
+            end,
+            pressKey = function(keyStr)
+                local vim = env.virtualInputManager
+                local kcName = keyMap[keyStr]
+                local kc = kcName and env.Enum and env.Enum.KeyCode and env.Enum.KeyCode[kcName]
+                if vim ~= nil and kc ~= nil then
+                    pcall(function() vim:SendKeyEvent(true, kc, false, game) end)
+                    if env.task and env.task.delay then
+                        env.task.delay(0.05, function()
+                            pcall(function() vim:SendKeyEvent(false, kc, false, game) end)
+                        end)
+                    else
+                        pcall(function() vim:SendKeyEvent(false, kc, false, game) end)
+                    end
+                end
+            end,
+            clickM1 = function()
+                local vim = env.virtualInputManager
+                if vim ~= nil then
+                    pcall(function() vim:SendMouseButtonEvent(0, 0, 0, true, camera or game, 0) end)
+                    if env.task and env.task.delay then
+                        env.task.delay(0.03, function()
+                            pcall(function() vim:SendMouseButtonEvent(0, 0, 0, false, camera or game, 0) end)
+                        end)
+                    else
+                        pcall(function() vim:SendMouseButtonEvent(0, 0, 0, false, camera or game, 0) end)
+                    end
+                elseif type(env.mouse1press) == "function" and type(env.mouse1release) == "function" then
+                    pcall(env.mouse1press)
+                    if env.task and env.task.delay then
+                        env.task.delay(0.03, function() pcall(env.mouse1release) end)
+                    else
+                        pcall(env.mouse1release)
+                    end
+                end
+            end,
+            isSummoned = function()
+                local c = localPlayer.Character
+                if c == nil then return false end
+                local ok, v = pcall(function() return c:GetAttribute("Summoned") end)
+                return ok and v == true
+            end,
+            canSummon = function()
+                local c = localPlayer.Character
+                if c == nil then return false end
+                local okNo, noSum = pcall(function() return c:GetAttribute("NoSummon") end)
+                if okNo and noSum == true then return false end
+                local info = stand_out.playerInfo(localPlayer)
+                return info.stand ~= ""
+            end,
+            isSkillActive = function()
+                local data = localPlayer:FindFirstChild("Data")
+                local sa = data and data:FindFirstChild("SkillActive")
+                return sa ~= nil and sa.Value == true
+            end,
+            isStunned = function()
+                local c = localPlayer.Character
+                if c == nil then return false end
+                local ok, v = pcall(function() return c:GetAttribute("Stunned") end)
+                return ok and v == true
+            end,
+            guiCooldowns = function()
+                local pg = localPlayer:FindFirstChildOfClass("PlayerGui")
+                return stand_out_mobs.guiCooldowns(pg)
+            end,
+        })
+    end
+
     -- what follows listens to Steal an Egg and looks through its plots: in any other game there is nothing of it
     local stealGame = modes.detect(universeId) == "StealEgg" and env.task ~= nil
     local stealWasOn = false        -- whether the auto steal ran in the last frame: it is stopped once when it goes off
@@ -6481,6 +6597,13 @@ function main.start(env)
             if s.standOutPickup ~= nil and s.standOutPickup.enabled then
                 handle._soPick.entries = stand_out_pickup.scan(workspace, s.standOutPickup)
             end
+            if s.standOutMobs ~= nil and s.standOutMobs.enabled then
+                local pNames = {}
+                for _, pl in Players:GetPlayers() do
+                    pNames[pl.Name] = true
+                end
+                handle._soMob.entries = stand_out_mobs.scan(workspace, pNames)
+            end
 
             if itemsOn then
                 if now - lastSettle >= settle_interval then
@@ -6823,6 +6946,31 @@ function main.start(env)
             if soPick.picker ~= nil then
                 soPick.picker:stop()
                 ui.setStandOutPickup(soPick.picker.taken, "")
+            end
+        end
+
+        -- Stand Out Mob Farming: если Item farm сейчас летит за предметом, уступаем ему на долю секунды
+        local soMob = handle._soMob
+        local itemBusy = s.standOutPickup ~= nil and s.standOutPickup.enabled
+            and soPick.picker ~= nil and soPick.picker.target ~= nil
+        if s.standOutMobs ~= nil and s.standOutMobs.enabled and haveLocal and soMob.farmer ~= nil then
+            if not soMob.wasOn then
+                local pNames = {}
+                for _, pl in Players:GetPlayers() do
+                    pNames[pl.Name] = true
+                end
+                soMob.entries = stand_out_mobs.scan(workspace, pNames)
+                soMob.wasOn = true
+            end
+            if not itemBusy then
+                soMob.farmer:update(now, soMob.entries, s.standOutMobs, localX, localY, localZ)
+                ui.setStandOutMob(soMob.farmer.kills, soMob.farmer.statusText)
+            end
+        elseif soMob.wasOn then
+            soMob.wasOn = false
+            if soMob.farmer ~= nil then
+                soMob.farmer:stop()
+                ui.setStandOutMob(soMob.farmer.kills, "")
             end
         end
 
@@ -7198,13 +7346,70 @@ function menu.create(deps)
         .. "новые спавны. 1800 ст/с — как у Slowc2960; выше можно, но может дёргать камеру игры.", true)
     local farmCount = farmGroup:AddLabel("Подобрано: 0")
 
-    -- Stand Out Item farm (stand_out_pickup.lua)
-    local standOutFarmGroup = farmTab:AddLeftGroupbox("Item farm")
-    toggle(standOutFarmGroup, "StandOutPickupEnabled", "Автоподбор", settings.standOutPickup, "enabled")
-    toggle(standOutFarmGroup, "StandOutPickupWorld", "Предметы на карте", settings.standOutPickup, "worldItems")
-    toggle(standOutFarmGroup, "StandOutPickupBuried", "Закопанные припасы", settings.standOutPickup, "buried")
-    toggle(standOutFarmGroup, "StandOutPickupReturn", "Возвращаться назад", settings.standOutPickup, "returnBack")
-    local standOutPickupCount = standOutFarmGroup:AddLabel("Подобрано: 0")
+    -- Stand Out AutoFarm: Item farm + Mob Farming + Farm Config (grouped in one local table for Luau register budget)
+    local soFarm = {}
+    soFarm.itemGroup = farmTab:AddLeftGroupbox("Item farm")
+    toggle(soFarm.itemGroup, "StandOutPickupEnabled", "Автоподбор", settings.standOutPickup, "enabled")
+    toggle(soFarm.itemGroup, "StandOutPickupWorld", "Предметы на карте", settings.standOutPickup, "worldItems")
+    toggle(soFarm.itemGroup, "StandOutPickupBuried", "Закопанные припасы", settings.standOutPickup, "buried")
+    toggle(soFarm.itemGroup, "StandOutPickupReturn", "Возвращаться назад", settings.standOutPickup, "returnBack")
+    soFarm.pickupCount = soFarm.itemGroup:AddLabel("Подобрано: 0")
+
+    soFarm.mobGroup = farmTab:AddLeftGroupbox("Mob Farming")
+    toggle(soFarm.mobGroup, "StandOutMobEnabled", "Включить", settings.standOutMobs, "enabled")
+    do
+        local filterLabels = { "Все мобы", "Без боссов", "Только боссы" }
+        local filterOf = { ["Все мобы"] = "All", ["Без боссов"] = "NoBosses", ["Только боссы"] = "BossesOnly" }
+        local filterIdx = if settings.standOutMobs.filter == "NoBosses" then 2
+            elseif settings.standOutMobs.filter == "BossesOnly" then 3 else 1
+        soFarm.mobGroup:AddDropdown("StandOutMobFilter", {
+            Text = "Фильтр мобов", Values = filterLabels, Default = filterIdx,
+        })
+        Options.StandOutMobFilter:OnChanged(function()
+            settings.standOutMobs.filter = filterOf[Options.StandOutMobFilter.Value] or "All"
+        end)
+        soFarm.mobGroup:AddInput("StandOutMobName", {
+            Text = "Имя моба", Default = settings.standOutMobs.nameFilter or "", Placeholder = "Seal, DIO...",
+        })
+        Options.StandOutMobName:OnChanged(function()
+            settings.standOutMobs.nameFilter = tostring(Options.StandOutMobName.Value or "")
+        end)
+    end
+    soFarm.mobStatus = soFarm.mobGroup:AddLabel("Убито: 0")
+
+    soFarm.cfgGroup = farmTab:AddRightGroupbox("Farm Config")
+    toggle(soFarm.cfgGroup, "StandOutMobAutoSummon", "Auto Summon (E)", settings.standOutMobs, "autoSummon")
+    toggle(soFarm.cfgGroup, "StandOutMobAutoSkill", "Auto Skill", settings.standOutMobs, "autoSkill")
+    do
+        local skillList = { "1", "2", "3", "4", "5", "6", "7", "8", "9" }
+        local skillDefault = {}
+        for _, k in skillList do
+            if settings.standOutMobs.skills[k] then
+                table.insert(skillDefault, k)
+            end
+        end
+        soFarm.cfgGroup:AddDropdown("StandOutMobSkills", {
+            Text = "Скиллы", Values = skillList, Default = skillDefault, Multi = true,
+        })
+        Options.StandOutMobSkills:OnChanged(function()
+            local chosen = Options.StandOutMobSkills.Value or {}
+            for _, k in skillList do
+                settings.standOutMobs.skills[k] = chosen[k] == true
+            end
+        end)
+    end
+    toggle(soFarm.cfgGroup, "StandOutMobAutoM1", "M1 на кулдауне", settings.standOutMobs, "autoM1")
+    slider(soFarm.cfgGroup, "StandOutMobDistance", "Дистанция", settings.standOutMobs, "distance", 2, 20, " ст")
+    do
+        local methodList = { "Behind", "Below", "Over", "Front" }
+        soFarm.cfgGroup:AddDropdown("StandOutMobMethod", {
+            Text = "Метод", Values = methodList,
+            Default = table.find(methodList, settings.standOutMobs.method) or 1,
+        })
+        Options.StandOutMobMethod:OnChanged(function()
+            settings.standOutMobs.method = Options.StandOutMobMethod.Value or "Behind"
+        end)
+    end
 
     -- aim
     local aimGroup = aimTab:AddLeftGroupbox("Наведение")
@@ -7594,9 +7799,11 @@ function menu.create(deps)
         npcTab:SetVisible(modes.has(mode, "Npc"))
         stealTab:SetVisible(modes.has(mode, "Steal"))
         teleportTab:SetVisible(modes.has(mode, "Teleport"))
-        farmTab:SetVisible(modes.has(mode, "AutoFarm") or modes.has(mode, "StandOutPickup"))
+        farmTab:SetVisible(modes.has(mode, "AutoFarm") or modes.has(mode, "StandOutPickup") or modes.has(mode, "StandOutMobs"))
         farmGroup:SetVisible(modes.has(mode, "AutoFarm"))
-        standOutFarmGroup:SetVisible(modes.has(mode, "StandOutPickup"))
+        soFarm.itemGroup:SetVisible(modes.has(mode, "StandOutPickup"))
+        soFarm.mobGroup:SetVisible(modes.has(mode, "StandOutMobs"))
+        soFarm.cfgGroup:SetVisible(modes.has(mode, "StandOutMobs"))
         teamCheck:SetVisible(modes.has(mode, "TeamCheck"))
         throughWalls:SetVisible(modes.has(mode, "Wallbang"))
         autoStop:SetVisible(modes.has(mode, "AutoStop"))
@@ -7635,16 +7842,26 @@ function menu.create(deps)
         end
     end
 
-    -- Stand Out Auto Pick Up counter / current target
-    local shownStandOutStatus = nil
+    -- Stand Out Auto Pick Up & Mob Farming status labels
     function ui.setStandOutPickup(count, targetName)
         local text = string.format("Подобрано: %d", count)
         if targetName ~= nil and targetName ~= "" then
             text = text .. " | " .. targetName
         end
-        if text ~= shownStandOutStatus then
-            shownStandOutStatus = text
-            standOutPickupCount:SetText(text)
+        if text ~= soFarm.shownPickup then
+            soFarm.shownPickup = text
+            soFarm.pickupCount:SetText(text)
+        end
+    end
+
+    function ui.setStandOutMob(kills, targetText)
+        local text = string.format("Убито: %d", kills)
+        if targetText ~= nil and targetText ~= "" then
+            text = text .. " | " .. targetText
+        end
+        if text ~= soFarm.shownMob then
+            soFarm.shownMob = text
+            soFarm.mobStatus:SetText(text)
         end
     end
 
@@ -7812,8 +8029,8 @@ local features = {
     ItemAsylum = { Players = true, Health = true, Aim = true, IaWeapon = true },
     -- Rivals: team shooter — пока основа (ESP с здоровьем + aim + team check)
     Rivals = { Players = true, Health = true, TeamCheck = true, Aim = true },
-    -- Stand Out: без команд; ESP игроков с HP + стенд / спек / оружие (stand_out.lua) + автоподбор (stand_out_pickup.lua)
-    StandOut = { Players = true, Health = true, StandOutInfo = true, StandOutPickup = true },
+    -- Stand Out: без команд; ESP игроков (stand_out.lua) + автоподбор (stand_out_pickup.lua) + фарм мобов (stand_out_mobs.lua)
+    StandOut = { Players = true, Health = true, StandOutInfo = true, StandOutPickup = true, StandOutMobs = true },
 }
 
 -- what a mode starts with set otherwise than the settings are written: fields of the table of settings.defaults
@@ -9067,6 +9284,18 @@ function settings.defaults(mode)
             buried = true,
             returnBack = true,
         },
+        -- Stand Out Mob Farming: фарм враждебных мобов (stand_out_mobs.lua)
+        standOutMobs = {
+            enabled = false,
+            filter = "All",       -- "All" | "NoBosses" | "BossesOnly"
+            nameFilter = "",      -- подстрока имени моба (пусто = любой)
+            autoSummon = true,
+            autoSkill = true,
+            skills = { ["1"] = true, ["2"] = true, ["3"] = true, ["4"] = true },
+            autoM1 = true,
+            distance = 6,
+            method = "Behind",    -- "Behind" | "Below" | "Over" | "Front"
+        },
         -- MVS Silent Aim: клик ЛКМ зовёт Net:RemoteEvent("GunKill") на цель Аима (mvs.lua).
         -- Rage mode собирается из Aim + Silent + AutoFire на вкладке — отдельного тумблера нет
         mvsSilent = {
@@ -9318,6 +9547,14 @@ function settings.inEffect(s, mode)
     e.standOutPickup = table.clone(s.standOutPickup)
     if not modes.has(mode, "StandOutPickup") then
         e.standOutPickup.enabled = false
+    end
+
+    e.standOutMobs = table.clone(s.standOutMobs)
+    if s.standOutMobs and s.standOutMobs.skills then
+        e.standOutMobs.skills = table.clone(s.standOutMobs.skills)
+    end
+    if not modes.has(mode, "StandOutMobs") then
+        e.standOutMobs.enabled = false
     end
 
     -- whether any Silent Aim (Town/MVS/Strike) is on
@@ -9773,6 +10010,451 @@ function stand_out.format(info, showStand, showSub, showWeapon)
 end
 
 return stand_out
+end
+
+__modules["stand_out_mobs"] = function(require)
+-- Stand Out Mob Farming: сканер враждебных мобов, расчёт позиции (Behind/Below/Over/Front),
+-- Auto Summon (E), Auto Skill (1..9 с проверкой кулдауна и SkillActive) и M1-фолбэк.
+-- Факты игры из tools/standout_probe_mobs.lua:
+--   • мобы лежат в Workspace.Game.Players (не реальные игроки), атрибут FightableNPC = true,
+--     имя типа в атрибуте Config (Seal, DIO, ...), боссы помечены BossNPC = true / CommandBoss = true
+--   • состояние стенда: Character:GetAttribute("Summoned") == true, NoSummon == true
+--   • активный скилл: Player.Data.SkillActive (BoolValue) — пока true, не жмём другие скиллы/M1
+--   • кулдауны скиллов: PlayerGui.MainHUD.Skills.<Skill>.Cooldown.Size.X.Scale > 0.02
+-- Чистая логика поверх deps, проверяется tests/stand_out_mobs_test.lua.
+local stand_out_mobs = {}
+
+stand_out_mobs.methods = { "Behind", "Below", "Over", "Front" }
+stand_out_mobs.skill_keys = { "1", "2", "3", "4", "5", "6", "7", "8", "9" }
+
+stand_out_mobs.summon_cooldown = 1.2
+stand_out_mobs.summon_settle = 0.25
+stand_out_mobs.skill_interval = 0.25
+stand_out_mobs.skill_retry = 0.85
+stand_out_mobs.m1_interval = 0.18
+stand_out_mobs.post_skill_m1_delay = 0.16
+
+local Farmer = {}
+Farmer.__index = Farmer
+
+local function finite(v)
+    return type(v) == "number" and v == v and v ~= math.huge and v ~= -math.huge
+end
+
+local function safeAttr(obj, name)
+    if obj == nil or obj.GetAttribute == nil then
+        return nil
+    end
+    local ok, val = pcall(function()
+        return obj:GetAttribute(name)
+    end)
+    if ok then
+        return val
+    end
+    return nil
+end
+
+local function mobConfigName(model)
+    local cfg = safeAttr(model, "Config")
+    if type(cfg) == "string" and cfg ~= "" and cfg ~= "Default" then
+        return cfg
+    end
+    local raw = model.Name or "Mob"
+    local stripped = string.match(raw, "^(.-)_%d+$")
+    return stripped or raw
+end
+
+local function isAliveMob(entry)
+    if entry == nil or entry.model == nil or entry.model.Parent == nil then
+        return false
+    end
+    local hum = entry.humanoid
+    if hum == nil or hum.Parent == nil then
+        return false
+    end
+    local hp = hum.Health
+    if not finite(hp) or hp <= 0 then
+        return false
+    end
+    local root = entry.root
+    if root == nil or root.Parent == nil or root.CFrame == nil then
+        return false
+    end
+    return true
+end
+
+local function tryAddMob(out, model, playerNames, requireNoDialogue)
+    if model == nil or model.IsA == nil or not model:IsA("Model") then
+        return
+    end
+    if playerNames ~= nil and playerNames[model.Name] then
+        return
+    end
+    if safeAttr(model, "Stand") == true then
+        return
+    end
+    if safeAttr(model, "FightableNPC") ~= true then
+        return
+    end
+    if requireNoDialogue then
+        if safeAttr(model, "DialogueOverride") ~= nil then
+            return
+        end
+        if model.FindFirstChildWhichIsA ~= nil and model:FindFirstChildWhichIsA("ClickDetector", true) ~= nil then
+            return
+        end
+    end
+
+    local hum = model:FindFirstChildOfClass("Humanoid")
+    if hum == nil or not finite(hum.Health) or hum.Health <= 0 then
+        return
+    end
+    local root = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+    if root == nil then
+        return
+    end
+
+    table.insert(out, {
+        model = model,
+        humanoid = hum,
+        root = root,
+        name = mobConfigName(model),
+        rawName = model.Name or "",
+        isBoss = safeAttr(model, "BossNPC") == true or safeAttr(model, "CommandBoss") == true,
+    })
+end
+
+-- Сканирует живых враждебных мобов (FightableNPC = true) в Workspace.Game.Players (+ боевые NPC без диалога).
+function stand_out_mobs.scan(workspace, playerNames)
+    local out = {}
+    if workspace == nil then
+        return out
+    end
+    local gameFolder = workspace:FindFirstChild("Game")
+    if gameFolder == nil then
+        return out
+    end
+
+    local playersFolder = gameFolder:FindFirstChild("Players")
+    if playersFolder ~= nil and playersFolder.GetChildren ~= nil then
+        for _, child in playersFolder:GetChildren() do
+            tryAddMob(out, child, playerNames, false)
+        end
+    end
+
+    local npcsFolder = gameFolder:FindFirstChild("NPCs")
+    if npcsFolder ~= nil and npcsFolder.GetChildren ~= nil then
+        for _, child in npcsFolder:GetChildren() do
+            tryAddMob(out, child, playerNames, true)
+        end
+    end
+
+    return out
+end
+
+-- Проверяет, подходит ли моб под фильтр (Все / Без боссов / Только боссы + опциональное имя).
+function stand_out_mobs.matches(entry, opts)
+    if entry == nil or opts == nil then
+        return false
+    end
+    local filter = opts.filter or "All"
+    if filter == "NoBosses" and entry.isBoss then
+        return false
+    elseif filter == "BossesOnly" and not entry.isBoss then
+        return false
+    end
+
+    local query = opts.nameFilter
+    if type(query) == "string" then
+        local trimmed = string.lower(string.match(query, "^%s*(.-)%s*$") or "")
+        if trimmed ~= "" then
+            local n1 = string.lower(entry.name or "")
+            local n2 = string.lower(entry.rawName or "")
+            if string.find(n1, trimmed, 1, true) == nil and string.find(n2, trimmed, 1, true) == nil then
+                return false
+            end
+        end
+    end
+
+    return true
+end
+
+-- Читает из PlayerGui.MainHUD.Skills какие слоты 1..9 сейчас на кулдауне.
+-- Возвращает таблицу { [slotNumber] = true } для слотов на кулдауне.
+function stand_out_mobs.guiCooldowns(playerGui)
+    local onCd = {}
+    if playerGui == nil then
+        return onCd
+    end
+    local mainHud = playerGui:FindFirstChild("MainHUD")
+    local skills = mainHud and mainHud:FindFirstChild("Skills")
+    if skills == nil or skills.GetChildren == nil then
+        return onCd
+    end
+
+    local frames = {}
+    for _, child in skills:GetChildren() do
+        if child.Name ~= "Template" and child.Name ~= "TemplateTip" and child.Name ~= "Ability" then
+            local cd = child.FindFirstChild ~= nil and child:FindFirstChild("Cooldown") or nil
+            if cd ~= nil and child.Visible ~= false then
+                table.insert(frames, child)
+            end
+        end
+    end
+
+    table.sort(frames, function(a, b)
+        local la = a.LayoutOrder or 0
+        local lb = b.LayoutOrder or 0
+        if la ~= lb then
+            return la < lb
+        end
+        return (a.Name or "") < (b.Name or "")
+    end)
+
+    for idx, frame in frames do
+        local slot = idx
+        local keyObj = frame:FindFirstChild("Key")
+        if keyObj ~= nil then
+            local txt = nil
+            if type(keyObj.Text) == "string" then
+                txt = keyObj.Text
+            elseif keyObj.GetDescendants ~= nil then
+                for _, d in keyObj:GetDescendants() do
+                    if type(d.Text) == "string" and string.match(d.Text, "^%s*[1-9]%s*$") then
+                        txt = d.Text
+                        break
+                    end
+                end
+            end
+            if txt ~= nil then
+                local parsed = tonumber(string.match(txt, "[1-9]"))
+                if parsed ~= nil then
+                    slot = parsed
+                end
+            end
+        end
+
+        local cd = frame:FindFirstChild("Cooldown")
+        if cd ~= nil and cd.Size ~= nil and cd.Size.X ~= nil and finite(cd.Size.X.Scale) and cd.Size.X.Scale > 0.02 then
+            onCd[slot] = true
+        end
+    end
+
+    return onCd
+end
+
+-- Расчёт позиции персонажа и точки взгляда относительно моба.
+-- mobPos = { X, Y, Z }, mobLook = { X, Y, Z } (LookVector корня моба).
+-- Возвращает px, py, pz, lookX, lookY, lookZ.
+function stand_out_mobs.goalPose(mobPos, mobLook, method, distance)
+    local d = tonumber(distance) or 6
+    if d < 1 then d = 1 end
+
+    local lx = mobLook and mobLook.X or 0
+    local lz = mobLook and mobLook.Z or -1
+    local horiz = math.sqrt(lx * lx + lz * lz)
+    if horiz > 1e-4 then
+        lx = lx / horiz
+        lz = lz / horiz
+    else
+        lx, lz = 0, -1
+    end
+
+    local mx, my, mz = mobPos.X, mobPos.Y, mobPos.Z
+    local m = method or "Behind"
+
+    if m == "Front" then
+        return mx + lx * d, my, mz + lz * d, mx, my, mz
+    elseif m == "Over" then
+        return mx - lx * 0.05, my + d, mz - lz * 0.05, mx, my, mz
+    elseif m == "Below" then
+        return mx - lx * 0.05, my - d, mz - lz * 0.05, mx, my, mz
+    end
+
+    -- Behind (по умолчанию)
+    return mx - lx * d, my, mz - lz * d, mx, my, mz
+end
+
+-- deps:
+--   setPose(px, py, pz, lookX, lookY, lookZ)
+--   setNoclip(on)
+--   pressKey(keyName)            "E", "1".."9"
+--   clickM1()
+--   isSummoned() -> boolean
+--   canSummon() -> boolean       true если есть стенд и NoSummon ~= true
+--   isSkillActive() -> boolean
+--   isStunned() -> boolean
+--   guiCooldowns() -> { [1..9] = true }  (optional)
+function stand_out_mobs.new(deps)
+    return setmetatable({
+        deps = deps,
+        target = nil,
+        kills = 0,
+        lastMobPos = nil,
+        wasBelow = false,
+        lastSummonAt = -99,
+        lastSkillAt = -99,
+        lastM1At = -99,
+        nextSkillIdx = 1,
+        triedAt = {},
+        statusText = "",
+    }, Farmer)
+end
+
+function Farmer:_exitBelow()
+    if self.wasBelow then
+        self.wasBelow = false
+        if self.lastMobPos ~= nil and self.deps.setPose ~= nil then
+            local p = self.lastMobPos
+            self.deps.setPose(p.X, p.Y + 3, p.Z, p.X, p.Y + 3, p.Z - 1)
+        end
+        if self.deps.setNoclip ~= nil then
+            self.deps.setNoclip(false)
+        end
+    end
+end
+
+function Farmer:stop()
+    self:_exitBelow()
+    self.target = nil
+    self.lastMobPos = nil
+    self.statusText = ""
+end
+
+local function pickNearest(entries, opts, meX, meY, meZ)
+    if entries == nil then
+        return nil
+    end
+    local best, bestDist = nil, math.huge
+    for _, entry in entries do
+        if not isAliveMob(entry) or not stand_out_mobs.matches(entry, opts) then
+            continue
+        end
+        local p = entry.root.Position or entry.root.CFrame.Position
+        if p == nil then
+            continue
+        end
+        local dx, dy, dz = p.X - meX, p.Y - meY, p.Z - meZ
+        local dist = dx * dx + dy * dy + dz * dz
+        if dist < bestDist then
+            bestDist = dist
+            best = entry
+        end
+    end
+    return best
+end
+
+function Farmer:update(now, entries, opts, meX, meY, meZ)
+    if meX == nil or meY == nil or meZ == nil then
+        self:stop()
+        return nil
+    end
+
+    -- Проверяем текущую цель: умерла или перестала подходить под фильтр
+    local target = self.target
+    if target ~= nil then
+        if not isAliveMob(target) then
+            self.kills += 1
+            self.target = nil
+            target = nil
+        elseif not stand_out_mobs.matches(target, opts) then
+            self.target = nil
+            target = nil
+        end
+    end
+
+    if target == nil then
+        target = pickNearest(entries, opts, meX, meY, meZ)
+        self.target = target
+    end
+
+    if target == nil then
+        self:_exitBelow()
+        self.statusText = ""
+        return nil
+    end
+
+    local cf = target.root.CFrame
+    local mobPos = target.root.Position or cf.Position
+    local mobLook = cf.LookVector
+    self.lastMobPos = { X = mobPos.X, Y = mobPos.Y, Z = mobPos.Z }
+
+    local method = opts.method or "Behind"
+    if method == "Below" then
+        if not self.wasBelow then
+            self.wasBelow = true
+        end
+        if self.deps.setNoclip ~= nil then
+            self.deps.setNoclip(true)
+        end
+    elseif self.wasBelow then
+        self:_exitBelow()
+    end
+
+    local px, py, pz, lx, ly, lz = stand_out_mobs.goalPose(mobPos, mobLook, method, opts.distance)
+    self.deps.setPose(px, py, pz, lx, ly, lz)
+
+    local hp = math.floor((target.humanoid.Health or 0) + 0.5)
+    local maxHp = math.floor((target.humanoid.MaxHealth or 0) + 0.5)
+    self.statusText = string.format("%s (%d/%d)", target.name, hp, maxHp)
+
+    -- Если в стане или скилл уже активен (например, барраж) — просто держим позицию и не перебиваем
+    if self.deps.isStunned ~= nil and self.deps.isStunned() then
+        return target
+    end
+    if self.deps.isSkillActive ~= nil and self.deps.isSkillActive() then
+        return target
+    end
+
+    -- 1. Auto Summon (E)
+    if opts.autoSummon and self.deps.canSummon ~= nil and self.deps.canSummon() then
+        if self.deps.isSummoned ~= nil and not self.deps.isSummoned() then
+            if now - self.lastSummonAt >= stand_out_mobs.summon_cooldown then
+                self.lastSummonAt = now
+                self.deps.pressKey("E")
+            end
+            return target
+        end
+    end
+
+    if now - self.lastSummonAt < stand_out_mobs.summon_settle then
+        return target
+    end
+
+    -- 2. Auto Skill (1..9)
+    local firedSkill = false
+    if opts.autoSkill and opts.skills ~= nil and now - self.lastSkillAt >= stand_out_mobs.skill_interval then
+        local onCd = (self.deps.guiCooldowns ~= nil and self.deps.guiCooldowns()) or {}
+        local total = #stand_out_mobs.skill_keys
+        for offset = 0, total - 1 do
+            local idx = ((self.nextSkillIdx - 1 + offset) % total) + 1
+            local keyStr = stand_out_mobs.skill_keys[idx]
+            if opts.skills[keyStr] == true and onCd[idx] ~= true then
+                local prev = self.triedAt[idx]
+                if prev == nil or now - prev >= stand_out_mobs.skill_retry then
+                    self.triedAt[idx] = now
+                    self.lastSkillAt = now
+                    self.nextSkillIdx = (idx % total) + 1
+                    self.deps.pressKey(keyStr)
+                    firedSkill = true
+                    break
+                end
+            end
+        end
+    end
+
+    -- 3. M1 fallback когда скиллы на кулдауне / отключены
+    if not firedSkill and opts.autoM1 then
+        if now - self.lastSkillAt >= stand_out_mobs.post_skill_m1_delay and now - self.lastM1At >= stand_out_mobs.m1_interval then
+            self.lastM1At = now
+            self.deps.clickM1()
+        end
+    end
+
+    return target
+end
+
+return stand_out_mobs
 end
 
 __modules["stand_out_pickup"] = function(require)
