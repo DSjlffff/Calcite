@@ -3218,6 +3218,8 @@ local pairs = {
     ["Гранаты: куда полетит своя"] = "Throw preview", ["Дым и огонь: радиус и время"] = "Smoke and fire: area and timer",
     ["Кто за мной наблюдает"] = "Spectators", ["Прострел стены у прицела"] = "Wall penetration",
     ["ESP оружия"] = "Weapon ESP", ["ESP предметов"] = "Item ESP", ["Абилки E/R"] = "E/R abilities",
+    ["Автоподбор"] = "Auto pick up", ["Предметы на карте"] = "World items",
+    ["Закопанные припасы"] = "Buried supplies", ["Возвращаться назад"] = "Return to start",
     ["Цвет меток"] = "Label color", ["Отображать"] = "Show", ["Собирать"] = "Collect",
     ["Ходить, пока нет цели"] = "Roam while idle", ["Скорость глайдера"] = "Glide speed",
     ["Наведение"] = "Aim", ["Основное"] = "General", ["Отображение"] = "Display", ["Аим"] = "Aim",
@@ -3997,6 +3999,7 @@ local chams = require("./chams")
 local hitbox = require("./hitbox")
 local item_asylum = require("./item_asylum")
 local stand_out = require("./stand_out")
+local stand_out_pickup = require("./stand_out_pickup")
 local glider = require("./glider")
 local yba_npcs = require("./yba_npcs")
 local yba_waypoints = require("./yba_waypoints")
@@ -4178,7 +4181,8 @@ function main.start(env)
     -- or the hook on the shot of a game, goes by these, never by the switches as they are written
     local current = nil
     local shooter = nil             -- the auto fire, see trigger.lua
-    local handle = nil
+    -- pre-allocated so feature state (e.g. _soPick) stays under Luau's 200-local limit in main.start
+    local handle = { _soPick = { picker = nil, entries = {}, wasOn = false } }
 
     -- what the executor gives back for a connection is known from its documentation only: one that cannot be
     -- taken back the expected way must not stop the others from being taken back
@@ -4918,6 +4922,12 @@ function main.start(env)
         if stealer ~= nil then
             pcall(function()
                 stealer:stop()
+            end)
+        end
+
+        if handle._soPick.picker ~= nil then
+            pcall(function()
+                handle._soPick.picker:stop()
             end)
         end
 
@@ -5884,6 +5894,28 @@ function main.start(env)
         enabledPrompts = enabledStealPrompts,
     })
 
+    handle._soPick.picker = stand_out_pickup.new({
+        teleportTo = function(x, y, z)
+            local character = localPlayer.Character
+            local root = character and character:FindFirstChild("HumanoidRootPart")
+            if root ~= nil then
+                root.CFrame = env.CFrame.new(x, y, z)
+                root.AssemblyLinearVelocity = env.Vector3.new(0, 0, 0)
+            end
+        end,
+        firePrompt = function(prompt)
+            if type(env.fireproximityprompt) == "function" then
+                pcall(env.fireproximityprompt, prompt)
+            end
+        end,
+        holdBegin = function(prompt)
+            prompt:InputHoldBegin()
+        end,
+        holdEnd = function(prompt)
+            prompt:InputHoldEnd()
+        end,
+    })
+
     -- what follows listens to Steal an Egg and looks through its plots: in any other game there is nothing of it
     local stealGame = modes.detect(universeId) == "StealEgg" and env.task ~= nil
     local stealWasOn = false        -- whether the auto steal ran in the last frame: it is stopped once when it goes off
@@ -6446,6 +6478,10 @@ function main.start(env)
                 end
             end
 
+            if s.standOutPickup ~= nil and s.standOutPickup.enabled then
+                handle._soPick.entries = stand_out_pickup.scan(workspace, s.standOutPickup)
+            end
+
             if itemsOn then
                 if now - lastSettle >= settle_interval then
                     lastSettle = now
@@ -6773,6 +6809,23 @@ function main.start(env)
             stealer:stop()
         end
 
+        -- Stand Out Auto Pick Up: телепорт к ближайшему мировому предмету / закопанному припасу и подбор
+        local soPick = handle._soPick
+        if s.standOutPickup ~= nil and s.standOutPickup.enabled and haveLocal and soPick.picker ~= nil then
+            if not soPick.wasOn then
+                soPick.entries = stand_out_pickup.scan(workspace, s.standOutPickup)
+                soPick.wasOn = true
+            end
+            soPick.picker:update(now, soPick.entries, s.standOutPickup, localX, localY, localZ)
+            ui.setStandOutPickup(soPick.picker.taken, soPick.picker.lastTargetName)
+        elseif soPick.wasOn then
+            soPick.wasOn = false
+            if soPick.picker ~= nil then
+                soPick.picker:stop()
+                ui.setStandOutPickup(soPick.picker.taken, "")
+            end
+        end
+
         -- always step the glider while it has a goal: covers manual Teleport buttons (walker:goTo without farm or
         -- steal running) and lets farm/steal naturally continue. farmGuard.run already steps it when the farm is
         -- on, so this guard avoids a double step
@@ -6866,7 +6919,8 @@ function main.start(env)
         table.insert(connections, painting)
     end
 
-    handle = { unload = unload, version = main.version }
+    handle.unload = unload
+    handle.version = main.version
     shared.Calcite = handle
     return handle
 end
@@ -7081,11 +7135,16 @@ function menu.create(deps)
     iaEspGroup:AddLabel("Показывает Tool в руках чужих. ToolIconText = патроны/счётчик. " ..
         "Абилки берутся из атрибутов EABILITY/RABILITY тулзы.", true)
 
-    -- Stand Out ESP: стенд, спек (SubAbility) и оружие из Player.Data (stand_out.lua)
+    -- Stand Out ESP + Auto Pick Up (stand_out.lua / stand_out_pickup.lua)
     local standOutGroup = visualsTab:AddRightGroupbox("Stand Out")
     toggle(standOutGroup, "StandOutStand", "Стенд", settings.standOut, "stand")
     toggle(standOutGroup, "StandOutSubAbility", "Спек", settings.standOut, "subAbility")
     toggle(standOutGroup, "StandOutWeapon", "Оружие", settings.standOut, "weapon")
+    toggle(standOutGroup, "StandOutPickupEnabled", "Автоподбор", settings.standOutPickup, "enabled")
+    toggle(standOutGroup, "StandOutPickupWorld", "Предметы на карте", settings.standOutPickup, "worldItems")
+    toggle(standOutGroup, "StandOutPickupBuried", "Закопанные припасы", settings.standOutPickup, "buried")
+    toggle(standOutGroup, "StandOutPickupReturn", "Возвращаться назад", settings.standOutPickup, "returnBack")
+    local standOutPickupCount = standOutGroup:AddLabel("Подобрано: 0")
 
     -- items
     local itemsGroup = visualsTab:AddLeftGroupbox("Предметы")
@@ -7522,7 +7581,7 @@ function menu.create(deps)
         pcall(function() townIgnoreLimitsToggle:SetVisible(modes.has(mode, "TownGun")) end)
         townEspGroup:SetVisible(modes.has(mode, "TownGun"))
         iaEspGroup:SetVisible(modes.has(mode, "IaWeapon"))
-        standOutGroup:SetVisible(modes.has(mode, "StandOutInfo"))
+        standOutGroup:SetVisible(modes.has(mode, "StandOutInfo") or modes.has(mode, "StandOutPickup"))
         -- в MVS visibleOnly форсится в settings.inEffect, тоггл прячем
         pcall(function() visibleOnlyToggle:SetVisible(mode ~= "Mvs") end)
         -- Reload bar работает только в MVS (gated через MvsGun), прячем toggle в других режимах
@@ -7568,6 +7627,19 @@ function menu.create(deps)
         if count ~= shownTaken then
             shownTaken = count
             farmCount:SetText(string.format("Подобрано: %d", count))
+        end
+    end
+
+    -- Stand Out Auto Pick Up counter / current target
+    local shownStandOutStatus = nil
+    function ui.setStandOutPickup(count, targetName)
+        local text = string.format("Подобрано: %d", count)
+        if targetName ~= nil and targetName ~= "" then
+            text = text .. " | " .. targetName
+        end
+        if text ~= shownStandOutStatus then
+            shownStandOutStatus = text
+            standOutPickupCount:SetText(text)
         end
     end
 
@@ -7735,8 +7807,8 @@ local features = {
     ItemAsylum = { Players = true, Health = true, Aim = true, IaWeapon = true },
     -- Rivals: team shooter — пока основа (ESP с здоровьем + aim + team check)
     Rivals = { Players = true, Health = true, TeamCheck = true, Aim = true },
-    -- Stand Out: без команд; ESP игроков с HP + стенд / спек / оружие из Player.Data (stand_out.lua)
-    StandOut = { Players = true, Health = true, StandOutInfo = true },
+    -- Stand Out: без команд; ESP игроков с HP + стенд / спек / оружие (stand_out.lua) + автоподбор (stand_out_pickup.lua)
+    StandOut = { Players = true, Health = true, StandOutInfo = true, StandOutPickup = true },
 }
 
 -- what a mode starts with set otherwise than the settings are written: fields of the table of settings.defaults
@@ -8983,6 +9055,13 @@ function settings.defaults(mode)
             subAbility = true,
             weapon = false,
         },
+        -- Stand Out Auto Pick Up: телепорт к мировым предметам и закопанным припасам (stand_out_pickup.lua)
+        standOutPickup = {
+            enabled = false,
+            worldItems = true,
+            buried = true,
+            returnBack = true,
+        },
         -- MVS Silent Aim: клик ЛКМ зовёт Net:RemoteEvent("GunKill") на цель Аима (mvs.lua).
         -- Rage mode собирается из Aim + Silent + AutoFire на вкладке — отдельного тумблера нет
         mvsSilent = {
@@ -9229,6 +9308,11 @@ function settings.inEffect(s, mode)
     end
     if e.standOut.stand or e.standOut.subAbility or e.standOut.weapon then
         e.weapon = true
+    end
+
+    e.standOutPickup = table.clone(s.standOutPickup)
+    if not modes.has(mode, "StandOutPickup") then
+        e.standOutPickup.enabled = false
     end
 
     -- whether any Silent Aim (Town/MVS/Strike) is on
@@ -9684,6 +9768,374 @@ function stand_out.format(info, showStand, showSub, showWeapon)
 end
 
 return stand_out
+end
+
+__modules["stand_out_pickup"] = function(require)
+-- Stand Out Auto Pick Up: сканер мировых предметов и автомат телепорта + подбора.
+-- Факты игры из tools/standout_probe_items.lua:
+--   • Workspace.Game.SpawnedItems / WorldEventDrops -> DroppedItem (attr ItemName)
+--     внутри ProximityPrompt "WorldItemPickup" (HoldDuration=0, MaxActivationDistance=10)
+--   • Workspace.Game.Gardening.Foraging -> BuriedSupplies (attr GardenSupplyItem, GardenSupplyAvailable)
+--     внутри ProximityPrompt "GardenGather" (HoldDuration=1.2, MaxActivationDistance=9)
+-- Чистая логика поверх переданных зависимостей, проверяется tests/stand_out_pickup_test.lua.
+local stand_out_pickup = {}
+
+stand_out_pickup.above = 3.0       -- студов над предметом при телепорте (в пределах MaxActivationDistance 9..10)
+stand_out_pickup.settle = 0.15     -- пауза после телепорта, чтобы сервер увидел персонажа рядом
+stand_out_pickup.extra_hold = 0.12 -- запас к HoldDuration промпта
+stand_out_pickup.give_up = 1.5     -- сколько ждать исчезновения предмета после подбора
+stand_out_pickup.skip_for = 10.0   -- на сколько секунд пропустить предмет, который не подобрался
+
+local Picker = {}
+Picker.__index = Picker
+
+local function finite(v)
+    return type(v) == "number" and v == v and v ~= math.huge and v ~= -math.huge
+end
+
+local function safeAttr(obj, name)
+    if obj == nil or obj.GetAttribute == nil then
+        return nil
+    end
+    local ok, val = pcall(function()
+        return obj:GetAttribute(name)
+    end)
+    if ok then
+        return val
+    end
+    return nil
+end
+
+local function firstBasePart(root)
+    if root == nil then
+        return nil
+    end
+    if root.IsA ~= nil and root:IsA("BasePart") then
+        return root
+    end
+    if root.PrimaryPart ~= nil then
+        return root.PrimaryPart
+    end
+    if root.GetDescendants ~= nil then
+        for _, desc in root:GetDescendants() do
+            if desc.IsA ~= nil and desc:IsA("BasePart") then
+                return desc
+            end
+        end
+    end
+    return nil
+end
+
+local function findEnabledPrompt(container)
+    if container == nil then
+        return nil
+    end
+    if container.IsA ~= nil and container:IsA("ProximityPrompt") then
+        return container
+    end
+    if container.GetDescendants == nil then
+        return nil
+    end
+    for _, desc in container:GetDescendants() do
+        if desc.IsA ~= nil and desc:IsA("ProximityPrompt") then
+            local reach = desc.MaxActivationDistance
+            if desc.Enabled == true and finite(reach) and reach > 0 then
+                return desc
+            end
+        end
+    end
+    return nil
+end
+
+-- Координаты точки предмета: приоритет у родителя промпта (Handle/Attachment), иначе первый BasePart модели.
+function stand_out_pickup.entryPosition(entry)
+    if entry == nil or entry.model == nil or entry.model.Parent == nil then
+        return nil, nil, nil
+    end
+    local prompt = entry.prompt
+    if prompt == nil or prompt.Parent == nil then
+        return nil, nil, nil
+    end
+
+    local holder = prompt.Parent
+    if holder.IsA ~= nil and holder:IsA("Attachment") and holder.WorldPosition ~= nil then
+        local p = holder.WorldPosition
+        if finite(p.X) and finite(p.Y) and finite(p.Z) then
+            return p.X, p.Y, p.Z
+        end
+    elseif holder.IsA ~= nil and holder:IsA("BasePart") and holder.Position ~= nil then
+        local p = holder.Position
+        if finite(p.X) and finite(p.Y) and finite(p.Z) then
+            return p.X, p.Y, p.Z
+        end
+    end
+
+    local part = entry.part
+    if part ~= nil and part.Parent ~= nil and part.Position ~= nil then
+        local p = part.Position
+        if finite(p.X) and finite(p.Y) and finite(p.Z) then
+            return p.X, p.Y, p.Z
+        end
+    end
+
+    return nil, nil, nil
+end
+
+local function promptWorking(entry)
+    if entry == nil or entry.model == nil or entry.model.Parent == nil then
+        return false
+    end
+    local prompt = entry.prompt
+    if prompt == nil or prompt.Parent == nil then
+        return false
+    end
+    local reach = prompt.MaxActivationDistance
+    if prompt.Enabled ~= true or not finite(reach) or reach <= 0 then
+        return false
+    end
+    if entry.kind == "buried" then
+        local avail = safeAttr(entry.model, "GardenSupplyAvailable")
+        if avail == false then
+            return false
+        end
+    end
+    return true
+end
+
+local function scanFolder(out, folder, kind, attrName)
+    if folder == nil or folder.GetChildren == nil then
+        return
+    end
+    for _, child in folder:GetChildren() do
+        if kind == "buried" and safeAttr(child, "GardenSupplyAvailable") == false then
+            continue
+        end
+        local prompt = findEnabledPrompt(child)
+        if prompt == nil then
+            continue
+        end
+        local part = firstBasePart(child)
+        local name = safeAttr(child, attrName)
+        if type(name) ~= "string" or name == "" then
+            if type(prompt.ObjectText) == "string" and prompt.ObjectText ~= "" then
+                name = prompt.ObjectText
+            else
+                name = child.Name or "Item"
+            end
+        end
+        table.insert(out, {
+            kind = kind,
+            name = name,
+            model = child,
+            prompt = prompt,
+            part = part,
+        })
+    end
+end
+
+-- Собирает список доступных к подбору предметов на карте Stand Out.
+function stand_out_pickup.scan(workspace, opts)
+    local found = {}
+    if workspace == nil or opts == nil then
+        return found
+    end
+    local gameFolder = workspace:FindFirstChild("Game")
+    if gameFolder == nil then
+        return found
+    end
+
+    if opts.worldItems then
+        scanFolder(found, gameFolder:FindFirstChild("SpawnedItems"), "item", "ItemName")
+        scanFolder(found, gameFolder:FindFirstChild("WorldEventDrops"), "item", "ItemName")
+    end
+
+    if opts.buried then
+        local gardening = gameFolder:FindFirstChild("Gardening")
+        local foraging = gardening and gardening:FindFirstChild("Foraging") or nil
+        scanFolder(found, foraging, "buried", "GardenSupplyItem")
+    end
+
+    return found
+end
+
+-- deps:
+--   teleportTo(x, y, z)
+--   firePrompt(prompt)    (optional)
+--   holdBegin(prompt)
+--   holdEnd(prompt)
+--   positionOf(entry) -> x, y, z or nil  (optional, defaults to stand_out_pickup.entryPosition)
+function stand_out_pickup.new(deps)
+    return setmetatable({
+        deps = deps,
+        state = "idle",      -- "idle" | "arriving" | "holding" | "waiting"
+        target = nil,
+        since = 0,
+        skipped = {},        -- prompt -> timestamp
+        taken = 0,
+        returnPos = nil,     -- { x, y, z } сохранённая точка до начала серии подборов
+        lastTargetName = "",
+    }, Picker)
+end
+
+function Picker:stop()
+    if self.state == "holding" and self.target ~= nil and self.deps.holdEnd ~= nil then
+        pcall(self.deps.holdEnd, self.target.prompt)
+    end
+    self.state = "idle"
+    self.target = nil
+    self.returnPos = nil
+    self.lastTargetName = ""
+end
+
+function Picker:update(now, entries, opts, meX, meY, meZ)
+    if meX == nil or meY == nil or meZ == nil then
+        self:stop()
+        return nil
+    end
+
+    local posOf = self.deps.positionOf or stand_out_pickup.entryPosition
+    local target = self.target
+    local tx, ty, tz = nil, nil, nil
+    if target ~= nil then
+        tx, ty, tz = posOf(target)
+    end
+    local gone = target ~= nil and (tx == nil or not promptWorking(target))
+
+    -- Пользователь отключил категорию текущего предмета — отпускаем его без подсчёта
+    if target ~= nil and not gone then
+        local allowed = (target.kind == "item" and opts.worldItems) or (target.kind == "buried" and opts.buried)
+        if not allowed then
+            if self.state == "holding" and self.deps.holdEnd ~= nil then
+                pcall(self.deps.holdEnd, target.prompt)
+            end
+            self.state = "idle"
+            self.target = nil
+            self.lastTargetName = ""
+            target = nil
+        end
+    end
+
+    if self.state == "arriving" then
+        if gone then
+            self.state = "idle"
+            self.target = nil
+            self.lastTargetName = ""
+        else
+            -- Держим персонажа точно у предмета во время паузы settle
+            self.deps.teleportTo(tx, ty + stand_out_pickup.above, tz)
+            if now - self.since >= stand_out_pickup.settle then
+                local hold = target.prompt.HoldDuration
+                if not finite(hold) or hold < 0 then
+                    hold = 0
+                end
+                if hold <= 0.05 and self.deps.firePrompt ~= nil then
+                    pcall(self.deps.firePrompt, target.prompt)
+                end
+                if self.deps.holdBegin ~= nil then
+                    pcall(self.deps.holdBegin, target.prompt)
+                end
+                self.state = "holding"
+                self.since = now
+            end
+        end
+    elseif self.state == "holding" then
+        local hold = target.prompt.HoldDuration
+        if not finite(hold) or hold < 0 then
+            hold = 0
+        end
+
+        if gone then
+            if self.deps.holdEnd ~= nil then
+                pcall(self.deps.holdEnd, target.prompt)
+            end
+            self.taken += 1
+            self.state = "idle"
+            self.target = nil
+            self.lastTargetName = ""
+        else
+            -- Держим у предмета пока идёт HoldDuration (например 1.2s на BuriedSupplies)
+            self.deps.teleportTo(tx, ty + stand_out_pickup.above, tz)
+            if now - self.since >= hold + stand_out_pickup.extra_hold then
+                if self.deps.holdEnd ~= nil then
+                    pcall(self.deps.holdEnd, target.prompt)
+                end
+                if hold > 0.05 and self.deps.firePrompt ~= nil then
+                    pcall(self.deps.firePrompt, target.prompt)
+                end
+                self.state = "waiting"
+                self.since = now
+            end
+        end
+    elseif self.state == "waiting" then
+        if gone then
+            self.taken += 1
+            self.state = "idle"
+            self.target = nil
+            self.lastTargetName = ""
+        elseif now - self.since >= stand_out_pickup.give_up then
+            self.skipped[target.prompt] = now
+            self.state = "idle"
+            self.target = nil
+            self.lastTargetName = ""
+        end
+    end
+
+    if self.state ~= "idle" then
+        return self.target
+    end
+
+    -- Ищем ближайший доступный предмет
+    local best, bestDist = nil, math.huge
+    local bestX, bestY, bestZ = 0, 0, 0
+    if entries ~= nil then
+        for _, entry in entries do
+            local allowed = (entry.kind == "item" and opts.worldItems) or (entry.kind == "buried" and opts.buried)
+            if not allowed or not promptWorking(entry) then
+                continue
+            end
+            local skippedAt = self.skipped[entry.prompt]
+            if skippedAt ~= nil and now - skippedAt < stand_out_pickup.skip_for then
+                continue
+            end
+            local ex, ey, ez = posOf(entry)
+            if ex == nil then
+                continue
+            end
+            local dx, dy, dz = ex - meX, ey - meY, ez - meZ
+            local dist = dx * dx + dy * dy + dz * dz
+            if dist < bestDist then
+                bestDist = dist
+                best = entry
+                bestX, bestY, bestZ = ex, ey, ez
+            end
+        end
+    end
+
+    if best == nil then
+        -- Все предметы собраны — возвращаемся в исходную точку, если включено
+        if self.returnPos ~= nil then
+            local rp = self.returnPos
+            self.returnPos = nil
+            if opts.returnBack then
+                self.deps.teleportTo(rp.x, rp.y, rp.z)
+            end
+        end
+        return nil
+    end
+
+    if self.returnPos == nil then
+        self.returnPos = { x = meX, y = meY, z = meZ }
+    end
+
+    self.target = best
+    self.lastTargetName = best.name or ""
+    self.state = "arriving"
+    self.since = now
+    self.deps.teleportTo(bestX, bestY + stand_out_pickup.above, bestZ)
+    return best
+end
+
+return stand_out_pickup
 end
 
 __modules["status"] = function(require)
