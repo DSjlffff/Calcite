@@ -6118,24 +6118,31 @@ function main.start(env)
             activateButton = function(btn)
                 if btn == nil then return end
                 local fired = false
-                if type(env.firesignal) == "function" then
-                    local ok = pcall(env.firesignal, btn.Activated)
-                    if ok then fired = true end
-                end
-                if not fired and type(env.getconnections) == "function" then
-                    local ok, conns = pcall(env.getconnections, btn.Activated)
-                    if ok and type(conns) == "table" and #conns > 0 then
-                        for _, conn in conns do
-                            if conn.Fire ~= nil then
-                                pcall(function() conn:Fire() end)
-                                fired = true
-                            elseif type(conn.Function) == "function" then
-                                pcall(conn.Function)
-                                fired = true
+                local function trySignal(sig)
+                    if sig == nil then return false end
+                    if type(env.firesignal) == "function" then
+                        local ok = pcall(env.firesignal, sig)
+                        if ok then return true end
+                    end
+                    if type(env.getconnections) == "function" then
+                        local ok, conns = pcall(env.getconnections, sig)
+                        if ok and type(conns) == "table" and #conns > 0 then
+                            local any = false
+                            for _, conn in conns do
+                                if conn.Fire ~= nil then
+                                    pcall(function() conn:Fire() end)
+                                    any = true
+                                elseif type(conn.Function) == "function" then
+                                    pcall(conn.Function)
+                                    any = true
+                                end
                             end
+                            if any then return true end
                         end
                     end
+                    return false
                 end
+                fired = trySignal(btn.Activated) or trySignal(btn.MouseButton1Click)
                 if not fired and env.virtualInputManager ~= nil and btn.AbsolutePosition ~= nil and btn.AbsoluteSize ~= nil then
                     local cx = math.floor(btn.AbsolutePosition.X + btn.AbsoluteSize.X * 0.5)
                     local cy = math.floor(btn.AbsolutePosition.Y + btn.AbsoluteSize.Y * 0.5)
@@ -6146,6 +6153,21 @@ function main.start(env)
                         end)
                     else
                         pcall(function() env.virtualInputManager:SendMouseButtonEvent(cx, cy, 0, false, game, 1) end)
+                    end
+                end
+            end,
+            pressKey = function(keyStr)
+                local vim = env.virtualInputManager
+                local kcName = keyMap[keyStr]
+                local kc = kcName and env.Enum and env.Enum.KeyCode and env.Enum.KeyCode[kcName]
+                if vim ~= nil and kc ~= nil then
+                    pcall(function() vim:SendKeyEvent(true, kc, false, game) end)
+                    if env.task and env.task.delay then
+                        env.task.delay(0.05, function()
+                            pcall(function() vim:SendKeyEvent(false, kc, false, game) end)
+                        end)
+                    else
+                        pcall(function() vim:SendKeyEvent(false, kc, false, game) end)
                     end
                 end
             end,
@@ -10417,7 +10439,7 @@ function stand_out_bounty.parseTier(labelText)
     return num and tonumber(num) or nil
 end
 
--- Читает состояние Bounty UI (открыта ли доска, какой тир выбран, активен ли трекер, список баунти).
+-- Читает состояние Bounty UI (открыта ли доска, какой тир выбран, активен ли трекер, список баунти, диалог сдачи награды).
 function stand_out_bounty.readUi(playerGui)
     local info = {
         trackerActive = false,
@@ -10429,6 +10451,7 @@ function stand_out_bounty.readUi(playerGui)
         prevBtn = nil,
         beginBtn = nil,
         openEvent = nil,
+        claimBtn = nil,
         bounties = {}, -- { button, title, complete, isIncident }
     }
     if playerGui == nil then
@@ -10436,6 +10459,31 @@ function stand_out_bounty.readUi(playerGui)
     end
 
     pcall(function()
+        -- Проверяем диалог сдачи награды у Petyr (PlayerGui.Dialogue -> "1. Claim my bounty reward.")
+        local dlg = playerGui:FindFirstChild("Dialogue")
+        if dlg ~= nil and (dlg.Enabled == nil or dlg.Enabled == true) and dlg.GetDescendants ~= nil then
+            for _, d in dlg:GetDescendants() do
+                if (safeIsA(d, "TextButton") or safeIsA(d, "ImageButton")) and d.Visible ~= false then
+                    local txt = ""
+                    if safeIsA(d, "TextButton") and type(d.Text) == "string" then
+                        txt = d.Text
+                    elseif d.GetDescendants ~= nil then
+                        for _, sub in d:GetDescendants() do
+                            if safeIsA(sub, "TextLabel") and type(sub.Text) == "string" and sub.Text ~= "" then
+                                txt = sub.Text
+                                break
+                            end
+                        end
+                    end
+                    local low = string.lower(txt)
+                    if string.find(low, "claim", 1, true) ~= nil and string.find(low, "reward", 1, true) ~= nil then
+                        info.claimBtn = d
+                        break
+                    end
+                end
+            end
+        end
+
         local bountyGui = playerGui:FindFirstChild("Bounty")
         if bountyGui == nil then
             return
@@ -10773,6 +10821,44 @@ function Runner:update(now, opts, meX, meY, meZ)
     if hasActiveBounty and not replaceIncident then
         self.state = "active"
         local title = ui.trackerTitle ~= "" and ui.trackerTitle or "Bounty"
+
+        -- 0) Награда готова к сдаче ("Return to Petyr to claim your reward") или открыт диалог с кнопкой Claim!
+        local objLow = string.lower(ui.trackerObjective or "")
+        local readyToClaim = ui.claimBtn ~= nil
+            or string.find(objLow, "claim your reward", 1, true) ~= nil
+            or string.find(objLow, "return to petyr", 1, true) ~= nil
+        if readyToClaim then
+            self:_releasePrompt()
+            if self.deps.stopFighting ~= nil then
+                pcall(self.deps.stopFighting)
+            end
+            if ui.claimBtn ~= nil then
+                if now - self.lastAction >= 0.45 then
+                    self.lastAction = now
+                    self.deps.activateButton(ui.claimBtn)
+                    if self.deps.pressKey ~= nil then
+                        pcall(self.deps.pressKey, "1")
+                    end
+                end
+                self.statusText = "Забираю награду..."
+                return
+            end
+            local px, py, pz = self.deps.petyrPosition()
+            local dx, dy, dz = px - meX, py - meY, pz - meZ
+            if dx * dx + dy * dy + dz * dz > 64 then
+                self.deps.teleportTo(px, py + 2.0, pz)
+                self.lastAction = now
+                self.statusText = "Лечу сдавать Petyr"
+                return
+            end
+            if now - self.lastAction >= 0.9 then
+                self.lastAction = now
+                -- Передаём nil вместо openEvent, чтобы открыть именно диалог сдачи награды, а не доску выбора
+                self.deps.interactPetyr(nil)
+            end
+            self.statusText = "Сдаю награду Petyr"
+            return
+        end
 
         -- 1) Если есть наши баунти-мобы — фармим их через stand_out_mobs + Farm Config
         local mobs = self.deps.myMobs()
