@@ -7135,16 +7135,11 @@ function menu.create(deps)
     iaEspGroup:AddLabel("Показывает Tool в руках чужих. ToolIconText = патроны/счётчик. " ..
         "Абилки берутся из атрибутов EABILITY/RABILITY тулзы.", true)
 
-    -- Stand Out ESP + Auto Pick Up (stand_out.lua / stand_out_pickup.lua)
+    -- Stand Out ESP: стенд, спек (SubAbility) и оружие из Player.Data (stand_out.lua)
     local standOutGroup = visualsTab:AddRightGroupbox("Stand Out")
     toggle(standOutGroup, "StandOutStand", "Стенд", settings.standOut, "stand")
     toggle(standOutGroup, "StandOutSubAbility", "Спек", settings.standOut, "subAbility")
     toggle(standOutGroup, "StandOutWeapon", "Оружие", settings.standOut, "weapon")
-    toggle(standOutGroup, "StandOutPickupEnabled", "Автоподбор", settings.standOutPickup, "enabled")
-    toggle(standOutGroup, "StandOutPickupWorld", "Предметы на карте", settings.standOutPickup, "worldItems")
-    toggle(standOutGroup, "StandOutPickupBuried", "Закопанные припасы", settings.standOutPickup, "buried")
-    toggle(standOutGroup, "StandOutPickupReturn", "Возвращаться назад", settings.standOutPickup, "returnBack")
-    local standOutPickupCount = standOutGroup:AddLabel("Подобрано: 0")
 
     -- items
     local itemsGroup = visualsTab:AddLeftGroupbox("Предметы")
@@ -7202,6 +7197,14 @@ function menu.create(deps)
         .. "нет цели — с «Ходить» глайдер амблит по кругу в пределах ~350 студов, чтобы в поле зрения приходили "
         .. "новые спавны. 1800 ст/с — как у Slowc2960; выше можно, но может дёргать камеру игры.", true)
     local farmCount = farmGroup:AddLabel("Подобрано: 0")
+
+    -- Stand Out Item farm (stand_out_pickup.lua)
+    local standOutFarmGroup = farmTab:AddLeftGroupbox("Item farm")
+    toggle(standOutFarmGroup, "StandOutPickupEnabled", "Автоподбор", settings.standOutPickup, "enabled")
+    toggle(standOutFarmGroup, "StandOutPickupWorld", "Предметы на карте", settings.standOutPickup, "worldItems")
+    toggle(standOutFarmGroup, "StandOutPickupBuried", "Закопанные припасы", settings.standOutPickup, "buried")
+    toggle(standOutFarmGroup, "StandOutPickupReturn", "Возвращаться назад", settings.standOutPickup, "returnBack")
+    local standOutPickupCount = standOutFarmGroup:AddLabel("Подобрано: 0")
 
     -- aim
     local aimGroup = aimTab:AddLeftGroupbox("Наведение")
@@ -7581,7 +7584,7 @@ function menu.create(deps)
         pcall(function() townIgnoreLimitsToggle:SetVisible(modes.has(mode, "TownGun")) end)
         townEspGroup:SetVisible(modes.has(mode, "TownGun"))
         iaEspGroup:SetVisible(modes.has(mode, "IaWeapon"))
-        standOutGroup:SetVisible(modes.has(mode, "StandOutInfo") or modes.has(mode, "StandOutPickup"))
+        standOutGroup:SetVisible(modes.has(mode, "StandOutInfo"))
         -- в MVS visibleOnly форсится в settings.inEffect, тоггл прячем
         pcall(function() visibleOnlyToggle:SetVisible(mode ~= "Mvs") end)
         -- Reload bar работает только в MVS (gated через MvsGun), прячем toggle в других режимах
@@ -7591,7 +7594,9 @@ function menu.create(deps)
         npcTab:SetVisible(modes.has(mode, "Npc"))
         stealTab:SetVisible(modes.has(mode, "Steal"))
         teleportTab:SetVisible(modes.has(mode, "Teleport"))
-        farmTab:SetVisible(modes.has(mode, "AutoFarm"))
+        farmTab:SetVisible(modes.has(mode, "AutoFarm") or modes.has(mode, "StandOutPickup"))
+        farmGroup:SetVisible(modes.has(mode, "AutoFarm"))
+        standOutFarmGroup:SetVisible(modes.has(mode, "StandOutPickup"))
         teamCheck:SetVisible(modes.has(mode, "TeamCheck"))
         throughWalls:SetVisible(modes.has(mode, "Wallbang"))
         autoStop:SetVisible(modes.has(mode, "AutoStop"))
