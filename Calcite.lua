@@ -6156,6 +6156,13 @@ function main.start(env)
                 end
                 return nil, nil, nil
             end,
+            navActive = function()
+                local ok, v = pcall(function() return localPlayer:GetAttribute("BountyNavigationActive") end)
+                if ok and type(v) == "boolean" then
+                    return v
+                end
+                return nil
+            end,
             myMobs = function()
                 return handle._soBounty.mobs
             end,
@@ -10344,7 +10351,16 @@ function stand_out_bounty.isIncident(title)
         return false
     end
     local clean = string.lower(string.match(title, "^%s*(.-)%s*$") or "")
-    return INCIDENT_NAMES[clean] == true
+    if INCIDENT_NAMES[clean] == true then
+        return true
+    end
+    -- Также матчим по заголовку трекера вида "Tier 3 - Cheap Jewelry, Expensive Problem 0/1 | 10:24"
+    for name in INCIDENT_NAMES do
+        if string.find(clean, name, 1, true) ~= nil then
+            return true
+        end
+    end
+    return false
 end
 
 -- Парсит номер тира из текста вида "TIER 3" или "TIER 1  |  LV 0-9"
@@ -10383,7 +10399,10 @@ function stand_out_bounty.readUi(playerGui)
 
         local tracker = bountyGui:FindFirstChild("BountyTracker")
         if tracker ~= nil and (safeIsA(tracker, "GuiObject") or tracker.Visible ~= nil) and tracker.Visible == true then
-            info.trackerActive = true
+            local faded = false
+            if tracker.ClassName == "CanvasGroup" and type(tracker.GroupTransparency) == "number" and tracker.GroupTransparency >= 0.9 then
+                faded = true
+            end
             local t1 = tracker:FindFirstChild("Title")
             local t1l = t1 and t1:FindFirstChild("TextLabel")
             if t1l ~= nil and (safeIsA(t1l, "TextLabel") or type(t1l.Text) == "string") then
@@ -10393,6 +10412,10 @@ function stand_out_bounty.readUi(playerGui)
             local t2l = t2 and t2:FindFirstChild("TextLabel")
             if t2l ~= nil and (safeIsA(t2l, "TextLabel") or type(t2l.Text) == "string") then
                 info.trackerObjective = tostring(t2l.Text or "")
+            end
+            local titleVisible = t1 == nil or t1.Visible ~= false
+            if not faded and titleVisible and info.trackerTitle ~= "" and stand_out_bounty.parseTier(info.trackerTitle) ~= nil then
+                info.trackerActive = true
             end
         end
 
@@ -10633,8 +10656,25 @@ function Runner:update(now, opts, meX, meY, meZ)
 
     local ui = self.deps.readUi()
 
+    -- Дополнительно сверяем с атрибутом BountyNavigationActive (CanvasGroup трекера может оставаться Visible=true)
+    local hasActiveBounty = ui.trackerActive
+    if hasActiveBounty and self.deps.navActive ~= nil then
+        local okNav, nav = pcall(self.deps.navActive)
+        if okNav and nav == false then
+            local mobsCheck = self.deps.myMobs()
+            local promptCheck = self.deps.myPrompt()
+            if (mobsCheck == nil or #mobsCheck == 0) and promptCheck == nil then
+                hasActiveBounty = false
+            end
+        end
+    end
+
+    -- Если на персонаже уже висит инцидент с мини-игрой, а включено «Пропускать мини-игры»,
+    -- идём к Petyr и перезаписываем его на боевой/поисковый баунти!
+    local replaceIncident = hasActiveBounty and (opts.skipIncidents ~= false) and stand_out_bounty.isIncident(ui.trackerTitle)
+
     -- Отслеживаем завершение баунти (трекер был активен -> исчез)
-    if self.wasTrackerActive and not ui.trackerActive then
+    if self.wasTrackerActive and not hasActiveBounty then
         self.completed += 1
         self.fallbackTier = nil
         if self.deps.stopFighting ~= nil then
@@ -10642,10 +10682,10 @@ function Runner:update(now, opts, meX, meY, meZ)
         end
         self.state = "idle"
     end
-    self.wasTrackerActive = ui.trackerActive
+    self.wasTrackerActive = hasActiveBounty and not replaceIncident
 
-    -- Если баунти уже активно — выполняем его!
-    if ui.trackerActive then
+    -- Если баунти уже активно (и это не мини-игра под замену) — выполняем его!
+    if hasActiveBounty and not replaceIncident then
         self.state = "active"
         local title = ui.trackerTitle ~= "" and ui.trackerTitle or "Bounty"
 
@@ -10690,12 +10730,12 @@ function Runner:update(now, opts, meX, meY, meZ)
         return
     end
 
-    -- Баунти НЕ активно: идём к Petyr, открываем доску, выбираем лучший тир и запускаем баунти!
+    -- Баунти НЕ активно (или меняем инцидент на боевой): идём к Petyr, открываем доску и запускаем баунти!
     if not ui.selectOpen then
         local px, py, pz = self.deps.petyrPosition()
         local dx, dy, dz = px - meX, py - meY, pz - meZ
         if dx * dx + dy * dy + dz * dz > 64 then
-            self.deps.teleportTo(px, py + 2.5, pz + 3)
+            self.deps.teleportTo(px, py + 2.0, pz)
             self.statusText = "Лечу к Petyr"
             self.lastAction = now
             self.state = "opening"
