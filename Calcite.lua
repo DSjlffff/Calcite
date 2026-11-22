@@ -10437,6 +10437,17 @@ function stand_out_bounty.isIncident(title)
     return false
 end
 
+-- Парсит прогресс вида "1/2" или "4/4" из заголовка трекера ("Tier 3 - MISSING FROG 1/2 | 03:08")
+function stand_out_bounty.parseProgress(titleText)
+    if type(titleText) ~= "string" then
+        return nil, nil
+    end
+    local cur, total = string.match(titleText, "(%d+)%s*/%s*(%d+)")
+    if cur ~= nil and total ~= nil then
+        return tonumber(cur), tonumber(total)
+    end
+    return nil, nil
+end
 -- Парсит номер тира из текста вида "TIER 3" или "TIER 1  |  LV 0-9"
 function stand_out_bounty.parseTier(labelText)
     if type(labelText) ~= "string" then
@@ -10857,15 +10868,27 @@ function Runner:update(now, opts, meX, meY, meZ)
 
     local ui = self.deps.readUi()
 
-    -- Дополнительно сверяем с атрибутом BountyNavigationActive (CanvasGroup трекера может оставаться Visible=true)
+    -- Парсим прогресс баунти (например 1/2 -> не завершено; 4/4 -> все шаги выполнены)
+    local progCur, progTotal = stand_out_bounty.parseProgress(ui.trackerTitle)
+    local hasIncompleteSteps = progCur ~= nil and progTotal ~= nil and progCur < progTotal
+
+    -- Дополнительно сверяем с атрибутом BountyNavigationActive (CanvasGroup трекера может оставаться Visible=true),
+    -- но если на трекере явно видны незавершённые шаги (например MISSING FROG 1/2) или таймер — баунти точно активно!
     local hasActiveBounty = ui.trackerActive
-    if hasActiveBounty and self.deps.navActive ~= nil then
+    if hasActiveBounty and not hasIncompleteSteps and self.deps.navActive ~= nil then
         local okNav, nav = pcall(self.deps.navActive)
         if okNav and nav == false then
-            local mobsCheck = self.deps.myMobs()
-            local promptCheck = self.deps.myPrompt()
-            if (mobsCheck == nil or #mobsCheck == 0) and promptCheck == nil then
-                hasActiveBounty = false
+            local hasClock = string.find(ui.trackerTitle or "", "%d+:%d%d") ~= nil
+            local objLowCheck = string.lower(ui.trackerObjective or "")
+            local isClaimStep = ui.claimBtn ~= nil
+                or string.find(objLowCheck, "claim", 1, true) ~= nil
+                or string.find(objLowCheck, "return to petyr", 1, true) ~= nil
+            if not hasClock and not isClaimStep then
+                local mobsCheck = self.deps.myMobs()
+                local promptCheck = self.deps.myPrompt()
+                if (mobsCheck == nil or #mobsCheck == 0) and promptCheck == nil then
+                    hasActiveBounty = false
+                end
             end
         end
     end
@@ -10889,46 +10912,26 @@ function Runner:update(now, opts, meX, meY, meZ)
     if hasActiveBounty and not replaceIncident then
         self.state = "active"
         local title = ui.trackerTitle ~= "" and ui.trackerTitle or "Bounty"
-
-        -- 0) Награда готова к сдаче ("Return to Petyr to claim your reward") или открыт диалог с кнопкой Claim!
         local objLow = string.lower(ui.trackerObjective or "")
-        local readyToClaim = ui.claimBtn ~= nil
-            or string.find(objLow, "claim your reward", 1, true) ~= nil
-            or string.find(objLow, "return to petyr", 1, true) ~= nil
-        if readyToClaim then
+
+        -- 0) Если диалог с кнопкой "1. Claim my bounty reward." уже открыт — сразу забираем награду
+        if ui.claimBtn ~= nil then
             self:_releasePrompt()
             if self.deps.stopFighting ~= nil then
                 pcall(self.deps.stopFighting)
             end
-            if ui.claimBtn ~= nil then
-                if now - self.lastAction >= 0.45 then
-                    self.lastAction = now
-                    self.deps.activateButton(ui.claimBtn)
-                    if self.deps.pressKey ~= nil then
-                        pcall(self.deps.pressKey, "1")
-                    end
+            if now - self.lastAction >= 0.45 then
+                self.lastAction = now
+                self.deps.activateButton(ui.claimBtn)
+                if self.deps.pressKey ~= nil then
+                    pcall(self.deps.pressKey, "1")
                 end
-                self.statusText = "Забираю награду..."
-                return
             end
-            local px, py, pz = self.deps.petyrPosition()
-            local dx, dy, dz = px - meX, py - meY, pz - meZ
-            if dx * dx + dy * dy + dz * dz > 64 then
-                self.deps.teleportTo(px, py + 2.0, pz)
-                self.lastAction = now
-                self.statusText = "Лечу сдавать Petyr"
-                return
-            end
-            if now - self.lastAction >= 0.9 then
-                self.lastAction = now
-                -- Передаём nil вместо openEvent, чтобы открыть именно диалог сдачи награды, а не доску выбора
-                self.deps.interactPetyr(nil)
-            end
-            self.statusText = "Сдаю награду Petyr"
+            self.statusText = "Забираю награду..."
             return
         end
 
-        -- 1) Если есть наши баунти-мобы — фармим их через stand_out_mobs + Farm Config
+        -- 1) Если есть наши баунти-мобы (например Hubert в MISSING FROG 1/2) — ВСЕГДА сначала убиваем их!
         local mobs = self.deps.myMobs()
         if mobs ~= nil and #mobs > 0 then
             self:_releasePrompt()
@@ -10941,6 +10944,27 @@ function Runner:update(now, opts, meX, meY, meZ)
             if self.deps.stopFighting ~= nil then
                 pcall(self.deps.stopFighting)
             end
+        end
+
+        -- 2) Награда готова к сдаче ("Return to Petyr to claim your reward") — идём к Petyr только когда нет мобов
+        local readyToClaim = string.find(objLow, "claim your reward", 1, true) ~= nil
+            or (string.find(objLow, "return to petyr", 1, true) ~= nil and not hasIncompleteSteps)
+        if readyToClaim then
+            self:_releasePrompt()
+            local px, py, pz = self.deps.petyrPosition()
+            local dx, dy, dz = px - meX, py - meY, pz - meZ
+            if dx * dx + dy * dy + dz * dz > 64 then
+                self.deps.teleportTo(px, py + 2.0, pz)
+                self.lastAction = now
+                self.statusText = "Лечу сдавать Petyr"
+                return
+            end
+            if now - self.lastAction >= 0.9 then
+                self.lastAction = now
+                self.deps.interactPetyr(nil)
+            end
+            self.statusText = "Сдаю награду Petyr"
+            return
         end
 
         local tx, ty, tz = self.deps.trackerPosition()
