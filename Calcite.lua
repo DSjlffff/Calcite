@@ -5966,6 +5966,8 @@ function main.start(env)
                 end
             end,
             pressKey = function(keyStr)
+                local okTb, focused = pcall(function() return UserInputService:GetFocusedTextBox() end)
+                if okTb and focused ~= nil then return end
                 local vim = env.virtualInputManager
                 local kcName = keyMap[keyStr]
                 local kc = kcName and env.Enum and env.Enum.KeyCode and env.Enum.KeyCode[kcName]
@@ -5981,15 +5983,22 @@ function main.start(env)
                 end
             end,
             clickM1 = function()
+                local okTb, focused = pcall(function() return UserInputService:GetFocusedTextBox() end)
+                if okTb and focused ~= nil then return end
                 local vim = env.virtualInputManager
                 if vim ~= nil then
-                    pcall(function() vim:SendMouseButtonEvent(0, 0, 0, true, camera or game, 0) end)
+                    local cx, cy = 400, 300
+                    if camera ~= nil and camera.ViewportSize ~= nil then
+                        cx = math.floor(camera.ViewportSize.X * 0.5)
+                        cy = math.floor(camera.ViewportSize.Y * 0.5)
+                    end
+                    pcall(function() vim:SendMouseButtonEvent(cx, cy, 0, true, game, 1) end)
                     if env.task and env.task.delay then
                         env.task.delay(0.03, function()
-                            pcall(function() vim:SendMouseButtonEvent(0, 0, 0, false, camera or game, 0) end)
+                            pcall(function() vim:SendMouseButtonEvent(cx, cy, 0, false, game, 1) end)
                         end)
                     else
-                        pcall(function() vim:SendMouseButtonEvent(0, 0, 0, false, camera or game, 0) end)
+                        pcall(function() vim:SendMouseButtonEvent(cx, cy, 0, false, game, 1) end)
                     end
                 elseif type(env.mouse1press) == "function" and type(env.mouse1release) == "function" then
                     pcall(env.mouse1press)
@@ -6939,7 +6948,12 @@ function main.start(env)
                 soPick.entries = stand_out_pickup.scan(workspace, s.standOutPickup)
                 soPick.wasOn = true
             end
-            soPick.picker:update(now, soPick.entries, s.standOutPickup, localX, localY, localZ)
+            local okPick, errPick = pcall(function()
+                soPick.picker:update(now, soPick.entries, s.standOutPickup, localX, localY, localZ)
+            end)
+            if not okPick then
+                warn("Calcite StandOutPickup: " .. tostring(errPick))
+            end
             ui.setStandOutPickup(soPick.picker.taken, soPick.picker.lastTargetName)
         elseif soPick.wasOn then
             soPick.wasOn = false
@@ -6949,11 +6963,19 @@ function main.start(env)
             end
         end
 
-        -- Stand Out Mob Farming: если Item farm сейчас летит за предметом, уступаем ему на долю секунды
+        -- Stand Out Mob Farming: работает только пока свой персонаж жив; после респавна сразу пересканирует мобов
         local soMob = handle._soMob
+        local localAlive = haveLocal
+        if localAlive then
+            local myChar = localPlayer.Character
+            local myHum = myChar and myChar:FindFirstChildOfClass("Humanoid")
+            if myHum == nil or myHum.Health <= 0 then
+                localAlive = false
+            end
+        end
         local itemBusy = s.standOutPickup ~= nil and s.standOutPickup.enabled
             and soPick.picker ~= nil and soPick.picker.target ~= nil
-        if s.standOutMobs ~= nil and s.standOutMobs.enabled and haveLocal and soMob.farmer ~= nil then
+        if s.standOutMobs ~= nil and s.standOutMobs.enabled and localAlive and soMob.farmer ~= nil then
             if not soMob.wasOn then
                 local pNames = {}
                 for _, pl in Players:GetPlayers() do
@@ -6963,7 +6985,12 @@ function main.start(env)
                 soMob.wasOn = true
             end
             if not itemBusy then
-                soMob.farmer:update(now, soMob.entries, s.standOutMobs, localX, localY, localZ)
+                local okMob, errMob = pcall(function()
+                    soMob.farmer:update(now, soMob.entries, s.standOutMobs, localX, localY, localZ)
+                end)
+                if not okMob then
+                    warn("Calcite StandOutMobs: " .. tostring(errMob))
+                end
                 ui.setStandOutMob(soMob.farmer.kills, soMob.farmer.statusText)
             end
         elseif soMob.wasOn then
@@ -10064,6 +10091,16 @@ local function mobConfigName(model)
     return stripped or raw
 end
 
+local function safeIsA(obj, cls)
+    if obj == nil or obj.IsA == nil then
+        return false
+    end
+    local ok, res = pcall(function()
+        return obj:IsA(cls)
+    end)
+    return ok and res == true
+end
+
 local function isAliveMob(entry)
     if entry == nil or entry.model == nil or entry.model.Parent == nil then
         return false
@@ -10084,7 +10121,7 @@ local function isAliveMob(entry)
 end
 
 local function tryAddMob(out, model, playerNames, requireNoDialogue)
-    if model == nil or model.IsA == nil or not model:IsA("Model") then
+    if not safeIsA(model, "Model") then
         return
     end
     if playerNames ~= nil and playerNames[model.Name] then
@@ -10110,7 +10147,7 @@ local function tryAddMob(out, model, playerNames, requireNoDialogue)
         return
     end
     local root = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
-    if root == nil then
+    if root == nil or (root.CFrame == nil and not safeIsA(root, "BasePart")) then
         return
     end
 
@@ -10181,64 +10218,75 @@ end
 
 -- Читает из PlayerGui.MainHUD.Skills какие слоты 1..9 сейчас на кулдауне.
 -- Возвращает таблицу { [slotNumber] = true } для слотов на кулдауне.
+-- ВАЖНО: Key может быть ImageLabel (без свойства Text), поэтому доступ к свойствам GUI только через safeIsA / pcall.
 function stand_out_mobs.guiCooldowns(playerGui)
     local onCd = {}
     if playerGui == nil then
         return onCd
     end
-    local mainHud = playerGui:FindFirstChild("MainHUD")
-    local skills = mainHud and mainHud:FindFirstChild("Skills")
-    if skills == nil or skills.GetChildren == nil then
-        return onCd
-    end
 
-    local frames = {}
-    for _, child in skills:GetChildren() do
-        if child.Name ~= "Template" and child.Name ~= "TemplateTip" and child.Name ~= "Ability" then
-            local cd = child.FindFirstChild ~= nil and child:FindFirstChild("Cooldown") or nil
-            if cd ~= nil and child.Visible ~= false then
-                table.insert(frames, child)
-            end
+    pcall(function()
+        local mainHud = playerGui:FindFirstChild("MainHUD")
+        local skills = mainHud and mainHud:FindFirstChild("Skills")
+        if skills == nil or skills.GetChildren == nil then
+            return
         end
-    end
 
-    table.sort(frames, function(a, b)
-        local la = a.LayoutOrder or 0
-        local lb = b.LayoutOrder or 0
-        if la ~= lb then
-            return la < lb
-        end
-        return (a.Name or "") < (b.Name or "")
-    end)
-
-    for idx, frame in frames do
-        local slot = idx
-        local keyObj = frame:FindFirstChild("Key")
-        if keyObj ~= nil then
-            local txt = nil
-            if type(keyObj.Text) == "string" then
-                txt = keyObj.Text
-            elseif keyObj.GetDescendants ~= nil then
-                for _, d in keyObj:GetDescendants() do
-                    if type(d.Text) == "string" and string.match(d.Text, "^%s*[1-9]%s*$") then
-                        txt = d.Text
-                        break
+        local frames = {}
+        for _, child in skills:GetChildren() do
+            if child.Name ~= "Template" and child.Name ~= "TemplateTip" and child.Name ~= "Ability" then
+                if safeIsA(child, "GuiObject") or child.ClassName == "Frame" then
+                    local cd = child.FindFirstChild ~= nil and child:FindFirstChild("Cooldown") or nil
+                    if cd ~= nil and child.Visible ~= false then
+                        table.insert(frames, child)
                     end
                 end
             end
-            if txt ~= nil then
-                local parsed = tonumber(string.match(txt, "[1-9]"))
-                if parsed ~= nil then
-                    slot = parsed
+        end
+
+        table.sort(frames, function(a, b)
+            local la = a.LayoutOrder or 0
+            local lb = b.LayoutOrder or 0
+            if la ~= lb then
+                return la < lb
+            end
+            return (a.Name or "") < (b.Name or "")
+        end)
+
+        for idx, frame in frames do
+            local slot = idx
+            local keyObj = frame:FindFirstChild("Key")
+            if keyObj ~= nil then
+                local txt = nil
+                if safeIsA(keyObj, "TextLabel") or safeIsA(keyObj, "TextButton") then
+                    txt = keyObj.Text
+                elseif keyObj.GetDescendants ~= nil then
+                    for _, d in keyObj:GetDescendants() do
+                        if safeIsA(d, "TextLabel") or safeIsA(d, "TextButton") then
+                            if type(d.Text) == "string" and string.match(d.Text, "^%s*[1-9]%s*$") then
+                                txt = d.Text
+                                break
+                            end
+                        end
+                    end
+                end
+                if type(txt) == "string" then
+                    local parsed = tonumber(string.match(txt, "[1-9]"))
+                    if parsed ~= nil then
+                        slot = parsed
+                    end
+                end
+            end
+
+            local cd = frame:FindFirstChild("Cooldown")
+            if cd ~= nil and (safeIsA(cd, "GuiObject") or cd.ClassName == "Frame") then
+                local sz = cd.Size
+                if sz ~= nil and sz.X ~= nil and finite(sz.X.Scale) and sz.X.Scale > 0.02 then
+                    onCd[slot] = true
                 end
             end
         end
-
-        local cd = frame:FindFirstChild("Cooldown")
-        if cd ~= nil and cd.Size ~= nil and cd.Size.X ~= nil and finite(cd.Size.X.Scale) and cd.Size.X.Scale > 0.02 then
-            onCd[slot] = true
-        end
-    end
+    end)
 
     return onCd
 end
