@@ -6166,22 +6166,36 @@ function main.start(env)
             myMobs = function()
                 return handle._soBounty.mobs
             end,
-            myPrompt = function()
-                return stand_out_bounty.findMyPrompt(workspace, localPlayer.UserId)
+            myPrompt = function(tx, ty, tz)
+                return stand_out_bounty.findMyPrompt(workspace, localPlayer.UserId, tx, ty, tz)
             end,
-            triggerPrompt = function(prompt)
+            holdPromptBegin = function(prompt, holdDur)
                 if prompt == nil then return end
-                if type(env.fireproximityprompt) == "function" then
+                if holdDur <= 0.05 and type(env.fireproximityprompt) == "function" then
                     pcall(env.fireproximityprompt, prompt)
                 end
                 pcall(function() prompt:InputHoldBegin() end)
-                local hold = (type(prompt.HoldDuration) == "number" and prompt.HoldDuration > 0) and prompt.HoldDuration or 0.1
-                if env.task and env.task.delay then
-                    env.task.delay(hold + 0.1, function()
-                        pcall(function() prompt:InputHoldEnd() end)
-                    end)
-                else
-                    pcall(function() prompt:InputHoldEnd() end)
+                local vim = env.virtualInputManager
+                local kc = nil
+                pcall(function() kc = prompt.KeyboardKeyCode end)
+                if kc == nil and env.Enum and env.Enum.KeyCode then
+                    kc = env.Enum.KeyCode.H
+                end
+                if vim ~= nil and kc ~= nil then
+                    pcall(function() vim:SendKeyEvent(true, kc, false, game) end)
+                end
+            end,
+            holdPromptEnd = function(prompt)
+                if prompt == nil then return end
+                pcall(function() prompt:InputHoldEnd() end)
+                local vim = env.virtualInputManager
+                local kc = nil
+                pcall(function() kc = prompt.KeyboardKeyCode end)
+                if kc == nil and env.Enum and env.Enum.KeyCode then
+                    kc = env.Enum.KeyCode.H
+                end
+                if vim ~= nil and kc ~= nil then
+                    pcall(function() vim:SendKeyEvent(false, kc, false, game) end)
                 end
             end,
             fightMobs = function(now, mobEntries, meX, meY, meZ)
@@ -10550,36 +10564,72 @@ function stand_out_bounty.scanMyMobs(workspace, userId, playerNames)
     return out
 end
 
--- Ищет активный ProximityPrompt внутри Workspace.Game.BountyWorld.Party_<userId> (например MISSING FROG / Stash).
-function stand_out_bounty.findMyPrompt(workspace, userId)
+-- Ищет активный ProximityPrompt баунти: сначала в Workspace.Game.BountyWorld.Party_<userId>,
+-- а если не найден и известна координата трекера (tx, ty, tz) — ближайший активный ProximityPrompt
+-- в радиусе 25 студов от точки трекера (например, "Clean The Rock" или "MISSING FROG" в Workspace.Game.Map).
+function stand_out_bounty.findMyPrompt(workspace, userId, tx, ty, tz)
     if workspace == nil or userId == nil then
         return nil, nil, nil, nil
     end
     local gameFolder = workspace:FindFirstChild("Game")
-    local bw = gameFolder and gameFolder:FindFirstChild("BountyWorld")
-    local partyFolder = bw and bw:FindFirstChild("Party_" .. tostring(userId))
-    if partyFolder == nil or partyFolder.GetDescendants == nil then
+    if gameFolder == nil then
         return nil, nil, nil, nil
     end
 
-    for _, d in partyFolder:GetDescendants() do
-        if safeIsA(d, "ProximityPrompt") then
-            local reach = d.MaxActivationDistance
-            local avail = safeAttr(d, "StoryPromptAvailable")
-            if d.Enabled == true and avail ~= false and finite(reach) and reach > 0 then
-                local holder = d.Parent
-                local pos = nil
-                if holder ~= nil then
-                    if safeIsA(holder, "Attachment") and holder.WorldPosition ~= nil then
-                        pos = holder.WorldPosition
-                    elseif safeIsA(holder, "BasePart") and holder.Position ~= nil then
-                        pos = holder.Position
-                    end
-                end
+    local function promptPosition(d)
+        local holder = d.Parent
+        if holder == nil then return nil end
+        if safeIsA(holder, "Attachment") and holder.WorldPosition ~= nil then
+            return holder.WorldPosition
+        elseif safeIsA(holder, "BasePart") and holder.Position ~= nil then
+            return holder.Position
+        elseif safeIsA(holder, "Model") and holder.PrimaryPart ~= nil and holder.PrimaryPart.Position ~= nil then
+            return holder.PrimaryPart.Position
+        end
+        return nil
+    end
+
+    local function promptUsable(d)
+        if not safeIsA(d, "ProximityPrompt") then return false end
+        local reach = d.MaxActivationDistance
+        local avail = safeAttr(d, "StoryPromptAvailable")
+        return d.Enabled == true and avail ~= false and finite(reach) and reach > 0
+    end
+
+    -- 1) Приоритет: наша папка BountyWorld.Party_<userId>
+    local bw = gameFolder:FindFirstChild("BountyWorld")
+    local partyFolder = bw and bw:FindFirstChild("Party_" .. tostring(userId))
+    if partyFolder ~= nil and partyFolder.GetDescendants ~= nil then
+        for _, d in partyFolder:GetDescendants() do
+            if promptUsable(d) then
+                local pos = promptPosition(d)
                 if pos ~= nil and finite(pos.X) and finite(pos.Y) and finite(pos.Z) then
                     return d, pos.X, pos.Y, pos.Z
                 end
             end
+        end
+    end
+
+    -- 2) Фолбэк: любой включённый ProximityPrompt в радиусе 25 студов от VisibleBountyTrackerPosition
+    if tx ~= nil and ty ~= nil and tz ~= nil and gameFolder.GetDescendants ~= nil then
+        local bestPrompt, bestX, bestY, bestZ = nil, nil, nil, nil
+        local bestDist2 = 25 * 25
+        for _, d in gameFolder:GetDescendants() do
+            if promptUsable(d) then
+                local pos = promptPosition(d)
+                if pos ~= nil and finite(pos.X) and finite(pos.Y) and finite(pos.Z) then
+                    local dx, dy, dz = pos.X - tx, pos.Y - ty, pos.Z - tz
+                    local dist2 = dx * dx + dy * dy + dz * dz
+                    if dist2 <= bestDist2 then
+                        bestDist2 = dist2
+                        bestPrompt = d
+                        bestX, bestY, bestZ = pos.X, pos.Y, pos.Z
+                    end
+                end
+            end
+        end
+        if bestPrompt ~= nil then
+            return bestPrompt, bestX, bestY, bestZ
         end
     end
 
@@ -10616,7 +10666,17 @@ function stand_out_bounty.new(deps)
     }, Runner)
 end
 
+function Runner:_releasePrompt()
+    if self.promptHolding ~= nil then
+        if self.deps.holdPromptEnd ~= nil then
+            pcall(self.deps.holdPromptEnd, self.promptHolding)
+        end
+        self.promptHolding = nil
+    end
+end
+
 function Runner:stop()
+    self:_releasePrompt()
     if self.deps.stopFighting ~= nil then
         pcall(self.deps.stopFighting)
     end
@@ -10625,7 +10685,6 @@ function Runner:stop()
     self.tierStuckCount = 0
     self.fallbackTier = nil
     self.statusText = ""
-    self.promptHolding = nil
 end
 
 function Runner:_desiredTier(opts)
@@ -10639,12 +10698,7 @@ function Runner:_desiredTier(opts)
     if self.fallbackTier ~= nil then
         return self.fallbackTier
     end
-    if self.deps.unlockedTier ~= nil then
-        local ok, unlocked = pcall(self.deps.unlockedTier)
-        if ok and type(unlocked) == "number" and unlocked >= 1 then
-            return math.min(math.floor(unlocked), stand_out_bounty.max_tier)
-        end
-    end
+    -- Всегда пробуем дойти кнопкой Next до максимального тира (8), пока тир в UI не перестанет расти
     return stand_out_bounty.max_tier
 end
 
@@ -10692,6 +10746,7 @@ function Runner:update(now, opts, meX, meY, meZ)
         -- 1) Если есть наши баунти-мобы — фармим их через stand_out_mobs + Farm Config
         local mobs = self.deps.myMobs()
         if mobs ~= nil and #mobs > 0 then
+            self:_releasePrompt()
             local target = self.deps.fightMobs(now, mobs, meX, meY, meZ)
             if target ~= nil then
                 self.statusText = title .. " | " .. (target.name or "Mob")
@@ -10703,20 +10758,40 @@ function Runner:update(now, opts, meX, meY, meZ)
             end
         end
 
-        -- 2) Если в BountyWorld.Party_<UserId> есть активный промпт (MISSING FROG / Stash) — тепаемся и берём
-        local prompt, px, py, pz = self.deps.myPrompt()
+        local tx, ty, tz = self.deps.trackerPosition()
+
+        -- 2) Ищем активный промпт баунти (в Party_<UserId> или в радиусе 25 ст от трекера, напр. "Clean The Rock")
+        local prompt, px, py, pz = self.deps.myPrompt(tx, ty, tz)
         if prompt ~= nil and px ~= nil then
+            -- Держим персонажа рядом с объектом (внутри MaxActivationDistance)
             self.deps.teleportTo(px, py + 3, pz)
-            if now - self.lastAction >= 0.35 then
-                self.lastAction = now
-                self.deps.triggerPrompt(prompt)
+            local holdDur = (type(prompt.HoldDuration) == "number" and finite(prompt.HoldDuration) and prompt.HoldDuration > 0)
+                and prompt.HoldDuration or 0
+
+            if self.promptHolding == prompt then
+                -- Уже держим этот промпт — ждём полного завершения HoldDuration + запас 0.35 с
+                if now - self.promptSince >= holdDur + 0.35 then
+                    self:_releasePrompt()
+                    self.lastAction = now
+                end
+            elseif now - self.lastAction >= 0.45 then
+                self:_releasePrompt()
+                if self.deps.holdPromptBegin ~= nil then
+                    self.promptHolding = prompt
+                    self.promptSince = now
+                    pcall(self.deps.holdPromptBegin, prompt, holdDur)
+                elseif self.deps.triggerPrompt ~= nil then
+                    self.lastAction = now
+                    pcall(self.deps.triggerPrompt, prompt)
+                end
             end
-            self.statusText = title .. " | подбор"
+            self.statusText = title .. " | взаимодействие"
             return
+        else
+            self:_releasePrompt()
         end
 
         -- 3) Иначе летим на VisibleBountyTrackerPosition, чтобы простримить мобов / предмет
-        local tx, ty, tz = self.deps.trackerPosition()
         if tx ~= nil then
             local dx, dy, dz = tx - meX, ty - meY, tz - meZ
             if dx * dx + dy * dy + dz * dz > 225 and now - self.lastAction >= stand_out_bounty.travel_retry then
@@ -10729,6 +10804,8 @@ function Runner:update(now, opts, meX, meY, meZ)
         end
         return
     end
+
+    self:_releasePrompt()
 
     -- Баунти НЕ активно (или меняем инцидент на боевой): идём к Petyr, открываем доску и запускаем баунти!
     if not ui.selectOpen then
