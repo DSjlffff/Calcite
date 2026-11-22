@@ -4196,7 +4196,7 @@ function main.start(env)
     local handle = {
         _soPick = { picker = nil, entries = {}, wasOn = false },
         _soMob = { farmer = nil, noclip = nil, entries = {}, wasOn = false },
-        _soBounty = { runner = nil, mobs = {}, wasOn = false, mod = nil, modTried = false },
+        _soBounty = { runner = nil, mobs = {}, prompt = nil, px = nil, py = nil, pz = nil, lastPromptScan = -99, wasOn = false, mod = nil, modTried = false },
     }
 
     -- what the executor gives back for a connection is known from its documentation only: one that cannot be
@@ -6166,15 +6166,25 @@ function main.start(env)
             myMobs = function()
                 return handle._soBounty.mobs
             end,
-            myPrompt = function(tx, ty, tz)
-                return stand_out_bounty.findMyPrompt(workspace, localPlayer.UserId, tx, ty, tz)
+            myPrompt = function()
+                local sb = handle._soBounty
+                local p = sb.prompt
+                if p ~= nil and p.Parent ~= nil and p.Enabled == true then
+                    local okA, avail = pcall(function() return p:GetAttribute("StoryPromptAvailable") end)
+                    if not (okA and avail == false) then
+                        return p, sb.px, sb.py, sb.pz
+                    end
+                end
+                sb.prompt = nil
+                return nil, nil, nil, nil
             end,
             holdPromptBegin = function(prompt, holdDur)
                 if prompt == nil then return end
                 if holdDur <= 0.05 and type(env.fireproximityprompt) == "function" then
                     pcall(env.fireproximityprompt, prompt)
+                    return
                 end
-                pcall(function() prompt:InputHoldBegin() end)
+                -- Для Hold-промптов Stand Out (SquareHoldFeedback) зажимаем клавишу [H] без двойного конфликта
                 local vim = env.virtualInputManager
                 local kc = nil
                 pcall(function() kc = prompt.KeyboardKeyCode end)
@@ -6183,11 +6193,12 @@ function main.start(env)
                 end
                 if vim ~= nil and kc ~= nil then
                     pcall(function() vim:SendKeyEvent(true, kc, false, game) end)
+                else
+                    pcall(function() prompt:InputHoldBegin() end)
                 end
             end,
             holdPromptEnd = function(prompt)
                 if prompt == nil then return end
-                pcall(function() prompt:InputHoldEnd() end)
                 local vim = env.virtualInputManager
                 local kc = nil
                 pcall(function() kc = prompt.KeyboardKeyCode end)
@@ -6197,6 +6208,7 @@ function main.start(env)
                 if vim ~= nil and kc ~= nil then
                     pcall(function() vim:SendKeyEvent(false, kc, false, game) end)
                 end
+                pcall(function() prompt:InputHoldEnd() end)
             end,
             fightMobs = function(now, mobEntries, meX, meY, meZ)
                 if handle._soMob.farmer == nil then return nil end
@@ -6798,7 +6810,24 @@ function main.start(env)
                 for _, pl in Players:GetPlayers() do
                     pNames[pl.Name] = true
                 end
-                handle._soBounty.mobs = stand_out_bounty.scanMyMobs(workspace, localPlayer.UserId, pNames)
+                local sb = handle._soBounty
+                sb.mobs = stand_out_bounty.scanMyMobs(workspace, localPlayer.UserId, pNames)
+                -- Промпт сканируем редко (раз в 1.0 с, и только когда текущего валидного промпта нет в кэше),
+                -- чтобы не просаживать FPS обходом Workspace.Game:GetDescendants()
+                local cachedOk = sb.prompt ~= nil and sb.prompt.Parent ~= nil and sb.prompt.Enabled == true
+                if cachedOk then
+                    local okA, avail = pcall(function() return sb.prompt:GetAttribute("StoryPromptAvailable") end)
+                    if okA and avail == false then cachedOk = false end
+                end
+                if not cachedOk and now - sb.lastPromptScan >= 1.0 then
+                    sb.lastPromptScan = now
+                    local tx, ty, tz = nil, nil, nil
+                    local okT, pos = pcall(function() return localPlayer:GetAttribute("VisibleBountyTrackerPosition") end)
+                    if okT and pos ~= nil and pos.X ~= nil and pos.Y ~= nil and pos.Z ~= nil then
+                        tx, ty, tz = pos.X, pos.Y, pos.Z
+                    end
+                    sb.prompt, sb.px, sb.py, sb.pz = stand_out_bounty.findMyPrompt(workspace, localPlayer.UserId, tx, ty, tz)
+                end
             end
 
             if itemsOn then
@@ -7185,6 +7214,8 @@ function main.start(env)
             end
         elseif soBounty.wasOn then
             soBounty.wasOn = false
+            soBounty.prompt = nil
+            soBounty.lastPromptScan = -99
             if soBounty.runner ~= nil then
                 soBounty.runner:stop()
                 ui.setStandOutBounty(soBounty.runner.completed, "")
@@ -10760,21 +10791,32 @@ function Runner:update(now, opts, meX, meY, meZ)
 
         local tx, ty, tz = self.deps.trackerPosition()
 
-        -- 2) Ищем активный промпт баунти (в Party_<UserId> или в радиусе 25 ст от трекера, напр. "Clean The Rock")
+        -- 2) Ищем активный промпт баунти (кэшируется в slow-pass, без тяжёлого GetDescendants на каждом кадре)
         local prompt, px, py, pz = self.deps.myPrompt(tx, ty, tz)
         if prompt ~= nil and px ~= nil then
-            -- Держим персонажа рядом с объектом (внутри MaxActivationDistance)
-            self.deps.teleportTo(px, py + 3, pz)
+            local dx, dy, dz = px - meX, py - meY, pz - meZ
+            local dist2 = dx * dx + dy * dy + dz * dz
+            -- Телепортируемся ОДИН раз если далеко (> 6 ст), а во время зажатия [H] НЕ дёргаем CFrame каждый кадр!
+            if dist2 > 36 then
+                self:_releasePrompt()
+                self.deps.teleportTo(px, py + 2.5, pz)
+                self.lastAction = now
+                self.statusText = title .. " | лечу к объекту"
+                return
+            end
+
             local holdDur = (type(prompt.HoldDuration) == "number" and finite(prompt.HoldDuration) and prompt.HoldDuration > 0)
                 and prompt.HoldDuration or 0
+            -- Щедрый таймаут удержания: держим до исчезновения промпта или HoldDuration + 1.5 с,
+            -- чтобы сервер гарантированно засчитал 100% заполнения
+            local maxHold = math.max(holdDur, 0.5) + 1.5
 
             if self.promptHolding == prompt then
-                -- Уже держим этот промпт — ждём полного завершения HoldDuration + запас 0.35 с
-                if now - self.promptSince >= holdDur + 0.35 then
+                if now - self.promptSince >= maxHold then
                     self:_releasePrompt()
                     self.lastAction = now
                 end
-            elseif now - self.lastAction >= 0.45 then
+            elseif now - self.lastAction >= 0.35 then
                 self:_releasePrompt()
                 if self.deps.holdPromptBegin ~= nil then
                     self.promptHolding = prompt
@@ -10785,7 +10827,7 @@ function Runner:update(now, opts, meX, meY, meZ)
                     pcall(self.deps.triggerPrompt, prompt)
                 end
             end
-            self.statusText = title .. " | взаимодействие"
+            self.statusText = title .. " | держу [H]"
             return
         else
             self:_releasePrompt()
