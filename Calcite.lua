@@ -16,131 +16,6 @@ local function __require(path)
     return entry.value
 end
 
-__modules["aim_math"] = function(require)
--- the arithmetic of the aim: who is the nearest to the crosshair, and how far to move the mouse in a frame
--- the mouse is all the aim has: it sends counts, the game turns the camera by them in its own way, and how many pixels
--- of the screen a count is worth depends on the game and on the sensitivity the user has set there. The aim finds
--- that out by itself, from how far the point moved after what was sent
--- pure logic, checked by tests/aim_math_test.lua
-local num = require("./num")
-
-local aim_math = {}
-
-aim_math.max_step = 200         -- counts in one frame, whatever the error: a wrong guess must not spin the camera
-
-local min_gain = 0.02           -- counts for a pixel: the range a guess is kept in
-local max_gain = 50
-local learn_from = 3            -- counts: a smaller step tells too little about the game to learn from
-local learn_rate = 0.5          -- how far a guess moves to what was just seen: the target moves and the hand of the user too
-local on_point = 1              -- pixels: closer than this the mouse is left alone
-
--- the share of the error removed in a frame that long: the same path whatever the frame rate
-function aim_math.share(speed, dt)
-    return 1 - math.exp(-speed * dt)
-end
-
--- the one closest to the crosshair among those inside the circle; each has ex, ey: pixels from the crosshair to it
-function aim_math.nearest(candidates, radius)
-    local best = nil
-    local bestDistance = radius * radius
-
-    for _, candidate in candidates do
-        local distance = candidate.ex * candidate.ex + candidate.ey * candidate.ey
-        if distance <= bestDistance then
-            best = candidate
-            bestDistance = distance
-        end
-    end
-
-    return best
-end
-
-function aim_math.newController()
-    return {
-        gain = 1,           -- counts of the mouse for a pixel of the screen, as far as it is known
-        carryX = 0,         -- what was cut off when the last step was made whole
-        carryY = 0,
-        lastErrorX = nil,   -- where the point was a frame ago, and what was sent then
-        lastErrorY = nil,
-        lastMoveX = 0,
-        lastMoveY = 0,
-    }
-end
-
--- before another target: what was learnt about the game stays, what was known about the old target goes
-function aim_math.reset(controller)
-    controller.carryX = 0
-    controller.carryY = 0
-    controller.lastErrorX = nil
-    controller.lastErrorY = nil
-    controller.lastMoveX = 0
-    controller.lastMoveY = 0
-end
-
--- one frame: the point is ex, ey pixels from the crosshair; gives the whole counts to send to the mouse
-function aim_math.step(controller, ex, ey, speed, dt)
-    if not (num.finite(ex) and num.finite(ey)) then
-        aim_math.reset(controller)
-        return 0, 0
-    end
-
-    -- what did the last step do: the point came shiftX, shiftY pixels closer for the counts that were sent
-    if controller.lastErrorX ~= nil then
-        local sentX, sentY = controller.lastMoveX, controller.lastMoveY
-        local sent = sentX * sentX + sentY * sentY
-
-        if sent >= learn_from * learn_from then
-            local shiftX = controller.lastErrorX - ex
-            local shiftY = controller.lastErrorY - ey
-            -- pixels a count, along the way the mouse was sent
-            local perCount = (shiftX * sentX + shiftY * sentY) / sent
-
-            -- a point that got further away although the mouse went after it is running faster than the aim: nothing
-            -- to learn from that
-            if perCount > 0 then
-                local seen = math.clamp(1 / perCount, min_gain, max_gain)
-                controller.gain = controller.gain * (seen / controller.gain) ^ learn_rate
-            end
-        end
-    end
-
-    if ex * ex + ey * ey < on_point * on_point then
-        controller.carryX = 0
-        controller.carryY = 0
-        controller.lastErrorX = ex
-        controller.lastErrorY = ey
-        controller.lastMoveX = 0
-        controller.lastMoveY = 0
-        return 0, 0
-    end
-
-    local share = aim_math.share(speed, dt)
-    local wantX = ex * share * controller.gain + controller.carryX
-    local wantY = ey * share * controller.gain + controller.carryY
-
-    local length = math.sqrt(wantX * wantX + wantY * wantY)
-    if length > aim_math.max_step then
-        wantX = wantX * aim_math.max_step / length
-        wantY = wantY * aim_math.max_step / length
-    end
-
-    -- the mouse takes whole counts; the rest is kept for the next frame, or a slow aim would never move
-    local moveX = math.round(wantX)
-    local moveY = math.round(wantY)
-    controller.carryX = wantX - moveX
-    controller.carryY = wantY - moveY
-
-    controller.lastErrorX = ex
-    controller.lastErrorY = ey
-    controller.lastMoveX = moveX
-    controller.lastMoveY = moveY
-
-    return moveX, moveY
-end
-
-return aim_math
-end
-
 __modules["aim"] = function(require)
 -- the aim: while its key is held, the mouse is moved towards the one nearest to the crosshair
 -- nothing of the game is read or changed here beyond the places of the characters: the mouse is all it moves,
@@ -389,6 +264,131 @@ function Aim:update(targets, a, teamCheck, held, now, d)
 end
 
 return aim
+end
+
+__modules["aim_math"] = function(require)
+-- the arithmetic of the aim: who is the nearest to the crosshair, and how far to move the mouse in a frame
+-- the mouse is all the aim has: it sends counts, the game turns the camera by them in its own way, and how many pixels
+-- of the screen a count is worth depends on the game and on the sensitivity the user has set there. The aim finds
+-- that out by itself, from how far the point moved after what was sent
+-- pure logic, checked by tests/aim_math_test.lua
+local num = require("./num")
+
+local aim_math = {}
+
+aim_math.max_step = 200         -- counts in one frame, whatever the error: a wrong guess must not spin the camera
+
+local min_gain = 0.02           -- counts for a pixel: the range a guess is kept in
+local max_gain = 50
+local learn_from = 3            -- counts: a smaller step tells too little about the game to learn from
+local learn_rate = 0.5          -- how far a guess moves to what was just seen: the target moves and the hand of the user too
+local on_point = 1              -- pixels: closer than this the mouse is left alone
+
+-- the share of the error removed in a frame that long: the same path whatever the frame rate
+function aim_math.share(speed, dt)
+    return 1 - math.exp(-speed * dt)
+end
+
+-- the one closest to the crosshair among those inside the circle; each has ex, ey: pixels from the crosshair to it
+function aim_math.nearest(candidates, radius)
+    local best = nil
+    local bestDistance = radius * radius
+
+    for _, candidate in candidates do
+        local distance = candidate.ex * candidate.ex + candidate.ey * candidate.ey
+        if distance <= bestDistance then
+            best = candidate
+            bestDistance = distance
+        end
+    end
+
+    return best
+end
+
+function aim_math.newController()
+    return {
+        gain = 1,           -- counts of the mouse for a pixel of the screen, as far as it is known
+        carryX = 0,         -- what was cut off when the last step was made whole
+        carryY = 0,
+        lastErrorX = nil,   -- where the point was a frame ago, and what was sent then
+        lastErrorY = nil,
+        lastMoveX = 0,
+        lastMoveY = 0,
+    }
+end
+
+-- before another target: what was learnt about the game stays, what was known about the old target goes
+function aim_math.reset(controller)
+    controller.carryX = 0
+    controller.carryY = 0
+    controller.lastErrorX = nil
+    controller.lastErrorY = nil
+    controller.lastMoveX = 0
+    controller.lastMoveY = 0
+end
+
+-- one frame: the point is ex, ey pixels from the crosshair; gives the whole counts to send to the mouse
+function aim_math.step(controller, ex, ey, speed, dt)
+    if not (num.finite(ex) and num.finite(ey)) then
+        aim_math.reset(controller)
+        return 0, 0
+    end
+
+    -- what did the last step do: the point came shiftX, shiftY pixels closer for the counts that were sent
+    if controller.lastErrorX ~= nil then
+        local sentX, sentY = controller.lastMoveX, controller.lastMoveY
+        local sent = sentX * sentX + sentY * sentY
+
+        if sent >= learn_from * learn_from then
+            local shiftX = controller.lastErrorX - ex
+            local shiftY = controller.lastErrorY - ey
+            -- pixels a count, along the way the mouse was sent
+            local perCount = (shiftX * sentX + shiftY * sentY) / sent
+
+            -- a point that got further away although the mouse went after it is running faster than the aim: nothing
+            -- to learn from that
+            if perCount > 0 then
+                local seen = math.clamp(1 / perCount, min_gain, max_gain)
+                controller.gain = controller.gain * (seen / controller.gain) ^ learn_rate
+            end
+        end
+    end
+
+    if ex * ex + ey * ey < on_point * on_point then
+        controller.carryX = 0
+        controller.carryY = 0
+        controller.lastErrorX = ex
+        controller.lastErrorY = ey
+        controller.lastMoveX = 0
+        controller.lastMoveY = 0
+        return 0, 0
+    end
+
+    local share = aim_math.share(speed, dt)
+    local wantX = ex * share * controller.gain + controller.carryX
+    local wantY = ey * share * controller.gain + controller.carryY
+
+    local length = math.sqrt(wantX * wantX + wantY * wantY)
+    if length > aim_math.max_step then
+        wantX = wantX * aim_math.max_step / length
+        wantY = wantY * aim_math.max_step / length
+    end
+
+    -- the mouse takes whole counts; the rest is kept for the next frame, or a slow aim would never move
+    local moveX = math.round(wantX)
+    local moveY = math.round(wantY)
+    controller.carryX = wantX - moveX
+    controller.carryY = wantY - moveY
+
+    controller.lastErrorX = ex
+    controller.lastErrorY = ey
+    controller.lastMoveX = moveX
+    controller.lastMoveY = moveY
+
+    return moveX, moveY
+end
+
+return aim_math
 end
 
 __modules["autofarm"] = function(require)
@@ -3996,6 +3996,7 @@ local noclip = require("./noclip")
 local chams = require("./chams")
 local hitbox = require("./hitbox")
 local item_asylum = require("./item_asylum")
+local stand_out = require("./stand_out")
 local glider = require("./glider")
 local yba_npcs = require("./yba_npcs")
 local yba_waypoints = require("./yba_waypoints")
@@ -6407,6 +6408,7 @@ function main.start(env)
                 local wantYba = status.wantsEffects(s.statusKinds) or s.stand or s.spec
                 local townWeapon = s.townWeapon and s.townWeapon.enabled
                 local iaWeapon = s.iaWeapon and s.iaWeapon.enabled
+                local standOutInfo = s.standOut and (s.standOut.stand or s.standOut.subAbility or s.standOut.weapon)
                 for _, record in roster do
                     players.refresh(record, wantYba)
                     if townWeapon and record.character ~= nil then
@@ -6437,6 +6439,9 @@ function main.start(env)
                         else
                             record.weapon = ""
                         end
+                    elseif standOutInfo then
+                        local info = stand_out.playerInfo(record.player)
+                        record.weapon = stand_out.format(info, s.standOut.stand, s.standOut.subAbility, s.standOut.weapon)
                     end
                 end
             end
@@ -6897,8 +6902,8 @@ local orderLabels = { "Ближнего", "Слабого" }
 local pointLabels = { "По списку", "Ближнюю" }
 
 -- the list of the modes as the user reads it
-local choiceLabels = { "Авто", "Universal", "YBA", "Blox Strike", "Steal an Egg", "Town", "MVS", "Item Asylum", "Rivals" }
-local choiceOf = { ["Авто"] = "Auto", ["Universal"] = "Universal", ["YBA"] = "Yba", ["Blox Strike"] = "Strike", ["Steal an Egg"] = "StealEgg", ["Town"] = "Town", ["MVS"] = "Mvs", ["Item Asylum"] = "ItemAsylum", ["Rivals"] = "Rivals" }
+local choiceLabels = { "Авто", "Universal", "YBA", "Blox Strike", "Steal an Egg", "Town", "MVS", "Item Asylum", "Rivals", "Stand Out" }
+local choiceOf = { ["Авто"] = "Auto", ["Universal"] = "Universal", ["YBA"] = "Yba", ["Blox Strike"] = "Strike", ["Steal an Egg"] = "StealEgg", ["Town"] = "Town", ["MVS"] = "Mvs", ["Item Asylum"] = "ItemAsylum", ["Rivals"] = "Rivals", ["Stand Out"] = "StandOut" }
 
 function menu.create(deps)
     local Library = deps.Library
@@ -7075,6 +7080,12 @@ function menu.create(deps)
     toggle(iaEspGroup, "IaWeaponAbilities", "Абилки E/R", settings.iaWeapon, "showAbilities")
     iaEspGroup:AddLabel("Показывает Tool в руках чужих. ToolIconText = патроны/счётчик. " ..
         "Абилки берутся из атрибутов EABILITY/RABILITY тулзы.", true)
+
+    -- Stand Out ESP: стенд, спек (SubAbility) и оружие из Player.Data (stand_out.lua)
+    local standOutGroup = visualsTab:AddRightGroupbox("Stand Out")
+    toggle(standOutGroup, "StandOutStand", "Стенд", settings.standOut, "stand")
+    toggle(standOutGroup, "StandOutSubAbility", "Спек", settings.standOut, "subAbility")
+    toggle(standOutGroup, "StandOutWeapon", "Оружие", settings.standOut, "weapon")
 
     -- items
     local itemsGroup = visualsTab:AddLeftGroupbox("Предметы")
@@ -7511,6 +7522,7 @@ function menu.create(deps)
         pcall(function() townIgnoreLimitsToggle:SetVisible(modes.has(mode, "TownGun")) end)
         townEspGroup:SetVisible(modes.has(mode, "TownGun"))
         iaEspGroup:SetVisible(modes.has(mode, "IaWeapon"))
+        standOutGroup:SetVisible(modes.has(mode, "StandOutInfo"))
         -- в MVS visibleOnly форсится в settings.inEffect, тоггл прячем
         pcall(function() visibleOnlyToggle:SetVisible(mode ~= "Mvs") end)
         -- Reload bar работает только в MVS (gated через MvsGun), прячем toggle в других режимах
@@ -7682,8 +7694,11 @@ modes.ia_universe = 1998835206
 -- Rivals: a team shooter, players ESP + aim + team check as the basics
 modes.rivals_universe = 6035872082
 
+-- Stand Out: open-world JoJo RPG/PvP (no Roblox Teams; Player.Data has Stand, SubAbility, Weapon)
+modes.standout_universe = 8172250815
+
 -- what the user can pick in the menu, in the order of the list there
-modes.choices = { "Auto", "Universal", "Yba", "Strike", "StealEgg", "Town", "Mvs", "ItemAsylum", "Rivals" }
+modes.choices = { "Auto", "Universal", "Yba", "Strike", "StealEgg", "Town", "Mvs", "ItemAsylum", "Rivals", "StandOut" }
 
 -- AutoFarm is taking the items of the world one after another, for the game whose items the script knows (autofarm.lua);
 -- TimeErase is a mark on a player erasing time, whose model the game takes out of the world (King Crimson in YBA);
@@ -7720,6 +7735,8 @@ local features = {
     ItemAsylum = { Players = true, Health = true, Aim = true, IaWeapon = true },
     -- Rivals: team shooter — пока основа (ESP с здоровьем + aim + team check)
     Rivals = { Players = true, Health = true, TeamCheck = true, Aim = true },
+    -- Stand Out: без команд; ESP игроков с HP + стенд / спек / оружие из Player.Data (stand_out.lua)
+    StandOut = { Players = true, Health = true, StandOutInfo = true },
 }
 
 -- what a mode starts with set otherwise than the settings are written: fields of the table of settings.defaults
@@ -7762,6 +7779,10 @@ function modes.detect(universeId)
 
     if universeId == modes.rivals_universe then
         return "Rivals"
+    end
+
+    if modes.standout_universe ~= 0 and universeId == modes.standout_universe then
+        return "StandOut"
     end
 
     return "Universal"
@@ -7809,6 +7830,10 @@ function modes.name(mode)
 
     if mode == "Rivals" then
         return "Rivals"
+    end
+
+    if mode == "StandOut" then
+        return "Stand Out"
     end
 
     return "Universal"
@@ -8952,6 +8977,12 @@ function settings.defaults(mode)
             enabled = true,
             showAbilities = false,  -- показывать EABILITY/RABILITY (длинно, но полезно)
         },
+        -- Stand Out ESP: стенд, спек (SubAbility) и оружие из Player.Data (stand_out.lua)
+        standOut = {
+            stand = true,
+            subAbility = true,
+            weapon = false,
+        },
         -- MVS Silent Aim: клик ЛКМ зовёт Net:RemoteEvent("GunKill") на цель Аима (mvs.lua).
         -- Rage mode собирается из Aim + Silent + AutoFire на вкладке — отдельного тумблера нет
         mvsSilent = {
@@ -9187,6 +9218,16 @@ function settings.inEffect(s, mode)
         e.iaWeapon.enabled = false
     end
     if e.iaWeapon.enabled then
+        e.weapon = true
+    end
+
+    e.standOut = table.clone(s.standOut)
+    if not modes.has(mode, "StandOutInfo") then
+        e.standOut.stand = false
+        e.standOut.subAbility = false
+        e.standOut.weapon = false
+    end
+    if e.standOut.stand or e.standOut.subAbility or e.standOut.weapon then
         e.weapon = true
     end
 
@@ -9556,6 +9597,93 @@ function spectators.draw(d, screenW, screenH, count, sure, maybe)
 end
 
 return spectators
+end
+
+__modules["stand_out"] = function(require)
+-- Stand Out mode: pure read helpers for player ESP.
+-- Факты игры из tools/standout_probe_scene.lua (UniverseId = 8172250815, PlaceId = 128828638194450):
+--   • без Roblox Teams (Team=nil, Neutral=true)
+--   • персонажи: Workspace.Game.Players.<Name>, обычные R6 с Humanoid + HumanoidRootPart
+--   • у каждого Player есть папка Data с StringValue: Stand, StandOverride, SubAbility, Weapon, WeaponOverride
+local stand_out = {}
+
+local function cleanString(value)
+    if type(value) ~= "string" then
+        return ""
+    end
+    local trimmed = string.match(value, "^%s*(.-)%s*$") or ""
+    if trimmed == "" or trimmed == "None" then
+        return ""
+    end
+    return trimmed
+end
+
+local function stringIn(folder, name)
+    if folder == nil then
+        return ""
+    end
+    local obj = folder:FindFirstChild(name)
+    if obj == nil or obj.ClassName ~= "StringValue" then
+        return ""
+    end
+    return cleanString(obj.Value)
+end
+
+-- Читает стенд, спек (SubAbility) и оружие игрока из Player.Data.
+-- Возвращает { stand = "...", subAbility = "...", weapon = "..." } (пустые строки, если нет).
+function stand_out.playerInfo(player)
+    if player == nil then
+        return { stand = "", subAbility = "", weapon = "" }
+    end
+
+    local data = player:FindFirstChild("Data")
+    if data == nil then
+        return { stand = "", subAbility = "", weapon = "" }
+    end
+
+    local stand = stringIn(data, "StandOverride")
+    if stand == "" then
+        stand = stringIn(data, "Stand")
+    end
+
+    local subAbility = stringIn(data, "SubAbility")
+
+    local weapon = stringIn(data, "WeaponOverride")
+    if weapon == "" then
+        weapon = stringIn(data, "Weapon")
+    end
+    if weapon == "Fists" then
+        weapon = ""
+    end
+
+    return {
+        stand = stand,
+        subAbility = subAbility,
+        weapon = weapon,
+    }
+end
+
+-- Собирает подпись под рамкой игрока по выбранным флагам.
+function stand_out.format(info, showStand, showSub, showWeapon)
+    if info == nil then
+        return ""
+    end
+
+    local parts = {}
+    if showStand and info.stand ~= nil and info.stand ~= "" then
+        table.insert(parts, info.stand)
+    end
+    if showSub and info.subAbility ~= nil and info.subAbility ~= "" then
+        table.insert(parts, info.subAbility)
+    end
+    if showWeapon and info.weapon ~= nil and info.weapon ~= "" then
+        table.insert(parts, info.weapon)
+    end
+
+    return table.concat(parts, " | ")
+end
+
+return stand_out
 end
 
 __modules["status"] = function(require)
@@ -10126,276 +10254,6 @@ end
 return Mover
 end
 
-__modules["strike_move"] = function(require)
--- finds what the bhop needs of Blox Strike among the tables of the game; known from the code of the game itself
--- (tools/strike_probe4.lua):
---   the runtime of its movement (MovementV2.Client.Runtime), one for the whole session; its _state is the state of
---   the user after the last tick: OnGround, MovementMode, PreviousButtons (the buttons of the last command);
---   the table of Controllers.CharacterController.LocalCharacter, whose jump(pressed) is what the handler of the jump
---   key calls when the key goes down and up;
---   the bits of a movement command (MovementV2.Buttons), for checking that the game follows the switch;
---   the table of Controllers.InventoryController (tools/strike_probe10.lua), for the weapon in the hands: its
---   getCurrentEquipped breaks the module when an executor calls it, so it is never called; the loadout is what
---   peekCurrentEquippedForMovement holds on to, and the weapon its CurrentEquipped, read raw
--- nothing of the game is replaced: the state is read, and the switch is called the way the game calls it
--- takes the functions of the executor as a table, so tests/strike_move_test.lua runs it without one
-local strike_move = {}
-
-local yield_every = 20000       -- tables looked at between two pauses: a game has two hundred thousand of them
-
-local function isFunction(value)
-    return type(value) == "function"
-end
-
--- looks for all of it in a thread of its own: the frame does not wait
--- onFound({ state = function, setJump = function or nil, setMove = function or nil, jumpDown = function or nil,
--- weapon = function or nil }) or onMissing() is called once; weapon() gives the object of the weapon in the hands as the
--- game keeps it (see weapon.lua), nil when nothing is; setMove(x, z) tells the character of the user to walk that way,
--- a direction in the world,
--- and gives back whether there was a character to tell:
--- the same method the controls of Roblox tell it the keys with (Classes.Character:MoveFunction), reached through what
--- the jump of the controller holds on to
--- the state alone is worth having: the way of a grenade starts from it. Without the switch of the jump there is no
--- bhop, and setJump is nil
-function strike_move.find(env, onFound, onMissing)
-    env.task.spawn(function()
-        local ok, objects = pcall(function()
-            return env.getgc(true)
-        end)
-
-        if not ok or type(objects) ~= "table" then
-            onMissing()
-            return
-        end
-
-        local runtime = nil
-        local controller = nil
-        local buttons = nil
-        local inventory = nil
-        local checked = 0
-
-        local function look(object)
-            if type(rawget(object, "_remotePresentations")) == "table" and type(rawget(object, "_remotePresentationPool")) == "table" then
-                -- a runtime that was stopped may still lie around; the one that runs wins
-                if runtime == nil or rawget(object, "_started") == true then
-                    runtime = object
-                end
-            elseif isFunction(rawget(object, "jump")) and isFunction(rawget(object, "crouch"))
-                and isFunction(rawget(object, "PlantBomb")) and isFunction(rawget(object, "CancelBombPlant")) then
-                controller = object
-            elseif isFunction(rawget(object, "has")) and isFunction(rawget(object, "with")) and rawget(object, "Scoped") ~= nil
-                and rawget(object, "Jump") ~= nil then
-                buttons = object
-            elseif isFunction(rawget(object, "peekCurrentEquippedForMovement")) and isFunction(rawget(object, "getCurrentEquipped")) then
-                inventory = object
-            end
-        end
-
-        for _, object in objects do
-            if type(object) == "table" then
-                checked += 1
-
-                -- a table may refuse to be read; that is not the one looked for
-                pcall(look, object)
-
-                if checked % yield_every == 0 then
-                    env.task.wait()
-                end
-            end
-        end
-
-        if runtime == nil then
-            onMissing()
-            return
-        end
-
-        local jump = if controller ~= nil then rawget(controller, "jump") else nil
-
-        -- whether the jump is down in the buttons of a command: asked of the game, which alone knows how it packs them
-        local jumpDown = nil
-        if buttons ~= nil then
-            local has = rawget(buttons, "has")
-            local bit = rawget(buttons, "Jump")
-            jumpDown = function(mask)
-                local okHas, down = pcall(has, mask, bit)
-                return okHas and down == true
-            end
-        end
-
-        -- the character of the user right now: a life is a new one, the jump of the controller holds on to the current
-        local function character()
-            local ok, values = pcall(env.getupvalues, jump)
-            if not ok or type(values) ~= "table" then
-                return nil
-            end
-
-            for _, value in values do
-                if type(value) == "table" then
-                    local okMove, move = pcall(function()
-                        return value.MoveFunction
-                    end)
-
-                    if okMove and type(move) == "function" then
-                        return value
-                    end
-                end
-            end
-
-            return nil
-        end
-
-        -- the weapon in the hands: the loadout is a new one every round, so it is read anew every time
-        local peek = if inventory ~= nil then rawget(inventory, "peekCurrentEquippedForMovement") else nil
-        local function weapon()
-            local okUp, values = pcall(env.getupvalues, peek)
-            if not okUp or type(values) ~= "table" then
-                return nil
-            end
-
-            for _, value in values do
-                if type(value) == "table" then
-                    return rawget(value, "CurrentEquipped")
-                end
-            end
-
-            return nil
-        end
-
-        onFound({
-            state = function()
-                return rawget(runtime, "_state")
-            end,
-            weapon = if peek ~= nil then weapon else nil,
-            setMove = if jump ~= nil then function(x, z)
-                local walker = character()
-                if walker == nil then
-                    return false
-                end
-
-                -- false: a direction in the world, which the game turns by the camera itself
-                walker:MoveFunction(env.Vector3.new(x, 0, z), false)
-                return true
-            end else nil,
-            setJump = if jump ~= nil then function(pressed)
-                jump(pressed)
-            end else nil,
-            jumpDown = jumpDown,
-        })
-    end)
-end
-
-return strike_move
-end
-
-__modules["strike_net"] = function(require)
--- finds a packet of Blox Strike among the tables of the game
--- the game talks to its server through packet objects of its own (ReplicatedStorage.Database.Security.Network);
--- every one has Listen(callback), which hands the decoded content of what the server sent to whoever asks, and gives
--- back a function that takes the listener away. A packet is told by the remote its functions hold on to
--- only listening is done through it: nothing is sent and nothing of the game is replaced
--- takes the functions of the executor as a table, so tests/strike_net_test.lua runs it without one
-local strike_net = {}
-
-local yield_every = 20000       -- tables looked at between two pauses: a game has a hundred thousand of them
-
-local function isFunction(value)
-    return type(value) == "function"
-end
-
--- the full name of the remote a packet goes through, nil for what is not a packet
-local function remoteName(env, object)
-    local name = nil
-
-    pcall(function()
-        for _, value in env.getupvalues(object.Listen) do
-            local kind = type(value)
-            if kind == "userdata" or kind == "table" then
-                local found = nil
-                pcall(function()
-                    if value:IsA("BaseRemoteEvent") then
-                        found = value:GetFullName()
-                    end
-                end)
-
-                if found ~= nil then
-                    name = found
-                    break
-                end
-            end
-        end
-    end)
-
-    return name
-end
-
--- looks for the packets whose remotes have those full names, all in one pass over the tables of the game, in a
--- thread of its own: the frame does not wait for it
--- onDone({ [name] = packet }) is called once; a packet that is not there is not in the table
-function strike_net.findMany(env, wantedNames, onDone)
-    env.task.spawn(function()
-        local found = {}
-
-        local ok, objects = pcall(function()
-            return env.getgc(true)
-        end)
-
-        if not ok or type(objects) ~= "table" then
-            onDone(found)
-            return
-        end
-
-        local wanted = {}
-        local left = 0
-        for _, name in wantedNames do
-            if not wanted[name] then
-                wanted[name] = true
-                left += 1
-            end
-        end
-
-        local checked = 0
-        for _, object in objects do
-            if left == 0 then
-                break
-            end
-
-            if type(object) == "table" then
-                checked += 1
-
-                local okGet, listen = pcall(rawget, object, "Listen")
-                if okGet and isFunction(listen) and isFunction(rawget(object, "Connect")) and isFunction(rawget(object, "SendToProximity")) then
-                    local name = remoteName(env, object)
-                    if name ~= nil and wanted[name] and found[name] == nil then
-                        found[name] = object
-                        left -= 1
-                    end
-                end
-
-                if checked % yield_every == 0 then
-                    env.task.wait()
-                end
-            end
-        end
-
-        onDone(found)
-    end)
-end
-
--- the same for one packet: onFound(packet) or onMissing() is called once
-function strike_net.find(env, wantedName, onFound, onMissing)
-    strike_net.findMany(env, { wantedName }, function(found)
-        local packet = found[wantedName]
-        if packet ~= nil then
-            onFound(packet)
-        else
-            onMissing()
-        end
-    end)
-end
-
-return strike_net
-end
-
 __modules["strike"] = function(require)
 -- what Blox Strike tells about its characters; found out from the code of the game itself (tools/strike_probe.lua)
 -- the game builds every character on the client: a model in Workspace.Characters, named after the player, without
@@ -10703,6 +10561,276 @@ function Source:targets(out, haveLocal, localX, localY, localZ, now)
 end
 
 return strike
+end
+
+__modules["strike_move"] = function(require)
+-- finds what the bhop needs of Blox Strike among the tables of the game; known from the code of the game itself
+-- (tools/strike_probe4.lua):
+--   the runtime of its movement (MovementV2.Client.Runtime), one for the whole session; its _state is the state of
+--   the user after the last tick: OnGround, MovementMode, PreviousButtons (the buttons of the last command);
+--   the table of Controllers.CharacterController.LocalCharacter, whose jump(pressed) is what the handler of the jump
+--   key calls when the key goes down and up;
+--   the bits of a movement command (MovementV2.Buttons), for checking that the game follows the switch;
+--   the table of Controllers.InventoryController (tools/strike_probe10.lua), for the weapon in the hands: its
+--   getCurrentEquipped breaks the module when an executor calls it, so it is never called; the loadout is what
+--   peekCurrentEquippedForMovement holds on to, and the weapon its CurrentEquipped, read raw
+-- nothing of the game is replaced: the state is read, and the switch is called the way the game calls it
+-- takes the functions of the executor as a table, so tests/strike_move_test.lua runs it without one
+local strike_move = {}
+
+local yield_every = 20000       -- tables looked at between two pauses: a game has two hundred thousand of them
+
+local function isFunction(value)
+    return type(value) == "function"
+end
+
+-- looks for all of it in a thread of its own: the frame does not wait
+-- onFound({ state = function, setJump = function or nil, setMove = function or nil, jumpDown = function or nil,
+-- weapon = function or nil }) or onMissing() is called once; weapon() gives the object of the weapon in the hands as the
+-- game keeps it (see weapon.lua), nil when nothing is; setMove(x, z) tells the character of the user to walk that way,
+-- a direction in the world,
+-- and gives back whether there was a character to tell:
+-- the same method the controls of Roblox tell it the keys with (Classes.Character:MoveFunction), reached through what
+-- the jump of the controller holds on to
+-- the state alone is worth having: the way of a grenade starts from it. Without the switch of the jump there is no
+-- bhop, and setJump is nil
+function strike_move.find(env, onFound, onMissing)
+    env.task.spawn(function()
+        local ok, objects = pcall(function()
+            return env.getgc(true)
+        end)
+
+        if not ok or type(objects) ~= "table" then
+            onMissing()
+            return
+        end
+
+        local runtime = nil
+        local controller = nil
+        local buttons = nil
+        local inventory = nil
+        local checked = 0
+
+        local function look(object)
+            if type(rawget(object, "_remotePresentations")) == "table" and type(rawget(object, "_remotePresentationPool")) == "table" then
+                -- a runtime that was stopped may still lie around; the one that runs wins
+                if runtime == nil or rawget(object, "_started") == true then
+                    runtime = object
+                end
+            elseif isFunction(rawget(object, "jump")) and isFunction(rawget(object, "crouch"))
+                and isFunction(rawget(object, "PlantBomb")) and isFunction(rawget(object, "CancelBombPlant")) then
+                controller = object
+            elseif isFunction(rawget(object, "has")) and isFunction(rawget(object, "with")) and rawget(object, "Scoped") ~= nil
+                and rawget(object, "Jump") ~= nil then
+                buttons = object
+            elseif isFunction(rawget(object, "peekCurrentEquippedForMovement")) and isFunction(rawget(object, "getCurrentEquipped")) then
+                inventory = object
+            end
+        end
+
+        for _, object in objects do
+            if type(object) == "table" then
+                checked += 1
+
+                -- a table may refuse to be read; that is not the one looked for
+                pcall(look, object)
+
+                if checked % yield_every == 0 then
+                    env.task.wait()
+                end
+            end
+        end
+
+        if runtime == nil then
+            onMissing()
+            return
+        end
+
+        local jump = if controller ~= nil then rawget(controller, "jump") else nil
+
+        -- whether the jump is down in the buttons of a command: asked of the game, which alone knows how it packs them
+        local jumpDown = nil
+        if buttons ~= nil then
+            local has = rawget(buttons, "has")
+            local bit = rawget(buttons, "Jump")
+            jumpDown = function(mask)
+                local okHas, down = pcall(has, mask, bit)
+                return okHas and down == true
+            end
+        end
+
+        -- the character of the user right now: a life is a new one, the jump of the controller holds on to the current
+        local function character()
+            local ok, values = pcall(env.getupvalues, jump)
+            if not ok or type(values) ~= "table" then
+                return nil
+            end
+
+            for _, value in values do
+                if type(value) == "table" then
+                    local okMove, move = pcall(function()
+                        return value.MoveFunction
+                    end)
+
+                    if okMove and type(move) == "function" then
+                        return value
+                    end
+                end
+            end
+
+            return nil
+        end
+
+        -- the weapon in the hands: the loadout is a new one every round, so it is read anew every time
+        local peek = if inventory ~= nil then rawget(inventory, "peekCurrentEquippedForMovement") else nil
+        local function weapon()
+            local okUp, values = pcall(env.getupvalues, peek)
+            if not okUp or type(values) ~= "table" then
+                return nil
+            end
+
+            for _, value in values do
+                if type(value) == "table" then
+                    return rawget(value, "CurrentEquipped")
+                end
+            end
+
+            return nil
+        end
+
+        onFound({
+            state = function()
+                return rawget(runtime, "_state")
+            end,
+            weapon = if peek ~= nil then weapon else nil,
+            setMove = if jump ~= nil then function(x, z)
+                local walker = character()
+                if walker == nil then
+                    return false
+                end
+
+                -- false: a direction in the world, which the game turns by the camera itself
+                walker:MoveFunction(env.Vector3.new(x, 0, z), false)
+                return true
+            end else nil,
+            setJump = if jump ~= nil then function(pressed)
+                jump(pressed)
+            end else nil,
+            jumpDown = jumpDown,
+        })
+    end)
+end
+
+return strike_move
+end
+
+__modules["strike_net"] = function(require)
+-- finds a packet of Blox Strike among the tables of the game
+-- the game talks to its server through packet objects of its own (ReplicatedStorage.Database.Security.Network);
+-- every one has Listen(callback), which hands the decoded content of what the server sent to whoever asks, and gives
+-- back a function that takes the listener away. A packet is told by the remote its functions hold on to
+-- only listening is done through it: nothing is sent and nothing of the game is replaced
+-- takes the functions of the executor as a table, so tests/strike_net_test.lua runs it without one
+local strike_net = {}
+
+local yield_every = 20000       -- tables looked at between two pauses: a game has a hundred thousand of them
+
+local function isFunction(value)
+    return type(value) == "function"
+end
+
+-- the full name of the remote a packet goes through, nil for what is not a packet
+local function remoteName(env, object)
+    local name = nil
+
+    pcall(function()
+        for _, value in env.getupvalues(object.Listen) do
+            local kind = type(value)
+            if kind == "userdata" or kind == "table" then
+                local found = nil
+                pcall(function()
+                    if value:IsA("BaseRemoteEvent") then
+                        found = value:GetFullName()
+                    end
+                end)
+
+                if found ~= nil then
+                    name = found
+                    break
+                end
+            end
+        end
+    end)
+
+    return name
+end
+
+-- looks for the packets whose remotes have those full names, all in one pass over the tables of the game, in a
+-- thread of its own: the frame does not wait for it
+-- onDone({ [name] = packet }) is called once; a packet that is not there is not in the table
+function strike_net.findMany(env, wantedNames, onDone)
+    env.task.spawn(function()
+        local found = {}
+
+        local ok, objects = pcall(function()
+            return env.getgc(true)
+        end)
+
+        if not ok or type(objects) ~= "table" then
+            onDone(found)
+            return
+        end
+
+        local wanted = {}
+        local left = 0
+        for _, name in wantedNames do
+            if not wanted[name] then
+                wanted[name] = true
+                left += 1
+            end
+        end
+
+        local checked = 0
+        for _, object in objects do
+            if left == 0 then
+                break
+            end
+
+            if type(object) == "table" then
+                checked += 1
+
+                local okGet, listen = pcall(rawget, object, "Listen")
+                if okGet and isFunction(listen) and isFunction(rawget(object, "Connect")) and isFunction(rawget(object, "SendToProximity")) then
+                    local name = remoteName(env, object)
+                    if name ~= nil and wanted[name] and found[name] == nil then
+                        found[name] = object
+                        left -= 1
+                    end
+                end
+
+                if checked % yield_every == 0 then
+                    env.task.wait()
+                end
+            end
+        end
+
+        onDone(found)
+    end)
+end
+
+-- the same for one packet: onFound(packet) or onMissing() is called once
+function strike_net.find(env, wantedName, onFound, onMissing)
+    strike_net.findMany(env, { wantedName }, function(found)
+        local packet = found[wantedName]
+        if packet ~= nil then
+            onFound(packet)
+        else
+            onMissing()
+        end
+    end)
+end
+
+return strike_net
 end
 
 __modules["throw"] = function(require)
