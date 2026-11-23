@@ -11499,7 +11499,9 @@ function stand_out_bounty.applyDarbyEvent(st, kind, data, now)
                 elseif ek == "Give" and ev.To == "Darby" and type(sym) == "string" then
                     st.darbyKnown[sym] = true
                 elseif ek == "Give" and ev.From == "Darby" and type(sym) == "string" then
+                    -- D'Arby отдал ВСЕ свои карты этого символа — у него сейчас точно 0 таких!
                     st.darbyKnown[sym] = nil
+                    st.lastMissedAt[sym] = st.seq
                 elseif ek == "Book" and type(sym) == "string" then
                     st.darbyKnown[sym] = nil
                 elseif ek == "GoFish" and ev.By == "You" and type(sym) == "string" then
