@@ -6414,13 +6414,19 @@ function main.start(env)
                 local ssGui = pg and pg:FindFirstChild("StandStorage")
                 local dGui = pg and pg:FindFirstChild("DarbyGoFish")
                 if ssGui ~= nil and ssGui.Enabled == true then
-                    sb.darby.storageOpen = true
+                    if not sb.darby.storageOpen then
+                        sb.darby.storageOpen = true
+                        local t = env.clock() + 3.5
+                        if t > (sb.darby.readyAt or 0) then
+                            sb.darby.readyAt = t
+                        end
+                    end
                 elseif ssGui ~= nil and ssGui.Enabled == false and (dGui == nil or dGui.Enabled == false) then
                     sb.darby.storageOpen = false
                 end
                 -- Если окно DarbyGoFish закрылось после старта игры (победа/поражение), сбрасываем active
                 if sb.darby.active and dGui ~= nil and dGui.Enabled == false
-                    and sb.darbyAt ~= nil and env.clock() - sb.darbyAt > 2.5 then
+                    and sb.darbyAt ~= nil and env.clock() - sb.darbyAt > 4.5 then
                     sb.darby.active = false
                 end
                 return sb.darby
@@ -7173,9 +7179,10 @@ function main.start(env)
                                 if sb.darby == nil then
                                     sb.darby = stand_out_bounty.newDarbyState()
                                 end
-                                stand_out_bounty.applyDarbyEvent(sb.darby, kind, data)
+                                local nowT = env.clock()
+                                stand_out_bounty.applyDarbyEvent(sb.darby, kind, data, nowT)
                                 if kind == "Fish" then
-                                    sb.darbyAt = env.clock()
+                                    sb.darbyAt = nowT
                                 end
                             end)
                         end
@@ -11357,17 +11364,36 @@ function stand_out_bounty.newDarbyState()
         lastSentSeq = -1,
         lastSentActionId = -1,
         lastSentAt = -99,
+        readyAt = 0, -- ждём окончания анимации раздачи ("Wait for the cards.")
     }
 end
 
 -- Обновляет состояние партии D'Arby Go Fish по пакету StandStorage.OnClientEvent (чистый редьюсер).
-function stand_out_bounty.applyDarbyEvent(st, kind, data)
-    if st == nil or type(data) ~= "table" then
+function stand_out_bounty.applyDarbyEvent(st, kind, data, now)
+    if st == nil then
+        return
+    end
+    now = now or 0
+    local function waitUntil(t)
+        if t > (st.readyAt or 0) then
+            st.readyAt = t
+        end
+    end
+
+    if kind == "Error" or (type(data) == "table" and (data.Error ~= nil or data.Message ~= nil)) then
+        -- Сервер попросил подождать (напр. "Wait for the cards.") -> отступаем и пробуем снова
+        waitUntil(now + 2.5)
+        st.lastSentSeq = -1
+        st.lastSentActionId = -1
+        return
+    end
+    if type(data) ~= "table" then
         return
     end
     if kind == "Open" or kind == "State" then
         if kind == "Open" then
             st.storageOpen = true
+            waitUntil(now + 3.5)
         end
         return
     end
@@ -11389,10 +11415,13 @@ function stand_out_bounty.applyDarbyEvent(st, kind, data)
         st.lastSentSeq = -1
         st.lastSentActionId = -1
         st.lastSentAt = -99
+        -- Анимация раздачи стартовых 4 карт идёт ~3.5 с ("Wait for the cards.")
+        waitUntil(now + 4.0)
     end
 
     if data.Ended == true or data.Finished == true or data.Closed == true or data.Winner ~= nil or data.Result ~= nil then
         st.active = false
+        waitUntil(now + 2.0)
     end
 
     if type(data.Events) == "table" then
@@ -11407,6 +11436,18 @@ function stand_out_bounty.applyDarbyEvent(st, kind, data)
                 end
                 local ek = ev.Kind
                 local sym = ev.Symbol
+                if ek == "Deal" then
+                    waitUntil(now + 4.0)
+                elseif ek == "Action" then
+                    waitUntil(now + 1.8)
+                elseif ek == "Give" then
+                    waitUntil(now + 2.0)
+                elseif ek == "Book" then
+                    waitUntil(now + 2.2)
+                elseif ek == "Turn" then
+                    waitUntil(now + 1.0)
+                end
+
                 if ek == "Ask" and ev.By == "Darby" and type(sym) == "string" then
                     -- Чтобы спросить карту в Go Fish, D'Arby обязан иметь хотя бы 1 такую у себя в руке!
                     st.darbyKnown[sym] = true
@@ -11421,6 +11462,7 @@ function stand_out_bounty.applyDarbyEvent(st, kind, data)
                     st.lastMissedAt[sym] = st.seq
                 elseif ek == "End" or ek == "Finish" or ek == "Win" or ek == "Lose" or ek == "Result" or ev.Winner ~= nil then
                     st.active = false
+                    waitUntil(now + 2.0)
                 end
             end
         end
@@ -11466,11 +11508,16 @@ function stand_out_bounty.nextDarbyMove(st, now, uiOpen)
         return nil, nil, nil
     end
 
+    -- Ждём окончания анимации раздачи/взятия карт, чтобы сервер не выдал "Wait for the cards."
+    if st.readyAt ~= nil and now < st.readyAt then
+        return nil, nil, "Go Fish: жду карты..."
+    end
+
     if st.active and type(st.view) == "table" then
         local v = st.view
         local act = v.Action
         if type(act) == "table" and act.Id ~= nil then
-            local already = (act.Id == st.lastSentActionId) and (now - st.lastSentAt < 2.0)
+            local already = (act.Id == st.lastSentActionId) and (now - st.lastSentAt < 3.0)
             if not already then
                 if act.Kind == "Draw" then
                     st.lastSentActionId = act.Id
@@ -11486,7 +11533,7 @@ function stand_out_bounty.nextDarbyMove(st, now, uiOpen)
         end
 
         if v.Turn == "You" then
-            local already = (st.seq == st.lastSentSeq) and (now - st.lastSentAt < 2.0)
+            local already = (st.seq == st.lastSentSeq) and (now - st.lastSentAt < 3.0)
             if not already then
                 local sym = stand_out_bounty.pickDarbyAsk(v.Hand, st.darbyKnown, st.lastMissedAt)
                 if sym ~= nil then
@@ -11501,7 +11548,7 @@ function stand_out_bounty.nextDarbyMove(st, now, uiOpen)
     end
 
     if (st.storageOpen or uiOpen) and not st.active then
-        if now - st.lastSentAt >= 1.5 then
+        if now - st.lastSentAt >= 3.0 then
             st.lastSentAt = now
             return "FishStart", 1, "Go Fish: начинаю партию"
         end
