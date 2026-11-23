@@ -6111,12 +6111,33 @@ function main.start(env)
                     end
                     local cx, cy = math.floor(vw * 0.5), math.floor(vh * 0.5)
                     if menuIsOpen then
-                        -- Кликаем строго ВНЕ окна ClickGUI (и мимо топбара/хотбара), чтобы M1 работал даже с открытым меню
+                        -- Если пользователь сейчас держит ЛКМ (тянет слайдер/окно) или держит курсор над ClickGUI —
+                        -- вежливо ставим M1 на паузу, чтобы не закрывать дропдауны и не сбивать слайдеры
+                        local lmbDown = false
+                        pcall(function()
+                            if env.Enum and env.Enum.UserInputType then
+                                lmbDown = UserInputService:IsMouseButtonPressed(env.Enum.UserInputType.MouseButton1) == true
+                            end
+                        end)
+                        if lmbDown then return end
+
                         local mx, my, mw, mh = nil, nil, nil, nil
                         if ui.menuRect ~= nil then
                             mx, my, mw, mh = ui.menuRect()
                         end
                         local pad = 20
+                        if mx ~= nil and UserInputService.GetMouseLocation ~= nil then
+                            local okM, mpos = pcall(function() return UserInputService:GetMouseLocation() end)
+                            if okM and mpos ~= nil then
+                                if mpos.X >= mx - pad and mpos.X <= mx + mw + pad
+                                    and mpos.Y >= my - pad and mpos.Y <= my + mh + pad then
+                                    return
+                                end
+                            end
+                        end
+
+                        -- Курсор вне меню -> кликаем строго ВНЕ окна ClickGUI (и мимо топбара/хотбара),
+                        -- чтобы M1 продолжал бить даже при открытом меню
                         local candidates = {
                             { 12, math.floor(vh * 0.5) },
                             { math.max(12, vw - 12), math.floor(vh * 0.5) },
