@@ -11724,6 +11724,44 @@ function stand_out_bounty.scanMyMobs(workspace, userId, playerNames, playerName,
 
     local uidStr = tostring(userId)
     local objLow = type(trackerObjective) == "string" and string.lower(trackerObjective) or ""
+    -- Извлекаем точное имя цели из цели трекера ("Defeat DIO Servants (0/1)" -> "dio servants", "Defeat Hubert (0/1)" -> "hubert"),
+    -- чтобы короткое имя мирового босса ("DIO") никогда не матчилось как подстрока внутри "DIO Servants"!
+    local targetPhrase = nil
+    if objLow ~= "" then
+        local t = string.gsub(objLow, "%s*%(%d+%s*/%s*%d+%)%s*$", "")
+        t = string.gsub(t, "%s+%d+%s*/%s*%d+%s*$", "")
+        t = string.gsub(t, "^%s*defeat%s+", "")
+        t = string.gsub(t, "^%s*kill%s+", "")
+        t = string.gsub(t, "^%s*eliminate%s+", "")
+        t = string.gsub(t, "^%s*beat%s+", "")
+        t = string.gsub(t, "^%s*fight%s+", "")
+        t = string.gsub(t, "^%s*stop%s+", "")
+        t = string.gsub(t, "^%s*the%s+", "")
+        t = string.gsub(t, "^%s*all%s+", "")
+        t = string.gsub(t, "[%p]+$", "")
+        t = string.match(t, "^%s*(.-)%s*$")
+        if t ~= nil and #t >= 3 and t ~= objLow then
+            targetPhrase = t
+        end
+    end
+    local function normMobName(raw)
+        local n = string.lower(raw or "")
+        n = string.gsub(n, "_", " ")
+        return string.match(n, "^%s*(.-)%s*$") or ""
+    end
+    local function matchesTargetPhrase(mobLow, phrase)
+        if phrase == nil or mobLow == "" then return false end
+        if mobLow == phrase then return true end
+        if (mobLow .. "s") == phrase or (mobLow .. "es") == phrase then return true end
+        if (phrase .. "s") == mobLow or (phrase .. "es") == mobLow then return true end
+        -- Также поддерживаем слитное написание без пробелов ("dioservant" <-> "dio servants")
+        local mFlat = string.gsub(mobLow, "%s+", "")
+        local pFlat = string.gsub(phrase, "%s+", "")
+        if mFlat == pFlat or (mFlat .. "s") == pFlat or (mFlat .. "es") == pFlat or (pFlat .. "s") == mFlat then
+            return true
+        end
+        return false
+    end
     local seen = {}
 
     local function checkModel(m, requireNoDialogue)
@@ -11763,30 +11801,42 @@ function stand_out_bounty.scanMyMobs(workspace, userId, playerNames, playerName,
             table.insert(owned, entry)
             return
         end
+        -- Чужой баунти-моб — пропускаем!
+        if ownerId ~= nil then
+            return
+        end
 
-        -- Приоритет 2: имя моба прямо названо в цели трекера ("Defeat Hubert (0/1)" -> Hubert)
-        if objLow ~= "" then
-            local sLow = string.lower(stripped)
-            local cLow = string.lower(name)
-            if (#sLow >= 3 and string.find(objLow, sLow, 1, true) ~= nil)
-                or (#cLow >= 3 and string.find(objLow, cLow, 1, true) ~= nil) then
-                table.insert(matched, entry)
-                return
+        local hasTracker = tx ~= nil and ty ~= nil and tz ~= nil and root.Position ~= nil
+            and finite(root.Position.X) and finite(root.Position.Y) and finite(root.Position.Z)
+        local d2 = math.huge
+        if hasTracker then
+            local p = root.Position
+            local dx, dy, dz = p.X - tx, p.Y - ty, p.Z - tz
+            d2 = dx * dx + dy * dy + dz * dz
+        end
+        local hasBountyId = safeAttr(m, "BountyId") ~= nil
+
+        -- Приоритет 2: точное (или ед./мн. число) совпадение имени моба с целью трекера ("Defeat Hubert (0/1)" -> Hubert;
+        -- "Defeat DIO Servants (0/1)" -> "DIO Servant", но НЕ мировой босс "DIO"!)
+        -- Если есть TrackerPos и у моба нет BountyId — требуем близость к точке трекера (<= 120 ст),
+        -- чтобы не улетать бить посторонних мировых мобов/боссов в другом конце карты!
+        if targetPhrase ~= nil then
+            local sLow = normMobName(stripped)
+            local cLow = normMobName(name)
+            if matchesTargetPhrase(sLow, targetPhrase) or matchesTargetPhrase(cLow, targetPhrase) then
+                if hasBountyId or not hasTracker or d2 <= 120 * 120 then
+                    table.insert(matched, entry)
+                    return
+                end
             end
         end
 
         -- Приоритет 2b / 3: близость к точке трекера VisibleBountyTrackerPosition
-        if tx ~= nil and ty ~= nil and tz ~= nil and root.Position ~= nil then
-            local p = root.Position
-            if finite(p.X) and finite(p.Y) and finite(p.Z) then
-                local dx, dy, dz = p.X - tx, p.Y - ty, p.Z - tz
-                local d2 = dx * dx + dy * dy + dz * dz
-                local hasBountyId = safeAttr(m, "BountyId") ~= nil
-                if hasBountyId and d2 <= 80 * 80 then
-                    table.insert(matched, entry)
-                elseif d2 <= 45 * 45 and safeAttr(m, "BeachSeal") ~= true then
-                    table.insert(nearby, entry)
-                end
+        if hasTracker then
+            if hasBountyId and d2 <= 80 * 80 then
+                table.insert(matched, entry)
+            elseif d2 <= 45 * 45 and safeAttr(m, "BeachSeal") ~= true and not entry.isBoss then
+                table.insert(nearby, entry)
             end
         end
     end
