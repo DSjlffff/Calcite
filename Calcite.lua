@@ -6426,10 +6426,20 @@ function main.start(env)
                 elseif ssGui ~= nil and ssGui.Enabled == false and (dGui == nil or dGui.Enabled == false) then
                     sb.darby.storageOpen = false
                 end
-                -- Если окно DarbyGoFish закрылось после старта игры (победа/поражение), сбрасываем active
-                if sb.darby.active and dGui ~= nil and dGui.Enabled == false
+                if dGui ~= nil and dGui.Enabled == true then
+                    sb.darby.sawGui = true
+                end
+                -- Сбрасываем active по закрытию DarbyGoFish ТОЛЬКО если окно реально открывалось
+                -- (при прямом FishStart(1) клиент играет матч в фоне с DarbyGoFish.Enabled == false!)
+                if sb.darby.active and sb.darby.sawGui and dGui ~= nil and dGui.Enabled == false
                     and sb.darbyAt ~= nil and env.clock() - sb.darbyAt > 4.5 then
                     sb.darby.active = false
+                    sb.darby.sawGui = false
+                end
+                -- Если 20 сек не приходило ни одного события Fish — считаем партию завершённой для рематча
+                if sb.darby.active and sb.darbyAt ~= nil and env.clock() - sb.darbyAt > 20.0 then
+                    sb.darby.active = false
+                    sb.darby.sawGui = false
                 end
                 return sb.darby
             end,
@@ -11543,9 +11553,16 @@ function stand_out_bounty.nextDarbyMove(st, now, uiOpen)
         return nil, nil, nil
     end
 
+    local scoreTag = "Go Fish"
+    if type(st.view) == "table" and type(st.view.Books) == "table" then
+        local yb = type(st.view.Books.You) == "table" and #st.view.Books.You or 0
+        local db = type(st.view.Books.Darby) == "table" and #st.view.Books.Darby or 0
+        scoreTag = string.format("Go Fish (%d:%d)", yb, db)
+    end
+
     -- Ждём окончания анимации раздачи/взятия карт, чтобы сервер не выдал "Wait for the cards."
     if st.readyAt ~= nil and now < st.readyAt then
-        return nil, nil, "Go Fish: жду карты..."
+        return nil, nil, scoreTag .. ": жду карты..."
     end
 
     if st.active and type(st.view) == "table" then
@@ -11557,14 +11574,14 @@ function stand_out_bounty.nextDarbyMove(st, now, uiOpen)
                 if act.Kind == "Draw" then
                     st.lastSentActionId = act.Id
                     st.lastSentAt = now
-                    return "FishDraw", act.Id, "Go Fish: беру карту"
+                    return "FishDraw", act.Id, scoreTag .. ": беру карту"
                 elseif act.Kind == "Give" then
                     st.lastSentActionId = act.Id
                     st.lastSentAt = now
-                    return "FishGive", act.Id, "Go Fish: отдаю карту"
+                    return "FishGive", act.Id, scoreTag .. ": отдаю карту"
                 end
             end
-            return nil, nil, "Go Fish: ход"
+            return nil, nil, scoreTag .. ": ход"
         end
 
         if v.Turn == "You" then
@@ -11574,12 +11591,12 @@ function stand_out_bounty.nextDarbyMove(st, now, uiOpen)
                 if sym ~= nil then
                     st.lastSentSeq = st.seq
                     st.lastSentAt = now
-                    return "FishAsk", stand_out_bounty.darby_symbol_ids[sym], "Go Fish: прошу " .. sym
+                    return "FishAsk", stand_out_bounty.darby_symbol_ids[sym], scoreTag .. ": прошу " .. sym
                 end
             end
-            return nil, nil, "Go Fish: мой ход"
+            return nil, nil, scoreTag .. ": мой ход"
         end
-        return nil, nil, "Go Fish: ход D'Arby"
+        return nil, nil, scoreTag .. ": ход D'Arby"
     end
 
     if (st.storageOpen or uiOpen) and not st.active then
