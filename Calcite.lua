@@ -7074,23 +7074,29 @@ function main.start(env)
                         if bRem ~= nil then
                             sb.remote = bRem
                             sb.remoteConn = bRem.OnClientEvent:Connect(function(kind, bountyId, sub, data)
-                                if kind == "Incident" and sub == "Puzzle" and type(data) == "table" then
-                                    if data.Open == false then
-                                        sb.puzzle = nil
-                                        return
+                                if kind == "Incident" and type(data) == "table" then
+                                    if sub == "Puzzle" or (sb.puzzle ~= nil and data.Token ~= nil and data.Token == sb.puzzle.token) then
+                                        if data.Open == false then
+                                            sb.puzzle = nil
+                                            return
+                                        end
+                                        local ver = data.Version
+                                        if ver == nil and sb.puzzle ~= nil then ver = sb.puzzle.version end
+                                        ver = ver or 0
+                                        sb.puzzle = {
+                                            id = bountyId or (sb.puzzle and sb.puzzle.id),
+                                            token = data.Token or (sb.puzzle and sb.puzzle.token),
+                                            kind = data.Kind or (sb.puzzle and sb.puzzle.kind),
+                                            version = ver,
+                                            serverVersion = ver,
+                                            target = data.Target or (sb.puzzle and sb.puzzle.target),
+                                            values = data.Values or (sb.puzzle and sb.puzzle.values),
+                                            placed = data.Placed or (sb.puzzle and sb.puzzle.placed),
+                                            open = true,
+                                            attempted = {},
+                                        }
+                                        sb.puzzleAt = env.clock()
                                     end
-                                    sb.puzzle = {
-                                        id = bountyId,
-                                        token = data.Token,
-                                        kind = data.Kind,
-                                        version = data.Version or 0,
-                                        target = data.Target,
-                                        values = data.Values,
-                                        placed = data.Placed,
-                                        open = true,
-                                        attempted = {},
-                                    }
-                                    sb.puzzleAt = env.clock()
                                 end
                             end)
                         end
@@ -10796,6 +10802,7 @@ function stand_out_bounty.readUi(playerGui)
         yesBtn = nil,
         dialogueOptions = {}, -- { button, text, key }
         jewelryOpen = false,
+        jewelryActionBtn = nil,
         bounties = {}, -- { button, title, complete, isIncident }
     }
     if playerGui == nil then
@@ -10806,6 +10813,12 @@ function stand_out_bounty.readUi(playerGui)
         local jw = playerGui:FindFirstChild("JewelryInspection")
         if jw ~= nil and jw.Enabled == true then
             info.jewelryOpen = true
+            local pres = jw:FindFirstChild("Presentation")
+            local foot = pres and pres:FindFirstChild("Footer")
+            local actBtn = foot and foot:FindFirstChild("Action")
+            if actBtn ~= nil and actBtn.Visible == true then
+                info.jewelryActionBtn = actBtn
+            end
         end
 
         -- Проверяем активный диалог (Petyr claim/yes, а также квестовые NPC вроде Meryl Mei Qi и Dragona)
@@ -11169,8 +11182,8 @@ function stand_out_bounty.pickDialogueOption(options, objLow)
         return nil
     end
 
-    local preferred = findMatch({ "dragona", "let's open", "open them" })
-        or findMatch({ "necklace", "stones", "restored", "fixed", "rebuilt", "here", "ready", "yes" })
+    local preferred = findMatch({ "dragona", "let's open", "open them", "howler", "payment record", "record", "evidence" })
+        or findMatch({ "necklace", "pendant", "stones", "restored", "fixed", "rebuilt", "here", "ready", "yes" })
     if preferred ~= nil then
         return preferred
     end
@@ -11213,13 +11226,15 @@ function stand_out_bounty.nextPuzzleMove(puzzle)
             local cur = type(puzzle.values) == "table" and puzzle.values[row] or nil
             if cur ~= want and not puzzle.attempted[row] then
                 puzzle.attempted[row] = true
+                local ver = puzzle.version or 0
+                puzzle.version = ver + 1
                 return {
                     Action = "PlaceClasp",
                     Id = puzzle.id,
                     Token = puzzle.token,
                     Row = row,
                     Notch = want,
-                    Version = puzzle.version or 0,
+                    Version = ver,
                 }
             end
         end
@@ -11241,12 +11256,14 @@ function stand_out_bounty.nextPuzzleMove(puzzle)
         for _, comp in order do
             if not placedMap[comp] and not puzzle.attempted[comp] then
                 puzzle.attempted[comp] = true
+                local ver = puzzle.version or 0
+                puzzle.version = ver + 1
                 return {
                     Action = "FitComponent",
                     Id = puzzle.id,
                     Token = puzzle.token,
                     Component = comp,
-                    Version = puzzle.version or 0,
+                    Version = ver,
                 }
             end
         end
@@ -11455,14 +11472,18 @@ function Runner:update(now, opts, meX, meY, meZ)
 
     local ui = self.deps.readUi()
 
+    local puzzle = self.deps.activePuzzle ~= nil and self.deps.activePuzzle() or nil
+    local inInspection = ui.jewelryOpen == true or ui.jewelryActionBtn ~= nil or puzzle ~= nil
+
     -- Парсим прогресс баунти (например 1/2 -> не завершено; 4/4 -> все шаги выполнены)
     local progCur, progTotal = stand_out_bounty.parseProgress(ui.trackerTitle)
     local hasIncompleteSteps = progCur ~= nil and progTotal ~= nil and progCur < progTotal
 
     -- Дополнительно сверяем с атрибутом BountyNavigationActive (CanvasGroup трекера может оставаться Visible=true),
-    -- но если на трекере явно видны незавершённые шаги (например MISSING FROG 1/2) или таймер — баунти точно активно!
-    local hasActiveBounty = ui.trackerActive
-    if hasActiveBounty and not hasIncompleteSteps and self.deps.navActive ~= nil then
+    -- но если на трекере явно видны незавершённые шаги (например MISSING FROG 1/2), таймер ИЛИ открыто окно JewelryInspection
+    -- (игра прячет BountyTracker пока открыт верстак!) — баунти точно активно!
+    local hasActiveBounty = ui.trackerActive or inInspection
+    if hasActiveBounty and not hasIncompleteSteps and not inInspection and self.deps.navActive ~= nil then
         local okNav, nav = pcall(self.deps.navActive)
         if okNav and nav == false then
             local hasClock = string.find(ui.trackerTitle or "", "%d+:%d%d") ~= nil
@@ -11482,7 +11503,7 @@ function Runner:update(now, opts, meX, meY, meZ)
 
     -- Если на персонаже уже висит инцидент с мини-игрой, а включено «Пропускать мини-игры»,
     -- идём к Petyr и перезаписываем его на боевой/поисковый баунти!
-    local replaceIncident = hasActiveBounty and (opts.skipIncidents ~= false) and stand_out_bounty.isIncident(ui.trackerTitle)
+    local replaceIncident = hasActiveBounty and not inInspection and (opts.skipIncidents ~= false) and stand_out_bounty.isIncident(ui.trackerTitle)
 
     -- Отслеживаем завершение баунти (трекер был активен -> исчез)
     if self.wasTrackerActive and not hasActiveBounty then
@@ -11518,23 +11539,32 @@ function Runner:update(now, opts, meX, meY, meZ)
             return
         end
 
-        -- 0.5) Активная головоломка инцидента (Cheap Jewelry: замки Rails / сборка ожерелья Assembly)
-        local puzzle = self.deps.activePuzzle ~= nil and self.deps.activePuzzle() or nil
-        if puzzle ~= nil or ui.jewelryOpen then
+        -- 0.5) Активная головоломка инцидента (Cheap Jewelry: замки Rails / сборка ожерелья Assembly + кнопка TAKE HOWLER RECORD)
+        if inInspection then
             self:_releasePrompt()
             if self.deps.stopFighting ~= nil then
                 pcall(self.deps.stopFighting)
             end
+            -- Если появилась финальная кнопка действия ("TAKE HOWLER RECORD") — сразу жмём её!
+            if ui.jewelryActionBtn ~= nil then
+                if now - self.lastAction >= 0.45 then
+                    self.lastAction = now
+                    self.deps.activateButton(ui.jewelryActionBtn)
+                end
+                self.statusText = title .. " | забираю улику"
+                return
+            end
             if puzzle ~= nil and self.deps.sendIncident ~= nil then
-                if now - self.lastAction >= 0.18 then
+                if now - self.lastAction >= 0.25 then
                     local move = stand_out_bounty.nextPuzzleMove(puzzle)
                     if move ~= nil then
                         self.lastAction = now
                         pcall(self.deps.sendIncident, move)
-                    elseif now - self.lastAction >= 1.5 then
-                        -- Если сервер ещё не закрыл окно — сбросим attempted для повторной отправки оставшихся деталей
+                    elseif now - self.lastAction >= 1.6 then
+                        -- Если сервер ещё не закрыл окно — пробуем повторно с актуальной серверной версией
                         puzzle.attempted = {}
-                        self.lastAction = now - 1.2
+                        puzzle.version = puzzle.serverVersion or 0
+                        self.lastAction = now - 1.3
                     end
                 end
             end
