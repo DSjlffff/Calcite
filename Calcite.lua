@@ -6769,7 +6769,7 @@ function main.start(env)
             loadVisited = function()
                 if type(env.isfile) == "function" and type(env.readfile) == "function" then
                     local ok, raw = pcall(function()
-                        return env.isfile("calcite_so_howler_visited.txt") and env.readfile("calcite_so_howler_visited.txt") or ""
+                        return env.isfile("calcite_so_howler_visited2.txt") and env.readfile("calcite_so_howler_visited2.txt") or ""
                     end)
                     if ok and type(raw) == "string" then
                         return raw
@@ -6779,7 +6779,7 @@ function main.start(env)
             end,
             saveVisited = function(text)
                 if type(env.writefile) == "function" and type(text) == "string" then
-                    pcall(env.writefile, "calcite_so_howler_visited.txt", text)
+                    pcall(env.writefile, "calcite_so_howler_visited2.txt", text)
                 end
             end,
             notify = function(title, text)
@@ -12831,15 +12831,16 @@ stand_out_howler.total = 10
 stand_out_howler.hold_duration = 0.92
 stand_out_howler.settle = 0.22
 stand_out_howler.confirm_wait = 0.45
-stand_out_howler.sweep_step = 0.30
+stand_out_howler.sweep_step = 0.28
 stand_out_howler.above = 3.0
-stand_out_howler.visited_radius = 230
+stand_out_howler.visited_radius = 155 -- строго меньше RevealRange=200 с запасом, чтобы не было слепых дыр между клетками
 
 -- Подтверждённые координаты кейсов (обновляются и дополняются из calcite_so_howler_spots.txt)
 stand_out_howler.known_spots = {
     case_01 = { x = -233.61, y = 16.91, z = 1042.95 },
     case_02 = { x = -1344.33, y = 17.57, z = 2184.88 },
     case_03 = { x = -1846.06, y = 16.78, z = 1206.74 },
+    case_05 = { x = -2248.65, y = 15.38, z = 823.66 },
     case_06 = { x = 179.50, y = 18.19, z = 1045.34 },
     case_07 = { x = -777.55, y = 34.19, z = 2595.42 },
     case_08 = { x = -854.96, y = 17.63, z = 1424.96 },
@@ -12854,17 +12855,23 @@ local function finite(v)
     return type(v) == "number" and v == v and v ~= math.huge and v ~= -math.huge
 end
 
--- Парсинг/сохранение посещённых зон (calcite_so_howler_visited.txt): "x,z" на строку
+-- Парсинг/сохранение посещённых 3D-зон (calcite_so_howler_visited2.txt): "x,y,z" на строку
 function stand_out_howler.parseVisitedCache(raw)
     local out = {}
     if type(raw) ~= "string" or raw == "" then
         return out
     end
     for line in string.gmatch(raw, "[^\r\n]+") do
-        local sx, sz = string.match(line, "^%s*([%-%.%d]+)%s*,%s*([%-%.%d]+)%s*$")
-        local x, z = tonumber(sx), tonumber(sz)
-        if finite(x) and finite(z) then
-            table.insert(out, { x = x, z = z })
+        local sx, sy, sz = string.match(line, "^%s*([%-%.%d]+)%s*,%s*([%-%.%d]+)%s*,%s*([%-%.%d]+)%s*$")
+        local x, y, z = tonumber(sx), tonumber(sy), tonumber(sz)
+        if finite(x) and finite(y) and finite(z) then
+            table.insert(out, { x = x, y = y, z = z })
+        else
+            local x2, z2 = string.match(line, "^%s*([%-%.%d]+)%s*,%s*([%-%.%d]+)%s*$")
+            local nx, nz = tonumber(x2), tonumber(z2)
+            if finite(nx) and finite(nz) then
+                table.insert(out, { x = nx, y = 45, z = nz })
+            end
         end
     end
     return out
@@ -12877,7 +12884,7 @@ function stand_out_howler.formatVisitedCache(list)
     local lines = {}
     for _, v in list do
         if type(v) == "table" and finite(v.x) and finite(v.z) then
-            table.insert(lines, string.format("%.0f,%.0f", v.x, v.z))
+            table.insert(lines, string.format("%.0f,%.0f,%.0f", v.x, v.y or 45, v.z))
         end
     end
     return table.concat(lines, "\n")
@@ -12987,10 +12994,29 @@ function stand_out_howler.scanAreaPoints(workspace)
     return pts
 end
 
--- Сетка облёта всей карты (Areas + особые острова/высоты + широкая сетка X:-3100..+1300, Z:-300..+3850).
--- Змейка по строкам ускоряет стриминг Roblox, а visitedZones пропускает все уже проверенные радиусы.
+-- Сетка облёта всей карты без слепых дыр (шаг 250 при RevealRange=200 => диагональ полуклетки 176.8 < 200!):
+--   1) Именованные локации (Workspace.Game.Areas, StrengthSpawns, StoryLocations...)
+--   2) Плотная сетка основного острова (X:-2550..+550, Z:350..2950, шаг 250, Y=28) — 0% слепых зон
+--   3) Высотный слой для гор / крыш / Key West (X:-2950..+450, Z:450..3800, шаг 260, Y=170)
+--   4) Широкий архипелаг и дальний океан (X:-3450..+2400, Z:-1200..+3850, шаг 260, Y=30)
 function stand_out_howler.buildSweepPoints(extraPts)
     local pts = {}
+    local function addGrid(x0, x1, z0, z1, step, y)
+        local row = 0
+        for z = z0, z1, step do
+            row += 1
+            if row % 2 == 1 then
+                for x = x0, x1, step do
+                    table.insert(pts, { x = x, y = y, z = z })
+                end
+            else
+                for x = x1, x0, -step do
+                    table.insert(pts, { x = x, y = y, z = z })
+                end
+            end
+        end
+    end
+
     -- 1) Сначала все именованные зоны игры (Workspace.Game.Areas, StrengthSpawns, StoryLocations...)
     if type(extraPts) == "table" then
         for _, p in extraPts do
@@ -13000,7 +13026,7 @@ function stand_out_howler.buildSweepPoints(extraPts)
         end
     end
 
-    -- 2) Известные удалённые/высокие ориентиры (яхта, Key West, южные/восточные/северные острова)
+    -- 2) Ключевые удалённые/высокие ориентиры (яхта, Key West, острова)
     for _, landmark in {
         { x = -2779, y = 58, z = 3645 },
         { x = -2851, y = 118, z = 3692 },
@@ -13013,21 +13039,14 @@ function stand_out_howler.buildSweepPoints(extraPts)
         table.insert(pts, landmark)
     end
 
-    -- 3) Широкая сетка по всему архипелагу (шаг 340 при RevealRange=200 покрывает весь квадрат)
-    local step = 340
-    local row = 0
-    for z = -300, 3850, step do
-        row += 1
-        if row % 2 == 1 then
-            for x = -3100, 1300, step do
-                table.insert(pts, { x = x, y = 45, z = z })
-            end
-        else
-            for x = 1300, -3100, -step do
-                table.insert(pts, { x = x, y = 45, z = z })
-            end
-        end
-    end
+    -- 3) Плотная сетка по основному острову без слепых дыр (шаг 250 -> 177 ст до угла < RevealRange 200)
+    addGrid(-2550, 550, 350, 2950, 250, 28)
+
+    -- 4) Высотный слой (горы, небоскрёбы, высокие крыши, Key West)
+    addGrid(-2950, 450, 450, 3800, 260, 175)
+
+    -- 5) Широкий океан и дальние острова (запад/восток/юг/север)
+    addGrid(-3450, 2400, -1200, 3850, 260, 30)
 
     return pts
 end
@@ -13123,23 +13142,25 @@ function Collector:_flushVisited()
     end
 end
 
-function Collector:_isVisited(x, z)
+function Collector:_isVisited(x, y, z)
     local r2 = stand_out_howler.visited_radius * stand_out_howler.visited_radius
+    local cy = y or 45
     for _, v in self.visitedZones do
-        local dx, dz = x - v.x, z - v.z
-        if dx * dx + dz * dz < r2 then
+        local dx, dy, dz = x - v.x, cy - (v.y or 45), z - v.z
+        if dx * dx + dy * dy + dz * dz < r2 then
             return true
         end
     end
     return false
 end
 
-function Collector:_markVisited(x, z)
+function Collector:_markVisited(x, y, z)
     if not finite(x) or not finite(z) then
         return
     end
-    if not self:_isVisited(x, z) then
-        table.insert(self.visitedZones, { x = x, z = z })
+    local cy = finite(y) and y or 45
+    if not self:_isVisited(x, cy, z) then
+        table.insert(self.visitedZones, { x = x, y = cy, z = z })
         self.visitedDirty = true
     end
 end
@@ -13202,12 +13223,12 @@ function Collector:toggle(now, meX, meY, meZ)
     self.running = true
     self.failedOpen = {}
     self.remoteWorks = nil
-    -- Оставляем только ещё НЕ посещённые точки (Areas + расширенная сетка); если все уже проверены — начинаем свежий круг
+    -- Оставляем только ещё НЕ посещённые 3D-точки (Areas + плотная сетка + высоты + дальний океан)
     local areaPts = (self.deps ~= nil and type(self.deps.scanAreas) == "function") and self.deps.scanAreas() or nil
     local allPts = stand_out_howler.buildSweepPoints(areaPts)
     local freshPts = {}
     for _, pt in allPts do
-        if not self:_isVisited(pt.x, pt.z) then
+        if not self:_isVisited(pt.x, pt.y, pt.z) then
             table.insert(freshPts, pt)
         end
     end
@@ -13219,8 +13240,8 @@ function Collector:toggle(now, meX, meY, meZ)
     end
     self.sweepPts = freshPts
     self.sweepIdx = 0
-    if meX ~= nil and meZ ~= nil then
-        self:_markVisited(meX, meZ)
+    if meX ~= nil and meY ~= nil and meZ ~= nil then
+        self:_markVisited(meX, meY, meZ)
     end
     self.targetId = nil
     self.targetPos = nil
@@ -13383,7 +13404,7 @@ function Collector:update(now, meX, meY, meZ)
         self.targetPrompt = revInfo.prompt
         self.phase = "open_settle"
         self.since = now
-        self:_markVisited(revInfo.x, revInfo.z)
+        self:_markVisited(revInfo.x, revInfo.y, revInfo.z)
         self.deps.teleportTo(revInfo.x, revInfo.y + stand_out_howler.above, revInfo.z)
         self.statusText = string.format("Кейсы: %d/%d | лечу к %s", cnt, stand_out_howler.total, revId)
         return true
@@ -13412,7 +13433,7 @@ function Collector:update(now, meX, meY, meZ)
             if cand == nil then
                 break
             end
-            if not self:_isVisited(cand.x, cand.z) then
+            if not self:_isVisited(cand.x, cand.y, cand.z) then
                 pt = cand
                 break
             end
@@ -13422,7 +13443,7 @@ function Collector:update(now, meX, meY, meZ)
             return false
         end
         self.since = now
-        self:_markVisited(pt.x, pt.z)
+        self:_markVisited(pt.x, pt.y, pt.z)
         if #self.visitedZones % 5 == 0 then
             self:_flushVisited()
         end
