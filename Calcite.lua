@@ -6341,6 +6341,44 @@ function main.start(env)
                     end
                 end
             end,
+            clickUiButton = function(btn)
+                -- Реальный клик VirtualInputManager с учётом GuiInset (для StandStorage CHALLENGE, где firesignal роняет корутину)
+                if btn == nil or env.virtualInputManager == nil then
+                    return false
+                end
+                local okPos, pos, sz = pcall(function() return btn.AbsolutePosition, btn.AbsoluteSize end)
+                if not okPos or pos == nil or sz == nil or sz.X <= 0 or sz.Y <= 0 then
+                    return false
+                end
+                local ix, iy = 0, 0
+                pcall(function()
+                    local sg = btn:FindFirstAncestorOfClass("ScreenGui")
+                    if sg == nil or sg.IgnoreGuiInset ~= true then
+                        local gs = game:GetService("GuiService")
+                        if gs ~= nil and gs.GetGuiInset ~= nil then
+                            local tl = gs:GetGuiInset()
+                            if tl ~= nil then ix, iy = tl.X, tl.Y end
+                        end
+                    end
+                end)
+                local cx = math.floor(pos.X + sz.X * 0.5 + ix)
+                local cy = math.floor(pos.Y + sz.Y * 0.5 + iy)
+                if ui ~= nil and ui.menuOpen() then
+                    local mx, my, mw, mh = ui.menuRect ~= nil and ui.menuRect() or nil
+                    if mx == nil or (cx >= mx - 8 and cx <= mx + mw + 8 and cy >= my - 8 and cy <= my + mh + 8) then
+                        return false
+                    end
+                end
+                pcall(function() env.virtualInputManager:SendMouseButtonEvent(cx, cy, 0, true, game, 1) end)
+                if env.task and env.task.delay then
+                    env.task.delay(0.04, function()
+                        pcall(function() env.virtualInputManager:SendMouseButtonEvent(cx, cy, 0, false, game, 1) end)
+                    end)
+                else
+                    pcall(function() env.virtualInputManager:SendMouseButtonEvent(cx, cy, 0, false, game, 1) end)
+                end
+                return true
+            end,
             pressKey = function(keyStr)
                 local vim = env.virtualInputManager
                 local kcName = keyMap[keyStr]
@@ -6418,10 +6456,16 @@ function main.start(env)
                 if ssGui ~= nil and ssGui.Enabled == true then
                     if not sb.darby.storageOpen then
                         sb.darby.storageOpen = true
-                        local t = env.clock() + 4.5
+                        local t = env.clock() + 2.5
                         if t > (sb.darby.readyAt or 0) then
                             sb.darby.readyAt = t
                         end
+                    end
+                    -- Если мы снова на экране StandStorage (а DarbyGoFish закрыт и свежих событий Fish не было > 1.5 с) -> сброс active для рематча!
+                    if sb.darby.active and (dGui == nil or dGui.Enabled == false)
+                        and (sb.darbyAt == nil or env.clock() - sb.darbyAt > 1.5) then
+                        sb.darby.active = false
+                        sb.darby.sawGui = false
                     end
                 elseif ssGui ~= nil and ssGui.Enabled == false and (dGui == nil or dGui.Enabled == false) then
                     sb.darby.storageOpen = false
@@ -11434,9 +11478,10 @@ function stand_out_bounty.applyDarbyEvent(st, kind, data, now)
     if kind == "Open" or kind == "State" then
         if kind == "Open" then
             st.storageOpen = true
-            -- Стол выкладывает 4 жетона ~3-4 с; ждём 4.5 с, чтобы сервер не ответил "Wait for the cards."
-            waitUntil(now + 4.5)
-            st.busyUntil = math.max(st.busyUntil or 0, now + 6.0)
+            st.active = false
+            st.sawGui = false
+            waitUntil(now + 2.5)
+            st.busyUntil = math.max(st.busyUntil or 0, now + 5.0)
         end
         return
     end
@@ -12074,7 +12119,33 @@ function Runner:update(now, opts, meX, meY, meZ)
             if self.deps.stopFighting ~= nil then
                 pcall(self.deps.stopFighting)
             end
-            -- Во время переходной сценки (после FishStart / диалога) ждём появления карт, не телепортируясь
+            -- Если мы на экране StandStorage (партия ещё не идёт) — сначала жмём CHALLENGE настоящим кликом мыши
+            -- (без firesignal!), чтобы открылся диалог "1. Just deal." и нормальный UI DarbyGoFish;
+            -- если меню Calcite открыто или кнопки нет — фолбэк на прямой FishStart(1)
+            if not inDarbyGame and ui.standStorageOpen then
+                local waitCards = darbySt ~= nil and darbySt.readyAt ~= nil and now < darbySt.readyAt
+                if waitCards then
+                    self.statusText = title .. " | Go Fish: жду стол..."
+                    return
+                end
+                if now - self.lastAction >= 2.5 then
+                    self.lastAction = now
+                    if darbySt ~= nil then
+                        darbySt.busyUntil = math.max(darbySt.busyUntil or 0, now + 6.0)
+                    end
+                    local clicked = false
+                    if ui.darbyChallengeBtn ~= nil and self.deps.clickUiButton ~= nil then
+                        local okC, resC = pcall(self.deps.clickUiButton, ui.darbyChallengeBtn)
+                        clicked = okC and resC == true
+                    end
+                    if not clicked and self.deps.sendStandStorage ~= nil then
+                        pcall(self.deps.sendStandStorage, "FishStart", 1)
+                    end
+                end
+                self.statusText = title .. " | жму CHALLENGE"
+                return
+            end
+            -- Во время переходной сценки (после CHALLENGE / FishStart / диалога) ждём появления карт, не телепортируясь
             if not inDarbyGame and not ui.standStorageOpen and darbyBusy then
                 self.statusText = title .. " | Go Fish: посадка за стол..."
                 return
