@@ -10469,6 +10469,35 @@ local function safeIsA(obj, cls)
     return ok and res == true
 end
 
+local function safeHoldDuration(prompt)
+    if prompt == nil then
+        return 0
+    end
+    local ok, val = pcall(function()
+        return prompt.HoldDuration
+    end)
+    if ok and type(val) == "number" and finite(val) and val > 0 then
+        return val
+    end
+    return 0
+end
+
+local function isHoldKeyH(prompt)
+    if prompt == nil or safeIsA(prompt, "ClickDetector") then
+        return false
+    end
+    local ok, kc = pcall(function()
+        return prompt.KeyboardKeyCode
+    end)
+    if not ok or kc == nil then
+        return true
+    end
+    local okN, name = pcall(function()
+        return kc.Name
+    end)
+    return (okN and name == "H") or tostring(kc) == "H"
+end
+
 function stand_out_bounty.isIncident(title)
     if type(title) ~= "string" then
         return false
@@ -10939,6 +10968,8 @@ function stand_out_bounty.new(deps)
         wasTrackerActive = false,
         promptHolding = nil,
         promptSince = 0,
+        rawHObjective = nil,
+        rawHPos = nil,
     }, Runner)
 end
 
@@ -10949,6 +10980,8 @@ function Runner:_releasePrompt()
         end
         self.promptHolding = nil
     end
+    self.rawHObjective = nil
+    self.rawHPos = nil
 end
 
 function Runner:stop()
@@ -11093,6 +11126,8 @@ function Runner:update(now, opts, meX, meY, meZ)
             local moving = stand_out_bounty.isMovingPrompt(prompt)
             local dx, dy, dz = px - meX, py - meY, pz - meZ
             local dist2 = dx * dx + dy * dy + dz * dz
+            local canAdoptRawH = self.promptHolding == "__rawH" and isHoldKeyH(prompt)
+            local isHoldingThis = (self.promptHolding == prompt) or canAdoptRawH
 
             if moving then
                 -- Подвижный Harvest (скорость 30..39, MaxDist=7): постоянно держимся прямо рядом с ним, не отпуская [H]!
@@ -11103,18 +11138,32 @@ function Runner:update(now, opts, meX, meY, meZ)
                     self.statusText = title .. " | догоняю Harvest"
                     return
                 end
-            elseif dist2 > 25 then
-                -- Статичный объект (Clean The Rock, Three Wishes, Stash): встаём СБОКУ на земле (не на макушке столба!)
-                self:_releasePrompt()
-                self.deps.teleportTo(px + 2.5, py + 1.5, pz)
-                self.lastAction = now
-                self.statusText = title .. " | лечу к объекту"
-                return
+            else
+                -- Гистерезис дистанции: до начала удержания подлетаем ближе 6 ст,
+                -- а пока [H] уже зажат — не сбрасываем удержание из-за толчка об коллизию камня (до 10 ст)
+                local maxStaticDist2 = isHoldingThis and 100 or 36
+                if dist2 > maxStaticDist2 then
+                    -- Статичный объект (Clean The Rock, Three Wishes, Stash): встаём СБОКУ на земле (не на макушке столба!)
+                    self:_releasePrompt()
+                    self.deps.teleportTo(px + 2.5, py + 1.5, pz)
+                    self.lastAction = now
+                    self.statusText = title .. " | лечу к объекту"
+                    return
+                end
             end
 
-            local holdDur = (type(prompt.HoldDuration) == "number" and finite(prompt.HoldDuration) and prompt.HoldDuration > 0)
-                and prompt.HoldDuration or 0
-            local maxHold = math.max(holdDur, 0.5) + 1.5
+            -- Если уже держали [H] через __rawH и в процессе нашли реальный H-промпт — перехватываем без отпускания [H]!
+            if canAdoptRawH then
+                self.promptHolding = prompt
+                self.rawHObjective = nil
+                self.rawHPos = nil
+            end
+
+            local isCd = safeIsA(prompt, "ClickDetector")
+            local holdDur = isCd and 0 or safeHoldDuration(prompt)
+            -- Щедрый таймаут (минимум 8 с для кастомных шкал вроде Clean The Rock / Three Wishes):
+            -- как только промпт завершится, он исчезнет и _releasePrompt отпустит [H] на следующем же кадре!
+            local maxHold = isCd and 0.5 or math.max(holdDur + 3.0, 8.0)
 
             if self.promptHolding == prompt then
                 if now - self.promptSince >= maxHold then
@@ -11136,6 +11185,12 @@ function Runner:update(now, opts, meX, meY, meZ)
             return
         end
 
+        -- Если реальный промпт только что пропал (завершился) — сразу отпускаем [H] и даём серверу обновить трекер
+        if self.promptHolding ~= nil and self.promptHolding ~= "__rawH" then
+            self:_releasePrompt()
+            self.lastAction = now
+        end
+
         -- 4) Нет промпта и нет мобов: летим к VisibleBountyTrackerPosition (встаём чуть сбоку, не на столбе!)
         -- А если уже стоим рядом с точкой цели (<= 10 ст) и объект подсвечен кастомным [H]-триггером без ProximityPrompt — зажимаем [H]
         if tx ~= nil then
@@ -11149,9 +11204,21 @@ function Runner:update(now, opts, meX, meY, meZ)
                 end
                 self.statusText = title .. " | лечу к цели"
             else
-                -- Стоим вплотную к точке трекера (напр. Three Wishes / камень с кастомным H-интерактом)
+                -- Стоим вплотную к точке трекера (напр. Three Wishes / Clean The Rock с кастомным H-интерактом)
                 if self.promptHolding == "__rawH" then
-                    if now - self.promptSince >= 2.4 then
+                    local stepDone = (self.rawHObjective ~= nil and ui.trackerObjective ~= self.rawHObjective)
+                    if not stepDone and self.rawHPos ~= nil then
+                        local rdx = tx - self.rawHPos[1]
+                        local rdy = ty - self.rawHPos[2]
+                        local rdz = tz - self.rawHPos[3]
+                        if rdx * rdx + rdy * rdy + rdz * rdz > 16 then
+                            stepDone = true
+                        end
+                    end
+                    if stepDone then
+                        self:_releasePrompt()
+                        self.lastAction = now - 0.5
+                    elseif now - self.promptSince >= 8.0 then
                         self:_releasePrompt()
                         self.lastAction = now
                     end
@@ -11159,7 +11226,9 @@ function Runner:update(now, opts, meX, meY, meZ)
                     self:_releasePrompt()
                     self.promptHolding = "__rawH"
                     self.promptSince = now
-                    pcall(self.deps.holdPromptBegin, "__rawH", 2.0)
+                    self.rawHObjective = ui.trackerObjective
+                    self.rawHPos = { tx, ty, tz }
+                    pcall(self.deps.holdPromptBegin, "__rawH", 8.0)
                 end
                 self.statusText = title .. " | взаимодействие [H]"
             end
