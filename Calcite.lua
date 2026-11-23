@@ -6199,6 +6199,11 @@ function main.start(env)
                 if p ~= nil and p.Parent ~= nil and p.Enabled == true then
                     local okA, avail = pcall(function() return p:GetAttribute("StoryPromptAvailable") end)
                     if not (okA and avail == false) then
+                        -- Читаем живую позицию p.Parent (O(1)) — важно для бегающих HarvestUnit1..3!
+                        local lx, ly, lz = stand_out_bounty.promptPosition(p)
+                        if lx ~= nil then
+                            sb.px, sb.py, sb.pz = lx, ly, lz
+                        end
                         return p, sb.px, sb.py, sb.pz
                     end
                 end
@@ -6845,16 +6850,19 @@ function main.start(env)
                 end
                 local uiSnap = stand_out_bounty.readUi(localPlayer:FindFirstChildOfClass("PlayerGui"))
                 sb.mobs = stand_out_bounty.scanMyMobs(workspace, localPlayer.UserId, pNames, localPlayer.Name, tx, ty, tz, uiSnap.trackerObjective)
-                -- Промпт сканируем редко (раз в 1.0 с, и только когда текущего валидного промпта нет в кэше),
-                -- чтобы не просаживать FPS обходом Workspace.Game:GetDescendants()
+                -- Быстрый скан нашей папки BountyWorld.Party_<UserId> (0.25 с) для мгновенного перехода Catch1->Catch2->Stash->Reward;
+                -- тяжёлый фолбэк по Workspace.Game — не чаще раза в 1.0 с
                 local cachedOk = sb.prompt ~= nil and sb.prompt.Parent ~= nil and sb.prompt.Enabled == true
                 if cachedOk then
                     local okA, avail = pcall(function() return sb.prompt:GetAttribute("StoryPromptAvailable") end)
                     if okA and avail == false then cachedOk = false end
                 end
-                if not cachedOk and now - sb.lastPromptScan >= 1.0 then
-                    sb.lastPromptScan = now
-                    sb.prompt, sb.px, sb.py, sb.pz = stand_out_bounty.findMyPrompt(workspace, localPlayer.UserId, tx, ty, tz)
+                if not cachedOk then
+                    local allowFallback = (now - sb.lastPromptScan >= 1.0)
+                    if allowFallback then
+                        sb.lastPromptScan = now
+                    end
+                    sb.prompt, sb.px, sb.py, sb.pz = stand_out_bounty.findMyPrompt(workspace, localPlayer.UserId, tx, ty, tz, allowFallback)
                 end
             end
 
@@ -10383,7 +10391,8 @@ stand_out_bounty.open_retry = 1.2
 stand_out_bounty.begin_wait = 1.8
 stand_out_bounty.travel_retry = 2.0
 
--- Инциденты с ручными мини-играми (рисование, слайдеры ювелирки, караоке и т.п.) из Modules.Bounty.IncidentRules.Names
+-- Инциденты с ручными мини-играми (рисование, слайдеры ювелирки, караоке и т.п.) из Modules.Bounty.IncidentRules.Names.
+-- "Small Change, Big Problem" (Harvest) исключён отсюда, т.к. полностью поддерживается автопрохождением!
 local INCIDENT_NAMES = {
     ["iced tea run"] = true,
     ["usagi's karaoke night"] = true,
@@ -10392,7 +10401,6 @@ local INCIDENT_NAMES = {
     ["rohan's drawing contest"] = true,
     ["your personal helper friend"] = true,
     ["cheap jewelry, expensive problem"] = true,
-    ["small change, big problem"] = true,
 }
 
 local Runner = {}
@@ -10731,29 +10739,53 @@ function stand_out_bounty.scanMyMobs(workspace, userId, playerNames, playerName,
     return nearby
 end
 
+-- Возвращает живую мировую позицию промпта (важно для бегающих HarvestUnit1..3).
+function stand_out_bounty.promptPosition(d)
+    if d == nil or d.Parent == nil then
+        return nil, nil, nil
+    end
+    local holder = d.Parent
+    local pos = nil
+    if safeIsA(holder, "Attachment") and holder.WorldPosition ~= nil then
+        pos = holder.WorldPosition
+    elseif safeIsA(holder, "BasePart") and holder.Position ~= nil then
+        pos = holder.Position
+    elseif safeIsA(holder, "Model") and holder.PrimaryPart ~= nil and holder.PrimaryPart.Position ~= nil then
+        pos = holder.PrimaryPart.Position
+    end
+    if pos ~= nil and finite(pos.X) and finite(pos.Y) and finite(pos.Z) then
+        return pos.X, pos.Y, pos.Z
+    end
+    return nil, nil, nil
+end
+
+-- true для подвижных промптов (напр. бегающие HarvestUnit1..3 в "Small Change, Big Problem").
+function stand_out_bounty.isMovingPrompt(prompt)
+    if prompt == nil then
+        return false
+    end
+    local pname = prompt.Name or ""
+    if string.find(pname, "BountyIncident_Catch", 1, true) ~= nil then
+        return true
+    end
+    local holder = prompt.Parent
+    local model = holder and holder.Parent
+    if model ~= nil and safeAttr(model, "HarvestMoving") == true then
+        return true
+    end
+    return false
+end
+
 -- Ищет активный ProximityPrompt баунти: сначала в Workspace.Game.BountyWorld.Party_<userId>,
--- а если не найден и известна координата трекера (tx, ty, tz) — ближайший активный ProximityPrompt
--- в радиусе 25 студов от точки трекера (например, "Clean The Rock" или "MISSING FROG" в Workspace.Game.Map).
-function stand_out_bounty.findMyPrompt(workspace, userId, tx, ty, tz)
+-- а если не найден и allowWorldFallback ~= false и известна координата трекера (tx, ty, tz) —
+-- ближайший активный ProximityPrompt в радиусе 25 студов от точки трекера (кроме NPC-промптов).
+function stand_out_bounty.findMyPrompt(workspace, userId, tx, ty, tz, allowWorldFallback)
     if workspace == nil or userId == nil then
         return nil, nil, nil, nil
     end
     local gameFolder = workspace:FindFirstChild("Game")
     if gameFolder == nil then
         return nil, nil, nil, nil
-    end
-
-    local function promptPosition(d)
-        local holder = d.Parent
-        if holder == nil then return nil end
-        if safeIsA(holder, "Attachment") and holder.WorldPosition ~= nil then
-            return holder.WorldPosition
-        elseif safeIsA(holder, "BasePart") and holder.Position ~= nil then
-            return holder.Position
-        elseif safeIsA(holder, "Model") and holder.PrimaryPart ~= nil and holder.PrimaryPart.Position ~= nil then
-            return holder.PrimaryPart.Position
-        end
-        return nil
     end
 
     local function promptUsable(d)
@@ -10763,15 +10795,15 @@ function stand_out_bounty.findMyPrompt(workspace, userId, tx, ty, tz)
         return d.Enabled == true and avail ~= false and finite(reach) and reach > 0
     end
 
-    -- 1) Приоритет: наша папка BountyWorld.Party_<userId>
+    -- 1) Приоритет: наша папка BountyWorld.Party_<userId> (быстрый обход)
     local bw = gameFolder:FindFirstChild("BountyWorld")
     local partyFolder = bw and bw:FindFirstChild("Party_" .. tostring(userId))
     if partyFolder ~= nil and partyFolder.GetDescendants ~= nil then
         for _, d in partyFolder:GetDescendants() do
             if promptUsable(d) then
-                local pos = promptPosition(d)
-                if pos ~= nil and finite(pos.X) and finite(pos.Y) and finite(pos.Z) then
-                    return d, pos.X, pos.Y, pos.Z
+                local x, y, z = stand_out_bounty.promptPosition(d)
+                if x ~= nil then
+                    return d, x, y, z
                 end
             end
         end
@@ -10779,7 +10811,7 @@ function stand_out_bounty.findMyPrompt(workspace, userId, tx, ty, tz)
 
     -- 2) Фолбэк: любой включённый ProximityPrompt в радиусе 25 студов от VisibleBountyTrackerPosition
     -- (пропускаем NPC-промпты Petyr/магазинов, чтобы не перехватывали бой, когда моб вроде Hubert спавнится у Petyr)
-    if tx ~= nil and ty ~= nil and tz ~= nil and gameFolder.GetDescendants ~= nil then
+    if allowWorldFallback ~= false and tx ~= nil and ty ~= nil and tz ~= nil and gameFolder.GetDescendants ~= nil then
         local npcsFolder = gameFolder:FindFirstChild("NPCs")
         local bestPrompt, bestX, bestY, bestZ = nil, nil, nil, nil
         local bestDist2 = 25 * 25
@@ -10787,14 +10819,14 @@ function stand_out_bounty.findMyPrompt(workspace, userId, tx, ty, tz)
             if promptUsable(d) then
                 local inNpcs = npcsFolder ~= nil and d.IsDescendantOf ~= nil and d:IsDescendantOf(npcsFolder)
                 if not inNpcs then
-                    local pos = promptPosition(d)
-                    if pos ~= nil and finite(pos.X) and finite(pos.Y) and finite(pos.Z) then
-                        local dx, dy, dz = pos.X - tx, pos.Y - ty, pos.Z - tz
+                    local x, y, z = stand_out_bounty.promptPosition(d)
+                    if x ~= nil then
+                        local dx, dy, dz = x - tx, y - ty, z - tz
                         local dist2 = dx * dx + dy * dy + dz * dz
                         if dist2 <= bestDist2 then
                             bestDist2 = dist2
                             bestPrompt = d
-                            bestX, bestY, bestZ = pos.X, pos.Y, pos.Z
+                            bestX, bestY, bestZ = x, y, z
                         end
                     end
                 end
@@ -10983,13 +11015,24 @@ function Runner:update(now, opts, meX, meY, meZ)
 
         local tx, ty, tz = self.deps.trackerPosition()
 
-        -- 2) Ищем активный промпт баунти (кэшируется в slow-pass, без тяжёлого GetDescendants на каждом кадре)
+        -- 3) Ищем активный промпт баунти (кэшируется в slow-pass, позиция читается живьём для бегающих Harvest)
         local prompt, px, py, pz = self.deps.myPrompt(tx, ty, tz)
         if prompt ~= nil and px ~= nil then
+            local moving = stand_out_bounty.isMovingPrompt(prompt)
             local dx, dy, dz = px - meX, py - meY, pz - meZ
             local dist2 = dx * dx + dy * dy + dz * dz
-            -- Телепортируемся ОДИН раз если далеко (> 6 ст), а во время зажатия [H] НЕ дёргаем CFrame каждый кадр!
-            if dist2 > 36 then
+
+            if moving then
+                -- Подвижный Harvest (скорость 30..39, MaxDist=7): постоянно держимся прямо рядом с ним, не отпуская [H]!
+                self.deps.teleportTo(px, py + 2.0, pz)
+                if dist2 > 49 then
+                    self:_releasePrompt()
+                    self.lastAction = now
+                    self.statusText = title .. " | догоняю Harvest"
+                    return
+                end
+            elseif dist2 > 36 then
+                -- Статичный объект (Clean The Rock, Stash, RecoveredCase): телепортируемся один раз, дальше стоим спокойно
                 self:_releasePrompt()
                 self.deps.teleportTo(px, py + 2.5, pz)
                 self.lastAction = now
@@ -10999,8 +11042,6 @@ function Runner:update(now, opts, meX, meY, meZ)
 
             local holdDur = (type(prompt.HoldDuration) == "number" and finite(prompt.HoldDuration) and prompt.HoldDuration > 0)
                 and prompt.HoldDuration or 0
-            -- Щедрый таймаут удержания: держим до исчезновения промпта или HoldDuration + 1.5 с,
-            -- чтобы сервер гарантированно засчитал 100% заполнения
             local maxHold = math.max(holdDur, 0.5) + 1.5
 
             if self.promptHolding == prompt then
@@ -11008,7 +11049,7 @@ function Runner:update(now, opts, meX, meY, meZ)
                     self:_releasePrompt()
                     self.lastAction = now
                 end
-            elseif now - self.lastAction >= 0.35 then
+            elseif now - self.lastAction >= 0.25 then
                 self:_releasePrompt()
                 if self.deps.holdPromptBegin ~= nil then
                     self.promptHolding = prompt
@@ -11019,7 +11060,7 @@ function Runner:update(now, opts, meX, meY, meZ)
                     pcall(self.deps.triggerPrompt, prompt)
                 end
             end
-            self.statusText = title .. " | держу [H]"
+            self.statusText = title .. (moving and " | ловлю Harvest" or " | держу [H]")
             return
         else
             self:_releasePrompt()
