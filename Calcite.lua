@@ -11361,64 +11361,81 @@ function stand_out_bounty.readUi(playerGui)
             info.darbyOpen = true
         end
 
-        -- Окно мини-игры ROHAN'S DRAWING CONTEST ("YOUR DRAWING" + кнопка "SUBMIT")
-        local function scanRohanContainer(container)
-            if container == nil or container.GetDescendants == nil then return false end
-            local hasRohanTitle = false
-            local submitBtn = nil
-            for _, d in container:GetDescendants() do
-                if safeIsA(d, "TextLabel") and d.Visible ~= false and type(d.Text) == "string" and d.Text ~= "" then
-                    local tl = string.lower(d.Text)
-                    if string.find(tl, "rohan's drawing", 1, true) ~= nil or string.find(tl, "your drawing", 1, true) ~= nil then
-                        hasRohanTitle = true
+        -- Окно мини-игры ROHAN'S DRAWING CONTEST ("YOUR DRAWING" + кнопка "SUBMIT") — в отдельном pcall,
+        -- чтобы любая ошибка обхода сторонних GUI никогда не ломала чтение BountyTracker/BountySelect!
+        pcall(function()
+            local function isVisuallyVisible(obj, stopAt)
+                local cur = obj
+                while cur ~= nil and cur ~= stopAt do
+                    if safeIsA(cur, "GuiObject") then
+                        if cur.Visible == false then
+                            return false
+                        end
+                        if cur.ClassName == "CanvasGroup" and type(cur.GroupTransparency) == "number" and cur.GroupTransparency >= 0.99 then
+                            return false
+                        end
                     end
-                elseif (safeIsA(d, "TextButton") or safeIsA(d, "ImageButton")) and d.Visible ~= false then
-                    local txt = ""
-                    if safeIsA(d, "TextButton") and type(d.Text) == "string" and d.Text ~= "" then
-                        txt = d.Text
-                    elseif d.GetDescendants ~= nil then
-                        for _, sub in d:GetDescendants() do
-                            if safeIsA(sub, "TextLabel") and type(sub.Text) == "string" and sub.Text ~= "" then
-                                txt = sub.Text
+                    cur = cur.Parent
+                end
+                return true
+            end
+            local function scanRohanContainer(container)
+                if container == nil or container.GetDescendants == nil then return false end
+                local hasRohanTitle = false
+                local submitBtn = nil
+                for _, d in container:GetDescendants() do
+                    if safeIsA(d, "TextLabel") and d.Visible ~= false and type(d.Text) == "string" and d.Text ~= "" then
+                        local tl = string.lower(d.Text)
+                        if (string.find(tl, "rohan's drawing", 1, true) ~= nil or string.find(tl, "your drawing", 1, true) ~= nil)
+                            and isVisuallyVisible(d, container) then
+                            hasRohanTitle = true
+                        end
+                    elseif (safeIsA(d, "TextButton") or safeIsA(d, "ImageButton")) and d.Visible ~= false then
+                        local txt = ""
+                        if safeIsA(d, "TextButton") and type(d.Text) == "string" and d.Text ~= "" then
+                            txt = d.Text
+                        elseif d.GetDescendants ~= nil then
+                            for _, sub in d:GetDescendants() do
+                                if safeIsA(sub, "TextLabel") and type(sub.Text) == "string" and sub.Text ~= "" then
+                                    txt = sub.Text
+                                    break
+                                end
+                            end
+                        end
+                        if string.match(string.lower(txt), "^%s*submit%s*$") ~= nil and isVisuallyVisible(d, container) then
+                            submitBtn = d
+                        end
+                    end
+                end
+                if hasRohanTitle and submitBtn ~= nil then
+                    info.rohanOpen = true
+                    info.rohanSubmitBtn = submitBtn
+                    return true
+                end
+                return false
+            end
+            if playerGui.GetChildren ~= nil then
+                for _, gui in playerGui:GetChildren() do
+                    if safeIsA(gui, "ScreenGui") and gui.Enabled == true then
+                        local gn = gui.Name or ""
+                        if gn ~= "Dialogue" and gn ~= "JewelryInspection" and gn ~= "StandStorage" and gn ~= "DarbyGoFish"
+                            and string.sub(gn, 1, 7) ~= "Calcite" then
+                            if gn == "Bounty" then
+                                if gui.GetChildren ~= nil then
+                                    for _, ch in gui:GetChildren() do
+                                        if safeIsA(ch, "GuiObject") and ch.Name ~= "BountyTracker" and ch.Name ~= "BountySelect" and ch.Visible == true then
+                                            if scanRohanContainer(ch) then break end
+                                        end
+                                    end
+                                end
+                            elseif scanRohanContainer(gui) then
                                 break
                             end
                         end
                     end
-                    if string.match(string.lower(txt), "^%s*submit%s*$") ~= nil then
-                        submitBtn = d
-                    end
                 end
             end
-            if hasRohanTitle then
-                info.rohanOpen = true
-                if submitBtn ~= nil then
-                    info.rohanSubmitBtn = submitBtn
-                end
-                return true
-            end
-            return false
-        end
-        if playerGui.GetChildren ~= nil then
-            for _, gui in playerGui:GetChildren() do
-                if safeIsA(gui, "ScreenGui") and gui.Enabled == true then
-                    local gn = gui.Name or ""
-                    if gn ~= "Dialogue" and gn ~= "JewelryInspection" and gn ~= "StandStorage" and gn ~= "DarbyGoFish"
-                        and string.sub(gn, 1, 7) ~= "Calcite" then
-                        if gn == "Bounty" then
-                            if gui.GetChildren ~= nil then
-                                for _, ch in gui:GetChildren() do
-                                    if ch.Name ~= "BountyTracker" and ch.Name ~= "BountySelect" and ch.Visible == true then
-                                        if scanRohanContainer(ch) then break end
-                                    end
-                                end
-                            end
-                        elseif scanRohanContainer(gui) then
-                            break
-                        end
-                    end
-                end
-            end
-        end
+        end)
 
         -- Проверяем активный диалог (Petyr claim/yes, а также квестовые NPC вроде Meryl Mei Qi и Dragona)
         local dlg = playerGui:FindFirstChild("Dialogue")
