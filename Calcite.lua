@@ -10959,6 +10959,8 @@ function stand_out_bounty.readUi(playerGui)
         jewelryOpen = false,
         jewelryActionBtn = nil,
         standStorageOpen = false,
+        darbyChallengeBtn = nil,
+        darbyBountyPrompt = false,
         darbyOpen = false,
         bounties = {}, -- { button, title, complete, isIncident }
     }
@@ -10981,6 +10983,31 @@ function stand_out_bounty.readUi(playerGui)
         local ssGui = playerGui:FindFirstChild("StandStorage")
         if ssGui ~= nil and ssGui.Enabled == true then
             info.standStorageOpen = true
+            if ssGui.GetDescendants ~= nil then
+                for _, d in ssGui:GetDescendants() do
+                    if (safeIsA(d, "TextButton") or safeIsA(d, "ImageButton")) and d.Visible ~= false then
+                        local txt = ""
+                        if safeIsA(d, "TextButton") and type(d.Text) == "string" and d.Text ~= "" then
+                            txt = d.Text
+                        elseif d.GetDescendants ~= nil then
+                            for _, sub in d:GetDescendants() do
+                                if safeIsA(sub, "TextLabel") and type(sub.Text) == "string" and sub.Text ~= "" then
+                                    txt = sub.Text
+                                    break
+                                end
+                            end
+                        end
+                        if string.match(string.lower(txt), "^%s*challenge%s*$") ~= nil then
+                            info.darbyChallengeBtn = d
+                        end
+                    elseif safeIsA(d, "TextLabel") and d.Visible ~= false and type(d.Text) == "string" then
+                        local tl = string.lower(d.Text)
+                        if string.find(tl, "go fish", 1, true) ~= nil or string.find(tl, "bounty", 1, true) ~= nil then
+                            info.darbyBountyPrompt = true
+                        end
+                    end
+                end
+            end
         end
         local dGui = playerGui:FindFirstChild("DarbyGoFish")
         if dGui ~= nil and dGui.Enabled == true then
@@ -11575,14 +11602,14 @@ function stand_out_bounty.pickDialogueOption(options, objLow)
         return nil
     end
 
-    local preferred = findMatch({ "dragona", "let's open", "open them", "howler", "payment record", "record", "evidence" })
+    local preferred = findMatch({ "just deal", "dragona", "let's open", "open them", "howler", "payment record", "record", "evidence" })
         or findMatch({ "necklace", "pendant", "stones", "restored", "fixed", "rebuilt", "here", "ready", "yes" })
     if preferred ~= nil then
         return preferred
     end
 
     -- Фолбэк: первый вариант, который не является отказом/побочным диалогом
-    local ignore = { "i'll be back", "give me a minute", "later", "bye", "driving practice", "fashion lessons", "never mind" }
+    local ignore = { "i'll be back", "give me a minute", "later", "bye", "driving practice", "fashion lessons", "never mind", "go over the rules", "not now" }
     for _, opt in options do
         local low = string.lower(opt.text or "")
         local skip = false
@@ -11869,16 +11896,17 @@ function Runner:update(now, opts, meX, meY, meZ)
     local darbySt = self.deps.darbyState ~= nil and self.deps.darbyState() or nil
     local inInspection = ui.jewelryOpen == true or ui.jewelryActionBtn ~= nil or puzzle ~= nil
     local inDarbyGame = ui.darbyOpen == true or (darbySt ~= nil and darbySt.active == true)
+    local inDarbyStorage = ui.standStorageOpen == true and (ui.darbyBountyPrompt == true or stand_out_bounty.isDarbyObjective(ui.trackerObjective, ui.trackerTitle))
 
     -- Парсим прогресс баунти (например 1/2 -> не завершено; 4/4 -> все шаги выполнены)
     local progCur, progTotal = stand_out_bounty.parseProgress(ui.trackerTitle)
     local hasIncompleteSteps = progCur ~= nil and progTotal ~= nil and progCur < progTotal
 
     -- Дополнительно сверяем с атрибутом BountyNavigationActive (CanvasGroup трекера может оставаться Visible=true),
-    -- но если на трекере явно видны незавершённые шаги (например MISSING FROG 1/2), таймер ИЛИ открыто окно JewelryInspection / DarbyGoFish
+    -- но если на трекере явно видны незавершённые шаги (например MISSING FROG 1/2), таймер ИЛИ открыто окно JewelryInspection / DarbyGoFish / StandStorage
     -- (игра может прятать BountyTracker во время мини-игры!) — баунти точно активно!
-    local hasActiveBounty = ui.trackerActive or inInspection or inDarbyGame
-    if hasActiveBounty and not hasIncompleteSteps and not inInspection and not inDarbyGame and self.deps.navActive ~= nil then
+    local hasActiveBounty = ui.trackerActive or inInspection or inDarbyGame or inDarbyStorage
+    if hasActiveBounty and not hasIncompleteSteps and not inInspection and not inDarbyGame and not inDarbyStorage and self.deps.navActive ~= nil then
         local okNav, nav = pcall(self.deps.navActive)
         if okNav and nav == false then
             local hasClock = string.find(ui.trackerTitle or "", "%d+:%d%d") ~= nil
@@ -11967,8 +11995,30 @@ function Runner:update(now, opts, meX, meY, meZ)
             return
         end
 
-        -- 0.6) D'Arby's Rematch (Go Fish): автоигра через StandStorage RemoteEvent с идеальной памятью карт
-        local isDarby = stand_out_bounty.isDarbyObjective(ui.trackerObjective, ui.trackerTitle)
+        -- 0.55) Открыт диалог квестового NPC (D'Arby "1. Just deal.", Meryl Mei Qi, Dragona и др.)
+        -- Ставим ДО StandStorage/GoFish, чтобы после нажатия CHALLENGE сразу нажимать "1. Just deal."!
+        if ui.dialogueOptions ~= nil and #ui.dialogueOptions > 0
+            and (stand_out_bounty.isNpcObjective(objLow) or inDarbyStorage or inDarbyGame) then
+            self:_releasePrompt()
+            if self.deps.stopFighting ~= nil then
+                pcall(self.deps.stopFighting)
+            end
+            local opt = stand_out_bounty.pickDialogueOption(ui.dialogueOptions, objLow)
+            if opt ~= nil and now - self.lastAction >= 0.5 then
+                self.lastAction = now
+                if opt.button ~= nil then
+                    self.deps.activateButton(opt.button)
+                end
+                if opt.key ~= nil and self.deps.pressKey ~= nil then
+                    pcall(self.deps.pressKey, opt.key)
+                end
+            end
+            self.statusText = title .. " | диалог NPC"
+            return
+        end
+
+        -- 0.6) D'Arby's Rematch (Go Fish): нажимаем CHALLENGE в StandStorage -> "1. Just deal." -> автоигра через StandStorage RemoteEvent
+        local isDarby = stand_out_bounty.isDarbyObjective(ui.trackerObjective, ui.trackerTitle) or ui.darbyBountyPrompt == true
         local readyToClaimNow = string.find(objLow, "claim your reward", 1, true) ~= nil
             or (string.find(objLow, "return to petyr", 1, true) ~= nil and not hasIncompleteSteps)
         if readyToClaimNow and (ui.standStorageOpen or (darbySt ~= nil and darbySt.storageOpen)) then
@@ -11989,6 +12039,20 @@ function Runner:update(now, opts, meX, meY, meZ)
             if self.deps.stopFighting ~= nil then
                 pcall(self.deps.stopFighting)
             end
+            -- Если мы на экране StandStorage (партия ещё не идёт) и есть кнопка CHALLENGE — жмём именно кнопку CHALLENGE!
+            if not inDarbyGame and ui.darbyChallengeBtn ~= nil then
+                local waitCards = darbySt ~= nil and darbySt.readyAt ~= nil and now < darbySt.readyAt
+                if waitCards then
+                    self.statusText = title .. " | Go Fish: жду стол..."
+                    return
+                end
+                if now - self.lastAction >= 1.5 then
+                    self.lastAction = now
+                    self.deps.activateButton(ui.darbyChallengeBtn)
+                end
+                self.statusText = title .. " | жму CHALLENGE"
+                return
+            end
             if darbySt ~= nil and self.deps.sendStandStorage ~= nil then
                 if now - self.lastAction >= 0.4 then
                     local cmd, arg, suffix = stand_out_bounty.nextDarbyMove(darbySt, now, ui.standStorageOpen)
@@ -12001,26 +12065,6 @@ function Runner:update(now, opts, meX, meY, meZ)
                 end
             end
             self.statusText = title .. " | Go Fish"
-            return
-        end
-
-        -- 0.75) Открыт диалог квестового NPC (Meryl Mei Qi / Dragona в Cheap Jewelry и др.)
-        if ui.dialogueOptions ~= nil and #ui.dialogueOptions > 0 and stand_out_bounty.isNpcObjective(objLow) then
-            self:_releasePrompt()
-            if self.deps.stopFighting ~= nil then
-                pcall(self.deps.stopFighting)
-            end
-            local opt = stand_out_bounty.pickDialogueOption(ui.dialogueOptions, objLow)
-            if opt ~= nil and now - self.lastAction >= 0.5 then
-                self.lastAction = now
-                if opt.button ~= nil then
-                    self.deps.activateButton(opt.button)
-                end
-                if opt.key ~= nil and self.deps.pressKey ~= nil then
-                    pcall(self.deps.pressKey, opt.key)
-                end
-            end
-            self.statusText = title .. " | диалог NPC"
             return
         end
 
