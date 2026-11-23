@@ -6328,7 +6328,27 @@ function main.start(env)
         handle._soBounty.runner = stand_out_bounty.new({
             readUi = function()
                 local pg = localPlayer:FindFirstChildOfClass("PlayerGui")
-                return stand_out_bounty.readUi(pg)
+                local sb = handle._soBounty
+                local needRohanUi = false
+                if sb.rohan ~= nil and (sb.rohan.submitStage or 0) >= 1 then
+                    local t = env.clock()
+                    if sb.rohanUiAt == nil or t - sb.rohanUiAt >= 0.4 then
+                        sb.rohanUiAt = t
+                        needRohanUi = true
+                    end
+                end
+                local res = stand_out_bounty.readUi(pg, needRohanUi)
+                if needRohanUi then
+                    sb.rohanSubmitBtn = res.rohanSubmitBtn
+                    sb.rohanOpen = res.rohanOpen
+                elseif sb.rohan ~= nil and (sb.rohan.submitStage or 0) >= 1 then
+                    res.rohanSubmitBtn = sb.rohanSubmitBtn
+                    res.rohanOpen = sb.rohanOpen == true
+                else
+                    sb.rohanSubmitBtn = nil
+                    sb.rohanOpen = false
+                end
+                return res
             end,
             unlockedTier = function()
                 if not handle._soBounty.modTried then
@@ -11282,7 +11302,8 @@ function stand_out_bounty.parseTier(labelText)
 end
 
 -- Читает состояние Bounty UI (открыта ли доска, какой тир выбран, активен ли трекер, список баунти, диалог сдачи награды).
-function stand_out_bounty.readUi(playerGui)
+-- scanRohan=true включается ТОЛЬКО в момент сдачи работы Рохану, чтобы не гонять GetDescendants по всему PlayerGui каждый кадр!
+function stand_out_bounty.readUi(playerGui, scanRohan)
     local info = {
         trackerActive = false,
         trackerTitle = "",
@@ -11361,9 +11382,9 @@ function stand_out_bounty.readUi(playerGui)
             info.darbyOpen = true
         end
 
-        -- Окно мини-игры ROHAN'S DRAWING CONTEST ("YOUR DRAWING" + кнопка "SUBMIT") — в отдельном pcall,
-        -- чтобы любая ошибка обхода сторонних GUI никогда не ломала чтение BountyTracker/BountySelect!
-        pcall(function()
+        -- Окно мини-игры ROHAN'S DRAWING CONTEST ("YOUR DRAWING" + кнопка "SUBMIT") — сканируем ТОЛЬКО при scanRohan == true
+        -- (в отдельной pcall), чтобы не вызывать GetDescendants по всему PlayerGui 144 раза в секунду!
+        if scanRohan == true then pcall(function()
             local function isVisuallyVisible(obj, stopAt)
                 local cur = obj
                 while cur ~= nil and cur ~= stopAt do
@@ -11435,7 +11456,7 @@ function stand_out_bounty.readUi(playerGui)
                     end
                 end
             end
-        end)
+        end) end
 
         -- Проверяем активный диалог (Petyr claim/yes, а также квестовые NPC вроде Meryl Mei Qi и Dragona)
         local dlg = playerGui:FindFirstChild("Dialogue")
