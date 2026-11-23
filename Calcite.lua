@@ -3223,7 +3223,7 @@ local pairs = {
     ["Кто за мной наблюдает"] = "Spectators", ["Прострел стены у прицела"] = "Wall penetration",
     ["ESP оружия"] = "Weapon ESP", ["ESP предметов"] = "Item ESP", ["Абилки E/R"] = "E/R abilities",
     ["Автоподбор"] = "Auto pick up", ["Предметы на карте"] = "World items",
-    ["Закопанные припасы"] = "Buried supplies", ["Возвращаться назад"] = "Return to start",
+    ["Закопанные припасы"] = "Buried supplies", ["Морской мусор (R)"] = "Sea Trash (R)", ["Возвращаться назад"] = "Return to start",
     ["Смена сервера если пусто"] = "Hop if no items",
     ["Фильтр мобов"] = "Mob filter", ["Все мобы"] = "All mobs",
     ["Без боссов"] = "No bosses", ["Только боссы"] = "Bosses only",
@@ -5962,6 +5962,51 @@ function main.start(env)
                 root.AssemblyLinearVelocity = env.Vector3.new(0, 0, 0)
             end
         end,
+        faceAt = function(px, py, pz, lx, ly, lz)
+            local character = localPlayer.Character
+            local root = character and character:FindFirstChild("HumanoidRootPart")
+            if root ~= nil then
+                local p = env.Vector3.new(px, py, pz)
+                local t = env.Vector3.new(lx, ly, lz)
+                if env.CFrame.lookAt ~= nil then
+                    root.CFrame = env.CFrame.lookAt(p, t)
+                else
+                    root.CFrame = env.CFrame.new(p, t)
+                end
+                root.AssemblyLinearVelocity = env.Vector3.new(0, 0, 0)
+                pcall(function() root.AssemblyAngularVelocity = env.Vector3.new(0, 0, 0) end)
+            end
+        end,
+        pressKey = function(keyStr)
+            local okTb, focusedTb = pcall(function() return UserInputService:GetFocusedTextBox() end)
+            if okTb and focusedTb ~= nil then return end
+            local vim = env.virtualInputManager
+            local kc = env.Enum and env.Enum.KeyCode and env.Enum.KeyCode[keyStr]
+            if vim ~= nil and kc ~= nil then
+                pcall(function() vim:SendKeyEvent(true, kc, false, game) end)
+                if env.task and env.task.delay then
+                    env.task.delay(0.05, function()
+                        pcall(function() vim:SendKeyEvent(false, kc, false, game) end)
+                    end)
+                else
+                    pcall(function() vim:SendKeyEvent(false, kc, false, game) end)
+                end
+            end
+        end,
+        isSummoned = function()
+            local c = localPlayer.Character
+            if c == nil then return false end
+            local ok, v = pcall(function() return c:GetAttribute("Summoned") end)
+            return ok and v == true
+        end,
+        canSummon = function()
+            local c = localPlayer.Character
+            if c == nil then return false end
+            local okNo, noSum = pcall(function() return c:GetAttribute("NoSummon") end)
+            if okNo and noSum == true then return false end
+            local info = stand_out.playerInfo(localPlayer)
+            return info.stand ~= ""
+        end,
         firePrompt = function(prompt)
             if type(env.fireproximityprompt) == "function" then
                 pcall(env.fireproximityprompt, prompt)
@@ -8169,6 +8214,7 @@ function menu.create(deps)
     toggle(soFarm.itemGroup, "StandOutPickupEnabled", "Автоподбор", settings.standOutPickup, "enabled")
     toggle(soFarm.itemGroup, "StandOutPickupWorld", "Предметы на карте", settings.standOutPickup, "worldItems")
     toggle(soFarm.itemGroup, "StandOutPickupBuried", "Закопанные припасы", settings.standOutPickup, "buried")
+    toggle(soFarm.itemGroup, "StandOutPickupSeaTrash", "Морской мусор (R)", settings.standOutPickup, "seaTrash")
     toggle(soFarm.itemGroup, "StandOutPickupReturn", "Возвращаться назад", settings.standOutPickup, "returnBack")
     toggle(soFarm.itemGroup, "StandOutPickupHop", "Смена сервера если пусто", settings.standOutPickup, "hopWhenEmpty")
     soFarm.pickupCount = soFarm.itemGroup:AddLabel("Подобрано: 0")
@@ -10152,6 +10198,7 @@ function settings.defaults(mode)
             enabled = false,
             worldItems = true,
             buried = true,
+            seaTrash = false,
             returnBack = true,
             hopWhenEmpty = false,
         },
@@ -13085,12 +13132,14 @@ return stand_out_mobs
 end
 
 __modules["stand_out_pickup"] = function(require)
--- Stand Out Auto Pick Up: сканер мировых предметов и автомат телепорта + подбора.
--- Факты игры из tools/standout_probe_items.lua:
+-- Stand Out Auto Pick Up: сканер мировых предметов, закопанных припасов и морского мусора (Sea Trash).
+-- Факты игры из tools/standout_probe_items.lua и tools/standout_probe_seatrash.lua:
 --   • Workspace.Game.SpawnedItems / WorldEventDrops -> DroppedItem (attr ItemName)
 --     внутри ProximityPrompt "WorldItemPickup" (HoldDuration=0, MaxActivationDistance=10)
 --   • Workspace.Game.Gardening.Foraging -> BuriedSupplies (attr GardenSupplyItem, GardenSupplyAvailable)
 --     внутри ProximityPrompt "GardenGather" (HoldDuration=1.2, MaxActivationDistance=9)
+--   • Workspace.Game.Map.ScrapPlatform (attr GardenOceanScrap=true, Destroyed~=true)
+--     внутри DebrisPiece (attr GardenGatherable="Steel"/...) — разбивается ударом R, даёт +Dalas/ресурсы
 -- Чистая логика поверх переданных зависимостей, проверяется tests/stand_out_pickup_test.lua.
 local stand_out_pickup = {}
 
@@ -13101,6 +13150,10 @@ stand_out_pickup.give_up = 1.5     -- сколько ждать исчезнов
 stand_out_pickup.skip_for = 10.0   -- на сколько секунд пропустить предмет, который не подобрался
 stand_out_pickup.hop_delay = 3.0   -- сколько секунд карта должна быть пустой перед сменой сервера
 stand_out_pickup.hop_retry = 12.0  -- пауза между повторными попытками телепорта, если сервер оказался полон
+stand_out_pickup.trash_dist = 4.5  -- студов перед DebrisPiece при разбитии морского мусора на R
+stand_out_pickup.trash_above = 1.8 -- студов над DebrisPiece (держит персонажа выше поверхности моря Y=5.47)
+stand_out_pickup.trash_r_cd = 1.4  -- пауза между нажатиями R по одной куче Sea Trash
+stand_out_pickup.trash_give_up = 6.5 -- через сколько секунд пропустить неразбиваемую кучу Sea Trash
 
 local Picker = {}
 Picker.__index = Picker
@@ -13168,6 +13221,24 @@ function stand_out_pickup.entryPosition(entry)
     if entry == nil or entry.model == nil or entry.model.Parent == nil then
         return nil, nil, nil
     end
+    if entry.kind == "seatrash" then
+        local part = entry.part
+        if part ~= nil and part.Parent ~= nil and part.Position ~= nil then
+            local p = part.Position
+            if finite(p.X) and finite(p.Y) and finite(p.Z) then
+                return p.X, p.Y, p.Z
+            end
+        end
+        local fb = firstBasePart(entry.debris or entry.model)
+        if fb ~= nil and fb.Position ~= nil then
+            local p = fb.Position
+            if finite(p.X) and finite(p.Y) and finite(p.Z) then
+                return p.X, p.Y, p.Z
+            end
+        end
+        return nil, nil, nil
+    end
+
     local prompt = entry.prompt
     if prompt == nil or prompt.Parent == nil then
         return nil, nil, nil
@@ -13201,6 +13272,15 @@ local function promptWorking(entry)
     if entry == nil or entry.model == nil or entry.model.Parent == nil then
         return false
     end
+    if entry.kind == "seatrash" then
+        if safeAttr(entry.model, "Destroyed") == true then
+            return false
+        end
+        if entry.debris ~= nil and entry.debris.Parent == nil then
+            return false
+        end
+        return true
+    end
     local prompt = entry.prompt
     if prompt == nil or prompt.Parent == nil then
         return false
@@ -13216,6 +13296,38 @@ local function promptWorking(entry)
         end
     end
     return true
+end
+
+local function scanSeaTrash(out, mapFolder)
+    if mapFolder == nil or mapFolder.GetChildren == nil then
+        return
+    end
+    for _, child in mapFolder:GetChildren() do
+        if safeAttr(child, "GardenOceanScrap") == true and safeAttr(child, "Destroyed") ~= true then
+            local debris = child.FindFirstChild ~= nil and child:FindFirstChild("DebrisPiece") or nil
+            if debris == nil and child.GetChildren ~= nil then
+                for _, sub in child:GetChildren() do
+                    if safeAttr(sub, "GardenGatherable") ~= nil then
+                        debris = sub
+                        break
+                    end
+                end
+            end
+            local part = firstBasePart(debris) or firstBasePart(child)
+            if part ~= nil then
+                local mat = debris ~= nil and safeAttr(debris, "GardenGatherable") or nil
+                local label = (type(mat) == "string" and mat ~= "") and ("Sea Trash (" .. mat .. ")") or "Sea Trash"
+                table.insert(out, {
+                    kind = "seatrash",
+                    name = label,
+                    model = child,
+                    debris = debris,
+                    part = part,
+                    prompt = nil,
+                })
+            end
+        end
+    end
 end
 
 local function scanFolder(out, folder, kind, attrName)
@@ -13271,6 +13383,10 @@ function stand_out_pickup.scan(workspace, opts)
         scanFolder(found, foraging, "buried", "GardenSupplyItem")
     end
 
+    if opts.seaTrash then
+        scanSeaTrash(found, gameFolder:FindFirstChild("Map"))
+    end
+
     return found
 end
 
@@ -13317,10 +13433,12 @@ end
 function stand_out_pickup.new(deps)
     return setmetatable({
         deps = deps,
-        state = "idle",      -- "idle" | "arriving" | "holding" | "waiting"
+        state = "idle",      -- "idle" | "arriving" | "holding" | "waiting" | "breaking"
         target = nil,
         since = 0,
-        skipped = {},        -- prompt -> timestamp
+        lastRAt = -99,
+        lastSummonAt = -99,
+        skipped = {},        -- prompt or model -> timestamp
         taken = 0,
         returnPos = nil,     -- { x, y, z } сохранённая точка до начала серии подборов
         lastTargetName = "",
@@ -13330,15 +13448,26 @@ function stand_out_pickup.new(deps)
 end
 
 function Picker:stop()
-    if self.state == "holding" and self.target ~= nil and self.deps.holdEnd ~= nil then
+    if self.state == "holding" and self.target ~= nil and self.target.prompt ~= nil and self.deps.holdEnd ~= nil then
         pcall(self.deps.holdEnd, self.target.prompt)
     end
     self.state = "idle"
     self.target = nil
+    self.lastRAt = -99
+    self.lastSummonAt = -99
     self.returnPos = nil
     self.lastTargetName = ""
     self.emptySince = nil
     self.lastHopTry = -99
+end
+
+local function positionForTrash(deps, tx, ty, tz)
+    local px, py, pz = tx, ty + stand_out_pickup.trash_above, tz + stand_out_pickup.trash_dist
+    if deps.faceAt ~= nil then
+        deps.faceAt(px, py, pz, tx, ty, tz)
+    else
+        deps.teleportTo(px, py, pz)
+    end
 end
 
 function Picker:update(now, entries, opts, meX, meY, meZ)
@@ -13357,9 +13486,11 @@ function Picker:update(now, entries, opts, meX, meY, meZ)
 
     -- Пользователь отключил категорию текущего предмета — отпускаем его без подсчёта
     if target ~= nil and not gone then
-        local allowed = (target.kind == "item" and opts.worldItems) or (target.kind == "buried" and opts.buried)
+        local allowed = (target.kind == "item" and opts.worldItems)
+            or (target.kind == "buried" and opts.buried)
+            or (target.kind == "seatrash" and opts.seaTrash)
         if not allowed then
-            if self.state == "holding" and self.deps.holdEnd ~= nil then
+            if self.state == "holding" and target.prompt ~= nil and self.deps.holdEnd ~= nil then
                 pcall(self.deps.holdEnd, target.prompt)
             end
             self.state = "idle"
@@ -13374,6 +13505,13 @@ function Picker:update(now, entries, opts, meX, meY, meZ)
             self.state = "idle"
             self.target = nil
             self.lastTargetName = ""
+        elseif target.kind == "seatrash" then
+            positionForTrash(self.deps, tx, ty, tz)
+            if now - self.since >= stand_out_pickup.settle then
+                self.state = "breaking"
+                self.since = now
+                self.lastRAt = -99
+            end
         else
             -- Держим персонажа точно у предмета во время паузы settle
             self.deps.teleportTo(tx, ty + stand_out_pickup.above, tz)
@@ -13390,6 +13528,33 @@ function Picker:update(now, entries, opts, meX, meY, meZ)
                 end
                 self.state = "holding"
                 self.since = now
+            end
+        end
+    elseif self.state == "breaking" then
+        if gone then
+            self.taken += 1
+            self.state = "idle"
+            self.target = nil
+            self.lastTargetName = ""
+        elseif now - self.since >= stand_out_pickup.trash_give_up then
+            self.skipped[target.model] = now
+            self.state = "idle"
+            self.target = nil
+            self.lastTargetName = ""
+        else
+            positionForTrash(self.deps, tx, ty, tz)
+            local needSummon = self.deps.canSummon ~= nil and self.deps.canSummon()
+                and self.deps.isSummoned ~= nil and not self.deps.isSummoned()
+            if needSummon then
+                if now - self.lastSummonAt >= 1.2 and self.deps.pressKey ~= nil then
+                    self.lastSummonAt = now
+                    pcall(self.deps.pressKey, "E")
+                end
+            elseif now - self.lastSummonAt >= 0.3 and now - self.lastRAt >= stand_out_pickup.trash_r_cd then
+                self.lastRAt = now
+                if self.deps.pressKey ~= nil then
+                    pcall(self.deps.pressKey, "R")
+                end
             end
         end
     elseif self.state == "holding" then
@@ -13443,11 +13608,14 @@ function Picker:update(now, entries, opts, meX, meY, meZ)
     local bestX, bestY, bestZ = 0, 0, 0
     if entries ~= nil then
         for _, entry in entries do
-            local allowed = (entry.kind == "item" and opts.worldItems) or (entry.kind == "buried" and opts.buried)
+            local allowed = (entry.kind == "item" and opts.worldItems)
+                or (entry.kind == "buried" and opts.buried)
+                or (entry.kind == "seatrash" and opts.seaTrash)
             if not allowed or not promptWorking(entry) then
                 continue
             end
-            local skippedAt = self.skipped[entry.prompt]
+            local skipKey = entry.prompt or entry.model
+            local skippedAt = self.skipped[skipKey]
             if skippedAt ~= nil and now - skippedAt < stand_out_pickup.skip_for then
                 continue
             end
@@ -13474,7 +13642,7 @@ function Picker:update(now, entries, opts, meX, meY, meZ)
                 self.deps.teleportTo(rp.x, rp.y, rp.z)
             end
         end
-        if opts.hopWhenEmpty and (opts.worldItems or opts.buried) then
+        if opts.hopWhenEmpty and (opts.worldItems or opts.buried or opts.seaTrash) then
             if self.emptySince == nil then
                 self.emptySince = now
             end
@@ -13506,7 +13674,11 @@ function Picker:update(now, entries, opts, meX, meY, meZ)
     self.lastTargetName = best.name or ""
     self.state = "arriving"
     self.since = now
-    self.deps.teleportTo(bestX, bestY + stand_out_pickup.above, bestZ)
+    if best.kind == "seatrash" then
+        positionForTrash(self.deps, bestX, bestY, bestZ)
+    else
+        self.deps.teleportTo(bestX, bestY + stand_out_pickup.above, bestZ)
+    end
     return best
 end
 
