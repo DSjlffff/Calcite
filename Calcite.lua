@@ -6079,7 +6079,7 @@ function main.start(env)
 
     do
         local keyMap = {
-            E = "E", B = "B",
+            E = "E", R = "R", B = "B",
             ["1"] = "One", ["2"] = "Two", ["3"] = "Three", ["4"] = "Four", ["5"] = "Five",
             ["6"] = "Six", ["7"] = "Seven", ["8"] = "Eight", ["9"] = "Nine",
         }
@@ -6125,9 +6125,29 @@ function main.start(env)
                 end
             end,
             clickM1 = function()
-                local okTb, focused = pcall(function() return UserInputService:GetFocusedTextBox() end)
-                if okTb and focused ~= nil then return end
+                local okTb, focusedTb = pcall(function() return UserInputService:GetFocusedTextBox() end)
+                if okTb and focusedTb ~= nil then return end
                 local menuIsOpen = ui ~= nil and ui.menuOpen()
+                local lmbDown = false
+                pcall(function()
+                    if env.Enum and env.Enum.UserInputType then
+                        lmbDown = UserInputService:IsMouseButtonPressed(env.Enum.UserInputType.MouseButton1) == true
+                    end
+                end)
+                if lmbDown then return end
+
+                -- Если меню закрыто и окно игры в фокусе — настоящий клик mouse1press/release бьёт 100% надёжно
+                -- (не зависит от ShiftLock, GuiInset или repeatCount в VirtualInputManager)
+                if not menuIsOpen and focused() and type(env.mouse1press) == "function" and type(env.mouse1release) == "function" then
+                    pcall(env.mouse1press)
+                    if env.task and env.task.delay then
+                        env.task.delay(0.05, function() pcall(env.mouse1release) end)
+                    else
+                        pcall(env.mouse1release)
+                    end
+                    return
+                end
+
                 local vim = env.virtualInputManager
                 if vim ~= nil then
                     local vw, vh = 800, 600
@@ -6137,19 +6157,22 @@ function main.start(env)
                     end
                     local cx, cy = math.floor(vw * 0.5), math.floor(vh * 0.5)
                     if menuIsOpen then
-                        -- Если пользователь сейчас держит ЛКМ (тянет слайдер/окно) или держит курсор над ClickGUI —
-                        -- вежливо ставим M1 на паузу, чтобы не закрывать дропдауны и не сбивать слайдеры
-                        local lmbDown = false
-                        pcall(function()
-                            if env.Enum and env.Enum.UserInputType then
-                                lmbDown = UserInputService:IsMouseButtonPressed(env.Enum.UserInputType.MouseButton1) == true
-                            end
-                        end)
-                        if lmbDown then return end
-
+                        -- Пауза пока курсор над окном ClickGUI (учитываем +GuiInset, т.к. GetMouseLocation включает топбар)
                         local mx, my, mw, mh = nil, nil, nil, nil
                         if ui.menuRect ~= nil then
                             mx, my, mw, mh = ui.menuRect()
+                        end
+                        local ix, iy = 0, 0
+                        pcall(function()
+                            local gs = game:GetService("GuiService")
+                            if gs ~= nil and gs.GetGuiInset ~= nil then
+                                local tl = gs:GetGuiInset()
+                                if tl ~= nil then ix, iy = tl.X, tl.Y end
+                            end
+                        end)
+                        if mx ~= nil then
+                            mx = mx + ix
+                            my = my + iy
                         end
                         local pad = 20
                         if mx ~= nil and UserInputService.GetMouseLocation ~= nil then
@@ -6162,8 +6185,7 @@ function main.start(env)
                             end
                         end
 
-                        -- Курсор вне меню -> кликаем строго ВНЕ окна ClickGUI (и мимо топбара/хотбара),
-                        -- чтобы M1 продолжал бить даже при открытом меню
+                        -- Курсор вне меню -> кликаем строго ВНЕ окна ClickGUI (и мимо топбара/хотбара)
                         local candidates = {
                             { 12, math.floor(vh * 0.5) },
                             { math.max(12, vw - 12), math.floor(vh * 0.5) },
@@ -6184,18 +6206,18 @@ function main.start(env)
                         end
                         if not picked then return end
                     end
-                    pcall(function() vim:SendMouseButtonEvent(cx, cy, 0, true, game, 1) end)
+                    pcall(function() vim:SendMouseButtonEvent(cx, cy, 0, true, game, 0) end)
                     if env.task and env.task.delay then
-                        env.task.delay(0.03, function()
-                            pcall(function() vim:SendMouseButtonEvent(cx, cy, 0, false, game, 1) end)
+                        env.task.delay(0.05, function()
+                            pcall(function() vim:SendMouseButtonEvent(cx, cy, 0, false, game, 0) end)
                         end)
                     else
-                        pcall(function() vim:SendMouseButtonEvent(cx, cy, 0, false, game, 1) end)
+                        pcall(function() vim:SendMouseButtonEvent(cx, cy, 0, false, game, 0) end)
                     end
                 elseif not menuIsOpen and type(env.mouse1press) == "function" and type(env.mouse1release) == "function" then
                     pcall(env.mouse1press)
                     if env.task and env.task.delay then
-                        env.task.delay(0.03, function() pcall(env.mouse1release) end)
+                        env.task.delay(0.05, function() pcall(env.mouse1release) end)
                     else
                         pcall(env.mouse1release)
                     end
@@ -6599,6 +6621,7 @@ function main.start(env)
                     autoSummon = base.autoSummon,
                     autoSkill = base.autoSkill,
                     skills = base.skills,
+                    autoR = base.autoR,
                     autoM1 = base.autoM1,
                     distance = base.distance,
                     method = base.method,
@@ -8193,6 +8216,7 @@ function menu.create(deps)
             end
         end)
     end
+    toggle(soFarm.cfgGroup, "StandOutMobAutoR", "Auto Heavy (R)", settings.standOutMobs, "autoR")
     toggle(soFarm.cfgGroup, "StandOutMobAutoM1", "M1 на кулдауне", settings.standOutMobs, "autoM1")
     slider(soFarm.cfgGroup, "StandOutMobDistance", "Дистанция", settings.standOutMobs, "distance", 2, 20, " ст")
     do
@@ -10139,6 +10163,7 @@ function settings.defaults(mode)
             autoSummon = true,
             autoSkill = true,
             skills = { ["1"] = true, ["2"] = true, ["3"] = true, ["4"] = true },
+            autoR = true,
             autoM1 = true,
             distance = 6,
             method = "Behind",    -- "Behind" | "Below" | "Over" | "Front"
@@ -12601,6 +12626,7 @@ stand_out_mobs.summon_cooldown = 1.2
 stand_out_mobs.summon_settle = 0.25
 stand_out_mobs.skill_interval = 0.25
 stand_out_mobs.skill_retry = 0.85
+stand_out_mobs.heavy_cooldown = 1.6
 stand_out_mobs.m1_interval = 0.18
 stand_out_mobs.post_skill_m1_delay = 0.16
 
@@ -12885,6 +12911,7 @@ function stand_out_mobs.new(deps)
         wasBelow = false,
         lastSummonAt = -99,
         lastSkillAt = -99,
+        lastRAt = -99,
         lastM1At = -99,
         nextSkillIdx = 1,
         triedAt = {},
@@ -13032,6 +13059,15 @@ function Farmer:update(now, entries, opts, meX, meY, meZ)
                 end
             end
         end
+    end
+
+    -- 2.5. Auto Heavy (R) по кулдауну
+    if not firedSkill and opts.autoR and now - self.lastSkillAt >= stand_out_mobs.skill_interval
+        and now - self.lastRAt >= stand_out_mobs.heavy_cooldown then
+        self.lastRAt = now
+        self.lastSkillAt = now
+        self.deps.pressKey("R")
+        firedSkill = true
     end
 
     -- 3. M1 fallback когда скиллы на кулдауне / отключены
