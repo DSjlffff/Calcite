@@ -6418,7 +6418,7 @@ function main.start(env)
                 if ssGui ~= nil and ssGui.Enabled == true then
                     if not sb.darby.storageOpen then
                         sb.darby.storageOpen = true
-                        local t = env.clock() + 3.5
+                        local t = env.clock() + 4.5
                         if t > (sb.darby.readyAt or 0) then
                             sb.darby.readyAt = t
                         end
@@ -11424,8 +11424,9 @@ function stand_out_bounty.applyDarbyEvent(st, kind, data, now)
     if kind == "Open" or kind == "State" then
         if kind == "Open" then
             st.storageOpen = true
-            waitUntil(now + 3.5)
-            st.busyUntil = math.max(st.busyUntil or 0, now + 5.0)
+            -- Стол выкладывает 4 жетона ~3-4 с; ждём 4.5 с, чтобы сервер не ответил "Wait for the cards."
+            waitUntil(now + 4.5)
+            st.busyUntil = math.max(st.busyUntil or 0, now + 6.0)
         end
         return
     end
@@ -12019,10 +12020,8 @@ function Runner:update(now, opts, meX, meY, meZ)
                     -- Даём игре 8 с на анимацию рассадки за стол и раздачу карт, не трогая персонажа!
                     darbySt.busyUntil = math.max(darbySt.busyUntil or 0, now + 8.0)
                 end
-                local isGuiBtn = opt.button ~= nil and (safeIsA(opt.button, "TextButton") or safeIsA(opt.button, "ImageButton") or type(opt.button) == "string")
-                if isGuiBtn then
-                    self.deps.activateButton(opt.button)
-                elseif opt.key ~= nil and self.deps.pressKey ~= nil then
+                -- В Stand Out диалоги нативно принимают цифры 1..4 без firesignal-багов потоков
+                if opt.key ~= nil and self.deps.pressKey ~= nil then
                     pcall(self.deps.pressKey, opt.key)
                 elseif opt.button ~= nil then
                     self.deps.activateButton(opt.button)
@@ -12032,7 +12031,8 @@ function Runner:update(now, opts, meX, meY, meZ)
             return
         end
 
-        -- 0.6) D'Arby's Rematch (Go Fish): нажимаем CHALLENGE в StandStorage -> "1. Just deal." -> автоигра через StandStorage RemoteEvent
+        -- 0.6) D'Arby's Rematch (Go Fish): запускаем FishStart(1) напрямую после паузы стола (без firesignal по CHALLENGE,
+        -- который ронял клиентский диалог StandStorage!), и играем Go Fish через StandStorage RemoteEvent
         local isDarby = stand_out_bounty.isDarbyObjective(ui.trackerObjective, ui.trackerTitle) or ui.darbyBountyPrompt == true
         local readyToClaimNow = string.find(objLow, "claim your reward", 1, true) ~= nil
             or (string.find(objLow, "return to petyr", 1, true) ~= nil and not hasIncompleteSteps)
@@ -12055,24 +12055,7 @@ function Runner:update(now, opts, meX, meY, meZ)
             if self.deps.stopFighting ~= nil then
                 pcall(self.deps.stopFighting)
             end
-            -- Если мы на экране StandStorage (партия ещё не идёт) и есть кнопка CHALLENGE — жмём именно кнопку CHALLENGE!
-            if not inDarbyGame and ui.darbyChallengeBtn ~= nil then
-                local waitCards = darbySt ~= nil and darbySt.readyAt ~= nil and now < darbySt.readyAt
-                if waitCards then
-                    self.statusText = title .. " | Go Fish: жду стол..."
-                    return
-                end
-                if now - self.lastAction >= 2.0 then
-                    self.lastAction = now
-                    if darbySt ~= nil then
-                        darbySt.busyUntil = math.max(darbySt.busyUntil or 0, now + 6.0)
-                    end
-                    self.deps.activateButton(ui.darbyChallengeBtn)
-                end
-                self.statusText = title .. " | жму CHALLENGE"
-                return
-            end
-            -- Во время переходной сценки (после нажатия CHALLENGE / "1. Just deal.") просто ждём появления диалога или карт
+            -- Во время переходной сценки (после FishStart / диалога) ждём появления карт, не телепортируясь
             if not inDarbyGame and not ui.standStorageOpen and darbyBusy then
                 self.statusText = title .. " | Go Fish: посадка за стол..."
                 return
@@ -12082,6 +12065,9 @@ function Runner:update(now, opts, meX, meY, meZ)
                     local cmd, arg, suffix = stand_out_bounty.nextDarbyMove(darbySt, now, ui.standStorageOpen)
                     if cmd ~= nil then
                         self.lastAction = now
+                        if cmd == "FishStart" then
+                            darbySt.busyUntil = math.max(darbySt.busyUntil or 0, now + 8.0)
+                        end
                         pcall(self.deps.sendStandStorage, cmd, arg)
                     end
                     self.statusText = title .. " | " .. (suffix or "Go Fish")
