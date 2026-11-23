@@ -6099,6 +6099,8 @@ function main.start(env)
                 end
             end,
             clickM1 = function()
+                -- Не кликаем M1 пока открыто меню Calcite (ClickGUI), чтобы не переключать настройки в центре экрана
+                if ui ~= nil and ui.menuOpen() then return end
                 local okTb, focused = pcall(function() return UserInputService:GetFocusedTextBox() end)
                 if okTb and focused ~= nil then return end
                 local vim = env.virtualInputManager
