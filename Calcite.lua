@@ -4971,6 +4971,12 @@ function main.start(env)
             end)
             handle._soBounty.remoteConn = nil
         end
+        if handle._soBounty.ssConn ~= nil then
+            pcall(function()
+                handle._soBounty.ssConn:Disconnect()
+            end)
+            handle._soBounty.ssConn = nil
+        end
         pcall(function()
             local cm = handle._charMove
             local ch = localPlayer and localPlayer.Character
@@ -6399,6 +6405,41 @@ function main.start(env)
                     pcall(function() rem:FireServer("Incident", payload) end)
                 end
             end,
+            darbyState = function()
+                local sb = handle._soBounty
+                if sb.darby == nil then
+                    sb.darby = stand_out_bounty.newDarbyState()
+                end
+                local pg = localPlayer:FindFirstChildOfClass("PlayerGui")
+                local ssGui = pg and pg:FindFirstChild("StandStorage")
+                local dGui = pg and pg:FindFirstChild("DarbyGoFish")
+                if ssGui ~= nil and ssGui.Enabled == true then
+                    sb.darby.storageOpen = true
+                elseif ssGui ~= nil and ssGui.Enabled == false and (dGui == nil or dGui.Enabled == false) then
+                    sb.darby.storageOpen = false
+                end
+                -- Если окно DarbyGoFish закрылось после старта игры (победа/поражение), сбрасываем active
+                if sb.darby.active and dGui ~= nil and dGui.Enabled == false
+                    and sb.darbyAt ~= nil and env.clock() - sb.darbyAt > 2.5 then
+                    sb.darby.active = false
+                end
+                return sb.darby
+            end,
+            sendStandStorage = function(cmd, arg)
+                local sb = handle._soBounty
+                local rem = sb.ssRemote
+                if rem == nil then
+                    pcall(function()
+                        local rs = game:GetService("ReplicatedStorage")
+                        local rems = rs and rs:FindFirstChild("Remotes")
+                        rem = rems and rems:FindFirstChild("StandStorage")
+                        sb.ssRemote = rem
+                    end)
+                end
+                if rem ~= nil then
+                    pcall(function() rem:FireServer(cmd, arg) end)
+                end
+            end,
             myPrompt = function()
                 local sb = handle._soBounty
                 local p = sb.prompt
@@ -7111,6 +7152,30 @@ function main.start(env)
                                         }
                                         sb.puzzleAt = env.clock()
                                     end
+                                end
+                            end)
+                        end
+                    end)
+                end
+                -- Подписываемся на ReplicatedStorage.Remotes.StandStorage.OnClientEvent для D'Arby Go Fish
+                if sb.ssConn == nil and not sb.ssTried then
+                    sb.ssTried = true
+                    pcall(function()
+                        local rs = game:GetService("ReplicatedStorage")
+                        local rems = rs and rs:FindFirstChild("Remotes")
+                        local ssRem = rems and rems:FindFirstChild("StandStorage")
+                        if ssRem ~= nil then
+                            sb.ssRemote = ssRem
+                            if sb.darby == nil then
+                                sb.darby = stand_out_bounty.newDarbyState()
+                            end
+                            sb.ssConn = ssRem.OnClientEvent:Connect(function(kind, data)
+                                if sb.darby == nil then
+                                    sb.darby = stand_out_bounty.newDarbyState()
+                                end
+                                stand_out_bounty.applyDarbyEvent(sb.darby, kind, data)
+                                if kind == "Fish" then
+                                    sb.darbyAt = env.clock()
                                 end
                             end)
                         end
@@ -10886,6 +10951,8 @@ function stand_out_bounty.readUi(playerGui)
         dialogueOptions = {}, -- { button, text, key }
         jewelryOpen = false,
         jewelryActionBtn = nil,
+        standStorageOpen = false,
+        darbyOpen = false,
         bounties = {}, -- { button, title, complete, isIncident }
     }
     if playerGui == nil then
@@ -10902,6 +10969,15 @@ function stand_out_bounty.readUi(playerGui)
             if actBtn ~= nil and actBtn.Visible == true then
                 info.jewelryActionBtn = actBtn
             end
+        end
+
+        local ssGui = playerGui:FindFirstChild("StandStorage")
+        if ssGui ~= nil and ssGui.Enabled == true then
+            info.standStorageOpen = true
+        end
+        local dGui = playerGui:FindFirstChild("DarbyGoFish")
+        if dGui ~= nil and dGui.Enabled == true then
+            info.darbyOpen = true
         end
 
         -- Проверяем активный диалог (Petyr claim/yes, а также квестовые NPC вроде Meryl Mei Qi и Dragona)
@@ -11231,7 +11307,7 @@ function stand_out_bounty.isMovingPrompt(prompt)
     return false
 end
 
--- Проверяет, просит ли текущая цель поговорить с квестовым NPC (Meryl Mei Qi, Dragona и т.п.)
+-- Проверяет, просит ли текущая цель поговорить с квестовым NPC (Meryl Mei Qi, Dragona, D'Arby и т.п.)
 function stand_out_bounty.isNpcObjective(objectiveText)
     if type(objectiveText) ~= "string" or objectiveText == "" then
         return false
@@ -11246,6 +11322,193 @@ function stand_out_bounty.isNpcObjective(objectiveText)
         or string.find(low, "speak to", 1, true) ~= nil
         or string.find(low, "meryl", 1, true) ~= nil
         or string.find(low, "dragona", 1, true) ~= nil
+        or string.find(low, "d'arby", 1, true) ~= nil
+        or string.find(low, "darby", 1, true) ~= nil
+        or string.find(low, "go fish", 1, true) ~= nil
+end
+
+function stand_out_bounty.isDarbyObjective(objectiveText, titleText)
+    local combined = string.lower((objectiveText or "") .. " " .. (titleText or ""))
+    return string.find(combined, "d'arby", 1, true) ~= nil
+        or string.find(combined, "darby", 1, true) ~= nil
+        or string.find(combined, "go fish", 1, true) ~= nil
+end
+
+-- Точные ID символов Go Fish из ReplicatedStorage.Remotes.StandStorage (проверено tools/standout_probe_darby2.lua)
+stand_out_bounty.darby_symbol_ids = {
+    Jelly = 1,
+    Fish = 2,
+    Beyond = 3,
+    Humu = 4,
+    Shark = 5,
+    Frog = 6,
+    Seal = 7,
+    Bass = 8,
+}
+
+function stand_out_bounty.newDarbyState()
+    return {
+        storageOpen = false,
+        active = false,
+        view = nil,
+        seq = 0,
+        darbyKnown = {},
+        lastMissedAt = {},
+        lastSentSeq = -1,
+        lastSentActionId = -1,
+        lastSentAt = -99,
+    }
+end
+
+-- Обновляет состояние партии D'Arby Go Fish по пакету StandStorage.OnClientEvent (чистый редьюсер).
+function stand_out_bounty.applyDarbyEvent(st, kind, data)
+    if st == nil or type(data) ~= "table" then
+        return
+    end
+    if kind == "Open" or kind == "State" then
+        if kind == "Open" then
+            st.storageOpen = true
+        end
+        return
+    end
+    if kind == "Close" then
+        st.storageOpen = false
+        st.active = false
+        return
+    end
+    if kind ~= "Fish" then
+        return
+    end
+
+    if data.Started == true then
+        st.active = true
+        st.view = nil
+        st.seq = 0
+        st.darbyKnown = {}
+        st.lastMissedAt = {}
+        st.lastSentSeq = -1
+        st.lastSentActionId = -1
+        st.lastSentAt = -99
+    end
+
+    if data.Ended == true or data.Finished == true or data.Closed == true or data.Winner ~= nil or data.Result ~= nil then
+        st.active = false
+    end
+
+    if type(data.Events) == "table" then
+        for _, ev in data.Events do
+            if type(ev) == "table" then
+                if type(ev.Seq) == "number" and ev.Seq >= st.seq then
+                    st.seq = ev.Seq
+                end
+                if type(ev.View) == "table" then
+                    st.view = ev.View
+                    st.active = true
+                end
+                local ek = ev.Kind
+                local sym = ev.Symbol
+                if ek == "Ask" and ev.By == "Darby" and type(sym) == "string" then
+                    -- Чтобы спросить карту в Go Fish, D'Arby обязан иметь хотя бы 1 такую у себя в руке!
+                    st.darbyKnown[sym] = true
+                elseif ek == "Give" and ev.To == "Darby" and type(sym) == "string" then
+                    st.darbyKnown[sym] = true
+                elseif ek == "Give" and ev.From == "Darby" and type(sym) == "string" then
+                    st.darbyKnown[sym] = nil
+                elseif ek == "Book" and type(sym) == "string" then
+                    st.darbyKnown[sym] = nil
+                elseif ek == "GoFish" and ev.By == "You" and type(sym) == "string" then
+                    st.darbyKnown[sym] = nil
+                    st.lastMissedAt[sym] = st.seq
+                elseif ek == "End" or ek == "Finish" or ek == "Win" or ek == "Lose" or ek == "Result" or ev.Winner ~= nil then
+                    st.active = false
+                end
+            end
+        end
+    end
+end
+
+-- Выбирает оптимальную карту для запроса у D'Arby:
+--   1) Гарантированное попадание (D'Arby сам спрашивал или брал у нас эту карту — берём где у нас больше копий)
+--   2) Иначе карта, по которой мы дольше всего не получали GoFish (при равенстве — больше копий в руке)
+function stand_out_bounty.pickDarbyAsk(hand, darbyKnown, lastMissedAt)
+    if type(hand) ~= "table" then
+        return nil
+    end
+    local bestKnown, bestKnownCnt = nil, -1
+    local bestOther, bestOtherMiss, bestOtherCnt = nil, math.huge, -1
+
+    for sym, cnt in pairs(hand) do
+        if type(sym) == "string" and type(cnt) == "number" and cnt > 0 and stand_out_bounty.darby_symbol_ids[sym] ~= nil then
+            if darbyKnown ~= nil and darbyKnown[sym] then
+                if cnt > bestKnownCnt or (cnt == bestKnownCnt and (bestKnown == nil or sym < bestKnown)) then
+                    bestKnown = sym
+                    bestKnownCnt = cnt
+                end
+            else
+                local missed = (lastMissedAt ~= nil and lastMissedAt[sym]) or 0
+                if missed < bestOtherMiss
+                    or (missed == bestOtherMiss and cnt > bestOtherCnt)
+                    or (missed == bestOtherMiss and cnt == bestOtherCnt and (bestOther == nil or sym < bestOther)) then
+                    bestOther = sym
+                    bestOtherMiss = missed
+                    bestOtherCnt = cnt
+                end
+            end
+        end
+    end
+
+    return bestKnown or bestOther
+end
+
+-- Возвращает следующую команду для StandStorage:FireServer(cmd, arg) + текст статуса.
+function stand_out_bounty.nextDarbyMove(st, now, uiOpen)
+    if st == nil then
+        return nil, nil, nil
+    end
+
+    if st.active and type(st.view) == "table" then
+        local v = st.view
+        local act = v.Action
+        if type(act) == "table" and act.Id ~= nil then
+            local already = (act.Id == st.lastSentActionId) and (now - st.lastSentAt < 2.0)
+            if not already then
+                if act.Kind == "Draw" then
+                    st.lastSentActionId = act.Id
+                    st.lastSentAt = now
+                    return "FishDraw", act.Id, "Go Fish: беру карту"
+                elseif act.Kind == "Give" then
+                    st.lastSentActionId = act.Id
+                    st.lastSentAt = now
+                    return "FishGive", act.Id, "Go Fish: отдаю карту"
+                end
+            end
+            return nil, nil, "Go Fish: ход"
+        end
+
+        if v.Turn == "You" then
+            local already = (st.seq == st.lastSentSeq) and (now - st.lastSentAt < 2.0)
+            if not already then
+                local sym = stand_out_bounty.pickDarbyAsk(v.Hand, st.darbyKnown, st.lastMissedAt)
+                if sym ~= nil then
+                    st.lastSentSeq = st.seq
+                    st.lastSentAt = now
+                    return "FishAsk", stand_out_bounty.darby_symbol_ids[sym], "Go Fish: прошу " .. sym
+                end
+            end
+            return nil, nil, "Go Fish: мой ход"
+        end
+        return nil, nil, "Go Fish: ход D'Arby"
+    end
+
+    if (st.storageOpen or uiOpen) and not st.active then
+        if now - st.lastSentAt >= 1.5 then
+            st.lastSentAt = now
+            return "FishStart", 1, "Go Fish: начинаю партию"
+        end
+        return nil, nil, "Go Fish: запуск..."
+    end
+
+    return nil, nil, nil
 end
 
 -- Выбирает нужный вариант ответа в диалоге квестового NPC (Meryl -> Dragona, Dragona -> Let's open them, и т.п.)
@@ -11556,17 +11819,19 @@ function Runner:update(now, opts, meX, meY, meZ)
     local ui = self.deps.readUi()
 
     local puzzle = self.deps.activePuzzle ~= nil and self.deps.activePuzzle() or nil
+    local darbySt = self.deps.darbyState ~= nil and self.deps.darbyState() or nil
     local inInspection = ui.jewelryOpen == true or ui.jewelryActionBtn ~= nil or puzzle ~= nil
+    local inDarbyGame = ui.darbyOpen == true or (darbySt ~= nil and darbySt.active == true)
 
     -- Парсим прогресс баунти (например 1/2 -> не завершено; 4/4 -> все шаги выполнены)
     local progCur, progTotal = stand_out_bounty.parseProgress(ui.trackerTitle)
     local hasIncompleteSteps = progCur ~= nil and progTotal ~= nil and progCur < progTotal
 
     -- Дополнительно сверяем с атрибутом BountyNavigationActive (CanvasGroup трекера может оставаться Visible=true),
-    -- но если на трекере явно видны незавершённые шаги (например MISSING FROG 1/2), таймер ИЛИ открыто окно JewelryInspection
-    -- (игра прячет BountyTracker пока открыт верстак!) — баунти точно активно!
-    local hasActiveBounty = ui.trackerActive or inInspection
-    if hasActiveBounty and not hasIncompleteSteps and not inInspection and self.deps.navActive ~= nil then
+    -- но если на трекере явно видны незавершённые шаги (например MISSING FROG 1/2), таймер ИЛИ открыто окно JewelryInspection / DarbyGoFish
+    -- (игра может прятать BountyTracker во время мини-игры!) — баунти точно активно!
+    local hasActiveBounty = ui.trackerActive or inInspection or inDarbyGame
+    if hasActiveBounty and not hasIncompleteSteps and not inInspection and not inDarbyGame and self.deps.navActive ~= nil then
         local okNav, nav = pcall(self.deps.navActive)
         if okNav and nav == false then
             local hasClock = string.find(ui.trackerTitle or "", "%d+:%d%d") ~= nil
@@ -11586,7 +11851,7 @@ function Runner:update(now, opts, meX, meY, meZ)
 
     -- Если на персонаже уже висит инцидент с мини-игрой, а включено «Пропускать мини-игры»,
     -- идём к Petyr и перезаписываем его на боевой/поисковый баунти!
-    local replaceIncident = hasActiveBounty and not inInspection and (opts.skipIncidents ~= false) and stand_out_bounty.isIncident(ui.trackerTitle)
+    local replaceIncident = hasActiveBounty and not inInspection and not inDarbyGame and (opts.skipIncidents ~= false) and stand_out_bounty.isIncident(ui.trackerTitle)
 
     -- Отслеживаем завершение баунти (трекер был активен -> исчез)
     if self.wasTrackerActive and not hasActiveBounty then
@@ -11652,6 +11917,43 @@ function Runner:update(now, opts, meX, meY, meZ)
                 end
             end
             self.statusText = title .. (puzzle ~= nil and puzzle.kind == "Assembly" and " | собираю ожерелье" or " | решаю замок")
+            return
+        end
+
+        -- 0.6) D'Arby's Rematch (Go Fish): автоигра через StandStorage RemoteEvent с идеальной памятью карт
+        local isDarby = stand_out_bounty.isDarbyObjective(ui.trackerObjective, ui.trackerTitle)
+        local readyToClaimNow = string.find(objLow, "claim your reward", 1, true) ~= nil
+            or (string.find(objLow, "return to petyr", 1, true) ~= nil and not hasIncompleteSteps)
+        if readyToClaimNow and (ui.standStorageOpen or (darbySt ~= nil and darbySt.storageOpen)) then
+            -- После победы над D'Arby закрываем StandStorage, чтобы камера/персонаж разблокировались для полёта к Petyr
+            if self.deps.sendStandStorage ~= nil and now - self.lastAction >= 0.6 then
+                self.lastAction = now
+                pcall(self.deps.sendStandStorage, "Close", nil)
+                if darbySt ~= nil then
+                    darbySt.storageOpen = false
+                    darbySt.active = false
+                end
+            end
+            self.statusText = title .. " | выхожу из D'Arby"
+            return
+        end
+        if not readyToClaimNow and (inDarbyGame or (isDarby and (ui.standStorageOpen or (darbySt ~= nil and darbySt.storageOpen)))) then
+            self:_releasePrompt()
+            if self.deps.stopFighting ~= nil then
+                pcall(self.deps.stopFighting)
+            end
+            if darbySt ~= nil and self.deps.sendStandStorage ~= nil then
+                if now - self.lastAction >= 0.4 then
+                    local cmd, arg, suffix = stand_out_bounty.nextDarbyMove(darbySt, now, ui.standStorageOpen)
+                    if cmd ~= nil then
+                        self.lastAction = now
+                        pcall(self.deps.sendStandStorage, cmd, arg)
+                    end
+                    self.statusText = title .. " | " .. (suffix or "Go Fish")
+                    return
+                end
+            end
+            self.statusText = title .. " | Go Fish"
             return
         end
 
