@@ -4963,6 +4963,12 @@ function main.start(env)
                 handle._soBounty.runner:stop()
             end)
         end
+        if handle._soBounty.remoteConn ~= nil then
+            pcall(function()
+                handle._soBounty.remoteConn:Disconnect()
+            end)
+            handle._soBounty.remoteConn = nil
+        end
 
         if walker ~= nil then
             pcall(function()
@@ -6347,6 +6353,38 @@ function main.start(env)
             myMobs = function()
                 return handle._soBounty.mobs
             end,
+            activePuzzle = function()
+                local sb = handle._soBounty
+                if sb.puzzle ~= nil and sb.puzzle.open ~= false then
+                    local pg = localPlayer:FindFirstChildOfClass("PlayerGui")
+                    local jw = pg and pg:FindFirstChild("JewelryInspection")
+                    if jw ~= nil and jw.Enabled == true then
+                        return sb.puzzle
+                    end
+                    -- Если GUI закрылось после задержки > 1.5 с с момента получения пакета — очищаем
+                    if sb.puzzleAt ~= nil and env.clock() - sb.puzzleAt > 1.5 then
+                        sb.puzzle = nil
+                    else
+                        return sb.puzzle
+                    end
+                end
+                return nil
+            end,
+            sendIncident = function(payload)
+                local sb = handle._soBounty
+                local rem = sb.remote
+                if rem == nil then
+                    pcall(function()
+                        local rs = game:GetService("ReplicatedStorage")
+                        local rems = rs and rs:FindFirstChild("Remotes")
+                        rem = rems and rems:FindFirstChild("Bounty")
+                        sb.remote = rem
+                    end)
+                end
+                if rem ~= nil then
+                    pcall(function() rem:FireServer("Incident", payload) end)
+                end
+            end,
             myPrompt = function()
                 local sb = handle._soBounty
                 local p = sb.prompt
@@ -7026,6 +7064,38 @@ function main.start(env)
                     pNames[pl.Name] = true
                 end
                 local sb = handle._soBounty
+                -- Подписываемся на ReplicatedStorage.Remotes.Bounty.OnClientEvent для перехвата головоломок (Cheap Jewelry)
+                if sb.remoteConn == nil and not sb.remoteTried then
+                    sb.remoteTried = true
+                    pcall(function()
+                        local rs = game:GetService("ReplicatedStorage")
+                        local rems = rs and rs:FindFirstChild("Remotes")
+                        local bRem = rems and rems:FindFirstChild("Bounty")
+                        if bRem ~= nil then
+                            sb.remote = bRem
+                            sb.remoteConn = bRem.OnClientEvent:Connect(function(kind, bountyId, sub, data)
+                                if kind == "Incident" and sub == "Puzzle" and type(data) == "table" then
+                                    if data.Open == false then
+                                        sb.puzzle = nil
+                                        return
+                                    end
+                                    sb.puzzle = {
+                                        id = bountyId,
+                                        token = data.Token,
+                                        kind = data.Kind,
+                                        version = data.Version or 0,
+                                        target = data.Target,
+                                        values = data.Values,
+                                        placed = data.Placed,
+                                        open = true,
+                                        attempted = {},
+                                    }
+                                    sb.puzzleAt = env.clock()
+                                end
+                            end)
+                        end
+                    end)
+                end
                 local tx, ty, tz = nil, nil, nil
                 local okT, pos = pcall(function() return localPlayer:GetAttribute("VisibleBountyTrackerPosition") end)
                 if okT and pos ~= nil and pos.X ~= nil and pos.Y ~= nil and pos.Z ~= nil then
@@ -7033,6 +7103,7 @@ function main.start(env)
                 end
                 local uiSnap = stand_out_bounty.readUi(localPlayer:FindFirstChildOfClass("PlayerGui"))
                 sb.mobs = stand_out_bounty.scanMyMobs(workspace, localPlayer.UserId, pNames, localPlayer.Name, tx, ty, tz, uiSnap.trackerObjective)
+                local allowNpc = stand_out_bounty.isNpcObjective(uiSnap.trackerObjective)
                 -- Быстрый скан нашей папки BountyWorld.Party_<UserId> (0.25 с) для мгновенного перехода Catch1->Catch2->Stash->Reward;
                 -- тяжёлый фолбэк по Workspace.Game — не чаще раза в 1.0 с
                 local cachedOk = false
@@ -7046,13 +7117,20 @@ function main.start(env)
                         local okA, avail = pcall(function() return sb.prompt:GetAttribute("StoryPromptAvailable") end)
                         if okA and avail == false then cachedOk = false end
                     end
+                    -- Если трекер переехал далеко (например, с Meryl на Dragona) и это статичный промпт — сбрасываем кэш
+                    if cachedOk and tx ~= nil and sb.px ~= nil and not stand_out_bounty.isMovingPrompt(sb.prompt) then
+                        local ddx, ddy, ddz = sb.px - tx, sb.py - ty, sb.pz - tz
+                        if ddx * ddx + ddy * ddy + ddz * ddz > 400 then
+                            cachedOk = false
+                        end
+                    end
                 end
                 if not cachedOk then
                     local allowFallback = (now - sb.lastPromptScan >= 1.0)
                     if allowFallback then
                         sb.lastPromptScan = now
                     end
-                    sb.prompt, sb.px, sb.py, sb.pz = stand_out_bounty.findMyPrompt(workspace, localPlayer.UserId, tx, ty, tz, allowFallback)
+                    sb.prompt, sb.px, sb.py, sb.pz = stand_out_bounty.findMyPrompt(workspace, localPlayer.UserId, tx, ty, tz, allowFallback, allowNpc)
                 end
             end
 
@@ -10595,15 +10673,15 @@ stand_out_bounty.open_retry = 1.2
 stand_out_bounty.begin_wait = 1.8
 stand_out_bounty.travel_retry = 2.0
 
--- Инциденты с ручными мини-играми (рисование, слайдеры ювелирки, караоке и т.п.) из Modules.Bounty.IncidentRules.Names.
--- "Small Change, Big Problem" (Harvest) и "Trust Me on This One" (Hey Ya!) исключены, т.к. полностью поддерживаются автопрохождением!
+-- Инциденты с ручными мини-играми (рисование, караоке и т.п.) из Modules.Bounty.IncidentRules.Names.
+-- "Small Change, Big Problem" (Harvest), "Trust Me on This One" (Hey Ya!) и
+-- "Cheap Jewelry, Expensive Problem" (Dragona/Meryl) исключены — полностью поддерживаются автопрохождением!
 local INCIDENT_NAMES = {
     ["iced tea run"] = true,
     ["usagi's karaoke night"] = true,
     ["paco's challenge"] = true,
     ["rohan's drawing contest"] = true,
     ["your personal helper friend"] = true,
-    ["cheap jewelry, expensive problem"] = true,
 }
 
 local Runner = {}
@@ -10715,6 +10793,9 @@ function stand_out_bounty.readUi(playerGui)
         beginBtn = nil,
         openEvent = nil,
         claimBtn = nil,
+        yesBtn = nil,
+        dialogueOptions = {}, -- { button, text, key }
+        jewelryOpen = false,
         bounties = {}, -- { button, title, complete, isIncident }
     }
     if playerGui == nil then
@@ -10722,13 +10803,38 @@ function stand_out_bounty.readUi(playerGui)
     end
 
     pcall(function()
-        -- Проверяем диалог сдачи награды у Petyr (PlayerGui.Dialogue -> "1. Claim my bounty reward.")
+        local jw = playerGui:FindFirstChild("JewelryInspection")
+        if jw ~= nil and jw.Enabled == true then
+            info.jewelryOpen = true
+        end
+
+        -- Проверяем активный диалог (Petyr claim/yes, а также квестовые NPC вроде Meryl Mei Qi и Dragona)
         local dlg = playerGui:FindFirstChild("Dialogue")
         if dlg ~= nil and (dlg.Enabled == nil or dlg.Enabled == true) and dlg.GetDescendants ~= nil then
+            local seenKeys = {}
+            local function recordOption(btn, txt)
+                if type(txt) ~= "string" or txt == "" then return end
+                local plain = string.gsub(txt, "<[^>]+>", "")
+                local low = string.lower(plain)
+                if string.find(low, "claim", 1, true) ~= nil and string.find(low, "reward", 1, true) ~= nil then
+                    info.claimBtn = btn
+                elseif string.match(low, "^%s*1%.%s*yes%s*$") ~= nil then
+                    info.yesBtn = btn
+                end
+                local key = string.match(plain, "^%s*(%d)%.")
+                if key ~= nil and not seenKeys[key] then
+                    seenKeys[key] = true
+                    table.insert(info.dialogueOptions, {
+                        button = btn,
+                        text = plain,
+                        key = key,
+                    })
+                end
+            end
             for _, d in dlg:GetDescendants() do
                 if (safeIsA(d, "TextButton") or safeIsA(d, "ImageButton")) and d.Visible ~= false then
                     local txt = ""
-                    if safeIsA(d, "TextButton") and type(d.Text) == "string" then
+                    if safeIsA(d, "TextButton") and type(d.Text) == "string" and d.Text ~= "" then
                         txt = d.Text
                     elseif d.GetDescendants ~= nil then
                         for _, sub in d:GetDescendants() do
@@ -10738,12 +10844,18 @@ function stand_out_bounty.readUi(playerGui)
                             end
                         end
                     end
-                    local low = string.lower(txt)
-                    if string.find(low, "claim", 1, true) ~= nil and string.find(low, "reward", 1, true) ~= nil then
-                        info.claimBtn = d
-                        break
-                    elseif string.match(low, "^%s*1%.%s*yes%s*$") ~= nil then
-                        info.yesBtn = d
+                    recordOption(d, txt)
+                end
+            end
+            -- В Stand Out опции диалога часто лежат в TextLabel "Box" (1. ..., 2. ..., 3. ...)
+            if #info.dialogueOptions == 0 then
+                for _, d in dlg:GetDescendants() do
+                    if safeIsA(d, "TextLabel") and d.Visible ~= false and type(d.Text) == "string" and d.Text ~= "" then
+                        local btn = d.Parent
+                        if btn == nil or not (safeIsA(btn, "TextButton") or safeIsA(btn, "ImageButton")) then
+                            btn = d
+                        end
+                        recordOption(btn, d.Text)
                     end
                 end
             end
@@ -11023,10 +11135,131 @@ function stand_out_bounty.isMovingPrompt(prompt)
     return false
 end
 
+-- Проверяет, просит ли текущая цель поговорить с квестовым NPC (Meryl Mei Qi, Dragona и т.п.)
+function stand_out_bounty.isNpcObjective(objectiveText)
+    if type(objectiveText) ~= "string" or objectiveText == "" then
+        return false
+    end
+    local low = string.lower(objectiveText)
+    if string.find(low, "claim your reward", 1, true) ~= nil
+        or string.find(low, "return to petyr", 1, true) ~= nil then
+        return false
+    end
+    return string.find(low, "ask ", 1, true) ~= nil
+        or string.find(low, "talk to", 1, true) ~= nil
+        or string.find(low, "speak to", 1, true) ~= nil
+        or string.find(low, "meryl", 1, true) ~= nil
+        or string.find(low, "dragona", 1, true) ~= nil
+end
+
+-- Выбирает нужный вариант ответа в диалоге квестового NPC (Meryl -> Dragona, Dragona -> Let's open them, и т.п.)
+function stand_out_bounty.pickDialogueOption(options, objLow)
+    if type(options) ~= "table" or #options == 0 then
+        return nil
+    end
+    local function findMatch(patterns)
+        for _, opt in options do
+            local low = string.lower(opt.text or "")
+            for _, pat in patterns do
+                if string.find(low, pat, 1, true) ~= nil then
+                    return opt
+                end
+            end
+        end
+        return nil
+    end
+
+    local preferred = findMatch({ "dragona", "let's open", "open them" })
+        or findMatch({ "necklace", "stones", "restored", "fixed", "rebuilt", "here", "ready", "yes" })
+    if preferred ~= nil then
+        return preferred
+    end
+
+    -- Фолбэк: первый вариант, который не является отказом/побочным диалогом
+    local ignore = { "i'll be back", "give me a minute", "later", "bye", "driving practice", "fashion lessons", "never mind" }
+    for _, opt in options do
+        local low = string.lower(opt.text or "")
+        local skip = false
+        for _, bad in ignore do
+            if string.find(low, bad, 1, true) ~= nil then
+                skip = true
+                break
+            end
+        end
+        if not skip then
+            return opt
+        end
+    end
+    return options[1]
+end
+
+-- Генерирует следующий пакет решения головоломки Cheap Jewelry (Rails -> PlaceClasp, Assembly -> FitComponent).
+function stand_out_bounty.nextPuzzleMove(puzzle)
+    if type(puzzle) ~= "table" or puzzle.open == false then
+        return nil
+    end
+    puzzle.attempted = puzzle.attempted or {}
+
+    if puzzle.kind == "Rails" and type(puzzle.target) == "table" then
+        local rows = {}
+        for r in pairs(puzzle.target) do
+            if type(r) == "number" then
+                table.insert(rows, r)
+            end
+        end
+        table.sort(rows)
+        for _, row in rows do
+            local want = puzzle.target[row]
+            local cur = type(puzzle.values) == "table" and puzzle.values[row] or nil
+            if cur ~= want and not puzzle.attempted[row] then
+                puzzle.attempted[row] = true
+                return {
+                    Action = "PlaceClasp",
+                    Id = puzzle.id,
+                    Token = puzzle.token,
+                    Row = row,
+                    Notch = want,
+                    Version = puzzle.version or 0,
+                }
+            end
+        end
+        return nil
+    end
+
+    if puzzle.kind == "Assembly" then
+        local placedMap = {}
+        if type(puzzle.placed) == "table" then
+            for k, v in pairs(puzzle.placed) do
+                if type(k) == "string" and v then
+                    placedMap[k] = true
+                elseif type(v) == "string" then
+                    placedMap[v] = true
+                end
+            end
+        end
+        local order = { "Heart", "Star", "Moon", "Clasp" }
+        for _, comp in order do
+            if not placedMap[comp] and not puzzle.attempted[comp] then
+                puzzle.attempted[comp] = true
+                return {
+                    Action = "FitComponent",
+                    Id = puzzle.id,
+                    Token = puzzle.token,
+                    Component = comp,
+                    Version = puzzle.version or 0,
+                }
+            end
+        end
+        return nil
+    end
+
+    return nil
+end
+
 -- Ищет активный ProximityPrompt баунти: сначала в Workspace.Game.BountyWorld.Party_<userId>,
--- а если не найден и allowWorldFallback ~= false и известна координата трекера (tx, ty, tz) —
--- ближайший активный ProximityPrompt в радиусе 25 студов от точки трекера (кроме NPC-промптов).
-function stand_out_bounty.findMyPrompt(workspace, userId, tx, ty, tz, allowWorldFallback)
+-- если allowNpcFallback == true — также проверяет квестовых NPC в Workspace.Game.NPCs рядом с трекером (Meryl, Dragona),
+-- а иначе при allowWorldFallback ~= false — ближайший активный промпт в радиусе 25 студов от трекера (кроме NPC).
+function stand_out_bounty.findMyPrompt(workspace, userId, tx, ty, tz, allowWorldFallback, allowNpcFallback)
     if workspace == nil or userId == nil then
         return nil, nil, nil, nil
     end
@@ -11066,7 +11299,33 @@ function stand_out_bounty.findMyPrompt(workspace, userId, tx, ty, tz, allowWorld
         end
     end
 
-    -- Если сцена инцидента в Party_<userId> сама содержит промпты (Harvest / Hey Ya!), но сейчас все выключены
+    -- 1.5) Квестовые NPC (Meryl Mei Qi, Dragona в Cheap Jewelry): ищем промпт внутри Workspace.Game.NPCs рядом с трекером
+    if allowNpcFallback == true and tx ~= nil and ty ~= nil and tz ~= nil then
+        local npcsFolder = gameFolder:FindFirstChild("NPCs")
+        if npcsFolder ~= nil and npcsFolder.GetDescendants ~= nil then
+            local bestNpc, bestX, bestY, bestZ = nil, nil, nil, nil
+            local bestDist2 = 15 * 15
+            for _, d in npcsFolder:GetDescendants() do
+                if promptUsable(d) then
+                    local x, y, z = stand_out_bounty.promptPosition(d)
+                    if x ~= nil then
+                        local dx, dy, dz = x - tx, y - ty, z - tz
+                        local dist2 = dx * dx + dy * dy + dz * dz
+                        if dist2 <= bestDist2 then
+                            bestDist2 = dist2
+                            bestNpc = d
+                            bestX, bestY, bestZ = x, y, z
+                        end
+                    end
+                end
+            end
+            if bestNpc ~= nil then
+                return bestNpc, bestX, bestY, bestZ
+            end
+        end
+    end
+
+    -- Если сцена инцидента в Party_<userId> сама содержит промпты (Harvest / Hey Ya! / Jewelry), но сейчас все выключены
     -- (идёт сценка или шаг "Stand still on the gold square") — не хватаем случайные промпты мира рядом!
     if partyOwnsPrompts then
         return nil, nil, nil, nil
@@ -11256,6 +11515,50 @@ function Runner:update(now, opts, meX, meY, meZ)
                 end
             end
             self.statusText = "Забираю награду..."
+            return
+        end
+
+        -- 0.5) Активная головоломка инцидента (Cheap Jewelry: замки Rails / сборка ожерелья Assembly)
+        local puzzle = self.deps.activePuzzle ~= nil and self.deps.activePuzzle() or nil
+        if puzzle ~= nil or ui.jewelryOpen then
+            self:_releasePrompt()
+            if self.deps.stopFighting ~= nil then
+                pcall(self.deps.stopFighting)
+            end
+            if puzzle ~= nil and self.deps.sendIncident ~= nil then
+                if now - self.lastAction >= 0.18 then
+                    local move = stand_out_bounty.nextPuzzleMove(puzzle)
+                    if move ~= nil then
+                        self.lastAction = now
+                        pcall(self.deps.sendIncident, move)
+                    elseif now - self.lastAction >= 1.5 then
+                        -- Если сервер ещё не закрыл окно — сбросим attempted для повторной отправки оставшихся деталей
+                        puzzle.attempted = {}
+                        self.lastAction = now - 1.2
+                    end
+                end
+            end
+            self.statusText = title .. (puzzle ~= nil and puzzle.kind == "Assembly" and " | собираю ожерелье" or " | решаю замок")
+            return
+        end
+
+        -- 0.75) Открыт диалог квестового NPC (Meryl Mei Qi / Dragona в Cheap Jewelry и др.)
+        if ui.dialogueOptions ~= nil and #ui.dialogueOptions > 0 and stand_out_bounty.isNpcObjective(objLow) then
+            self:_releasePrompt()
+            if self.deps.stopFighting ~= nil then
+                pcall(self.deps.stopFighting)
+            end
+            local opt = stand_out_bounty.pickDialogueOption(ui.dialogueOptions, objLow)
+            if opt ~= nil and now - self.lastAction >= 0.5 then
+                self.lastAction = now
+                if opt.button ~= nil then
+                    self.deps.activateButton(opt.button)
+                end
+                if opt.key ~= nil and self.deps.pressKey ~= nil then
+                    pcall(self.deps.pressKey, opt.key)
+                end
+            end
+            self.statusText = title .. " | диалог NPC"
             return
         end
 
