@@ -7195,13 +7195,16 @@ function main.start(env)
                             sb.remote = bRem
                             sb.remoteConn = bRem.OnClientEvent:Connect(function(kind, bountyId, sub, data)
                                 if kind == "Incident" and type(data) == "table" then
-                                    if sub == "Puzzle" or (sb.puzzle ~= nil and data.Token ~= nil and data.Token == sb.puzzle.token) then
+                                    local isPuzzleEvt = sub == "Puzzle"
+                                        or (sb.puzzle ~= nil and data.Token ~= nil and data.Token == sb.puzzle.token)
+                                        or (sb.puzzle ~= nil and type(sub) == "string" and string.find(string.lower(sub), "puzzle", 1, true) ~= nil)
+                                    if isPuzzleEvt then
                                         if data.Open == false then
                                             sb.puzzle = nil
                                             return
                                         end
                                         local ver = data.Version
-                                        if ver == nil and sb.puzzle ~= nil then ver = sb.puzzle.version end
+                                        if ver == nil and sb.puzzle ~= nil then ver = sb.puzzle.serverVersion end
                                         ver = ver or 0
                                         sb.puzzle = {
                                             id = bountyId or (sb.puzzle and sb.puzzle.id),
@@ -7209,6 +7212,7 @@ function main.start(env)
                                             kind = data.Kind or (sb.puzzle and sb.puzzle.kind),
                                             version = ver,
                                             serverVersion = ver,
+                                            retryStep = 0,
                                             target = data.Target or (sb.puzzle and sb.puzzle.target),
                                             values = data.Values or (sb.puzzle and sb.puzzle.values),
                                             placed = data.Placed or (sb.puzzle and sb.puzzle.placed),
@@ -11707,6 +11711,10 @@ function stand_out_bounty.nextPuzzleMove(puzzle)
         return nil
     end
     puzzle.attempted = puzzle.attempted or {}
+    local ver = puzzle.version
+    if ver == nil then
+        ver = puzzle.serverVersion or 0
+    end
 
     if puzzle.kind == "Rails" and type(puzzle.target) == "table" then
         local rows = {}
@@ -11721,8 +11729,6 @@ function stand_out_bounty.nextPuzzleMove(puzzle)
             local cur = type(puzzle.values) == "table" and puzzle.values[row] or nil
             if cur ~= want and not puzzle.attempted[row] then
                 puzzle.attempted[row] = true
-                local ver = puzzle.version or 0
-                puzzle.version = ver + 1
                 return {
                     Action = "PlaceClasp",
                     Id = puzzle.id,
@@ -11751,8 +11757,6 @@ function stand_out_bounty.nextPuzzleMove(puzzle)
         for _, comp in order do
             if not placedMap[comp] and not puzzle.attempted[comp] then
                 puzzle.attempted[comp] = true
-                local ver = puzzle.version or 0
-                puzzle.version = ver + 1
                 return {
                     Action = "FitComponent",
                     Id = puzzle.id,
@@ -12047,24 +12051,32 @@ function Runner:update(now, opts, meX, meY, meZ)
             end
             -- Если появилась финальная кнопка действия ("TAKE HOWLER RECORD") — сразу жмём её!
             if ui.jewelryActionBtn ~= nil then
-                if now - self.lastAction >= 0.45 then
+                if now - self.lastAction >= 0.6 then
                     self.lastAction = now
-                    self.deps.activateButton(ui.jewelryActionBtn)
+                    local clicked = false
+                    if self.deps.clickUiButton ~= nil then
+                        local okC, resC = pcall(self.deps.clickUiButton, ui.jewelryActionBtn)
+                        clicked = okC and resC == true
+                    end
+                    if not clicked and self.deps.activateButton ~= nil then
+                        self.deps.activateButton(ui.jewelryActionBtn)
+                    end
                 end
                 self.statusText = title .. " | забираю улику"
                 return
             end
             if puzzle ~= nil and self.deps.sendIncident ~= nil then
-                if now - self.lastAction >= 0.25 then
+                if now - self.lastAction >= 0.35 then
                     local move = stand_out_bounty.nextPuzzleMove(puzzle)
                     if move ~= nil then
                         self.lastAction = now
                         pcall(self.deps.sendIncident, move)
                     elseif now - self.lastAction >= 1.6 then
-                        -- Если сервер ещё не закрыл окно — пробуем повторно с актуальной серверной версией
+                        -- Если сервер ещё не закрыл окно — повторяем проход (сначала с serverVersion, затем с +1..+3 на случай скрытого инкремента)
                         puzzle.attempted = {}
-                        puzzle.version = puzzle.serverVersion or 0
-                        self.lastAction = now - 1.3
+                        puzzle.retryStep = ((puzzle.retryStep or 0) + 1) % 4
+                        puzzle.version = (puzzle.serverVersion or 0) + puzzle.retryStep
+                        self.lastAction = now - 1.25
                     end
                 end
             end
