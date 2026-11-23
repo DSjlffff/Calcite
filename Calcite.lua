@@ -1315,6 +1315,7 @@ function env.fromGlobals()
         fireclickdetector = fireclickdetector,
         firesignal = firesignal,
         getconnections = getconnections,
+        queueOnTeleport = queue_on_teleport or queueonteleport,
         getupvalues = debug and debug.getupvalues,
         -- require as the executor gives it: the modules of the script are glued with a require of their own, which
         -- would shadow it; for reading what a module of the game says about a weapon
@@ -3223,6 +3224,7 @@ local pairs = {
     ["ESP оружия"] = "Weapon ESP", ["ESP предметов"] = "Item ESP", ["Абилки E/R"] = "E/R abilities",
     ["Автоподбор"] = "Auto pick up", ["Предметы на карте"] = "World items",
     ["Закопанные припасы"] = "Buried supplies", ["Возвращаться назад"] = "Return to start",
+    ["Смена сервера если пусто"] = "Hop if no items",
     ["Фильтр мобов"] = "Mob filter", ["Все мобы"] = "All mobs",
     ["Без боссов"] = "No bosses", ["Только боссы"] = "Bosses only",
     ["Имя моба"] = "Mob name", ["Скиллы"] = "Skills",
@@ -5945,6 +5947,108 @@ function main.start(env)
         holdEnd = function(prompt)
             prompt:InputHoldEnd()
         end,
+        serverHop = function()
+            if handle._soPick.hopping then
+                return
+            end
+            handle._soPick.hopping = true
+            local function doHop()
+                local okHop, errHop = pcall(function()
+                    local placeId = game.PlaceId
+                    local jobId = game.JobId
+                    local visited = {}
+                    local recent = {}
+                    local histFile = "calcite_so_hops.txt"
+                    if type(env.isfile) == "function" and type(env.readfile) == "function" then
+                        local okR, raw = pcall(function()
+                            return env.isfile(histFile) and env.readfile(histFile) or ""
+                        end)
+                        if okR and type(raw) == "string" then
+                            for line in string.gmatch(raw, "[^\r\n]+") do
+                                if line ~= "" and not visited[line] then
+                                    visited[line] = true
+                                    table.insert(recent, line)
+                                end
+                            end
+                        end
+                    end
+                    if type(jobId) == "string" and jobId ~= "" and not visited[jobId] then
+                        visited[jobId] = true
+                        table.insert(recent, jobId)
+                    end
+                    while #recent > 15 do
+                        table.remove(recent, 1)
+                    end
+                    if type(env.writefile) == "function" then
+                        pcall(env.writefile, histFile, table.concat(recent, "\n"))
+                    end
+
+                    -- Ставим автозапуск Calcite после телепорта, если экзекутор умеет queue_on_teleport
+                    if type(env.queueOnTeleport) == "function" then
+                        local hasLocal = false
+                        if type(env.isfile) == "function" then
+                            local okL, exists = pcall(env.isfile, "Calcite/Calcite.lua")
+                            hasLocal = okL and exists == true
+                        end
+                        local reloadCode = hasLocal
+                            and 'loadstring(readfile("Calcite/Calcite.lua"))()'
+                            or 'loadstring(game:HttpGet("https://raw.githubusercontent.com/DSjlffff/Calcite/main/Calcite.lua"))()'
+                        pcall(env.queueOnTeleport, reloadCode)
+                    end
+
+                    local chosen = nil
+                    local HttpService = game:GetService("HttpService")
+                    if type(env.httpGet) == "function" and HttpService ~= nil then
+                        local cursor = nil
+                        local pool = {}
+                        for _ = 1, 3 do
+                            local url = "https://games.roblox.com/v1/games/" .. tostring(placeId)
+                                .. "/servers/Public?sortOrder=Asc&limit=100"
+                            if cursor ~= nil and cursor ~= "" then
+                                url = url .. "&cursor=" .. tostring(cursor)
+                            end
+                            local okGet, body = pcall(env.httpGet, url)
+                            if not okGet or type(body) ~= "string" then
+                                break
+                            end
+                            local okDec, decoded = pcall(function()
+                                return HttpService:JSONDecode(body)
+                            end)
+                            if not okDec or type(decoded) ~= "table" or type(decoded.data) ~= "table" then
+                                break
+                            end
+                            for _, srv in decoded.data do
+                                table.insert(pool, srv)
+                            end
+                            chosen = stand_out_pickup.pickServer(pool, jobId, visited)
+                            if chosen ~= nil and not visited[chosen] then
+                                break
+                            end
+                            cursor = decoded.nextPageCursor
+                            if cursor == nil or cursor == "" then
+                                break
+                            end
+                        end
+                    end
+
+                    local TeleportService = game:GetService("TeleportService")
+                    if chosen ~= nil then
+                        TeleportService:TeleportToPlaceInstance(placeId, chosen, localPlayer)
+                    else
+                        TeleportService:Teleport(placeId, localPlayer)
+                    end
+                end)
+                if not okHop then
+                    warn("Calcite StandOutPickup hop: " .. tostring(errHop))
+                end
+                handle._soPick.hopping = false
+            end
+            if env.task ~= nil and type(env.task.spawn) == "function" then
+                env.task.spawn(doHop)
+            else
+                doHop()
+            end
+        end,
     })
 
     do
@@ -7706,6 +7810,7 @@ function menu.create(deps)
     toggle(soFarm.itemGroup, "StandOutPickupWorld", "Предметы на карте", settings.standOutPickup, "worldItems")
     toggle(soFarm.itemGroup, "StandOutPickupBuried", "Закопанные припасы", settings.standOutPickup, "buried")
     toggle(soFarm.itemGroup, "StandOutPickupReturn", "Возвращаться назад", settings.standOutPickup, "returnBack")
+    toggle(soFarm.itemGroup, "StandOutPickupHop", "Смена сервера если пусто", settings.standOutPickup, "hopWhenEmpty")
     soFarm.pickupCount = soFarm.itemGroup:AddLabel("Подобрано: 0")
 
     soFarm.mobGroup = farmTab:AddLeftGroupbox("Mob Farming")
@@ -9666,6 +9771,7 @@ function settings.defaults(mode)
             worldItems = true,
             buried = true,
             returnBack = true,
+            hopWhenEmpty = false,
         },
         -- Stand Out Mob Farming: фарм враждебных мобов (stand_out_mobs.lua)
         standOutMobs = {
@@ -11872,6 +11978,8 @@ stand_out_pickup.settle = 0.15     -- пауза после телепорта, 
 stand_out_pickup.extra_hold = 0.12 -- запас к HoldDuration промпта
 stand_out_pickup.give_up = 1.5     -- сколько ждать исчезновения предмета после подбора
 stand_out_pickup.skip_for = 10.0   -- на сколько секунд пропустить предмет, который не подобрался
+stand_out_pickup.hop_delay = 3.0   -- сколько секунд карта должна быть пустой перед сменой сервера
+stand_out_pickup.hop_retry = 12.0  -- пауза между повторными попытками телепорта, если сервер оказался полон
 
 local Picker = {}
 Picker.__index = Picker
@@ -12045,11 +12153,45 @@ function stand_out_pickup.scan(workspace, opts)
     return found
 end
 
+-- Выбирает подходящий открытый сервер из списка Roblox Games API (предпочитает малолюдные и непосещённые).
+function stand_out_pickup.pickServer(servers, currentJobId, visited)
+    if type(servers) ~= "table" then
+        return nil
+    end
+
+    local function findBest(ignoreVisited)
+        local bestId, bestPlaying = nil, math.huge
+        for _, srv in servers do
+            if type(srv) ~= "table" then
+                continue
+            end
+            local id = srv.id
+            local playing = tonumber(srv.playing)
+            local maxP = tonumber(srv.maxPlayers)
+            if type(id) == "string" and id ~= "" and id ~= currentJobId
+                and playing ~= nil and maxP ~= nil and playing < maxP then
+                if ignoreVisited or visited == nil or not visited[id] then
+                    -- Предпочитаем серверы с меньшим числом игроков (больше нетронутых предметов)
+                    local score = playing > 0 and playing or (maxP + 1)
+                    if score < bestPlaying then
+                        bestPlaying = score
+                        bestId = id
+                    end
+                end
+            end
+        end
+        return bestId
+    end
+
+    return findBest(false) or findBest(true)
+end
+
 -- deps:
 --   teleportTo(x, y, z)
 --   firePrompt(prompt)    (optional)
 --   holdBegin(prompt)
 --   holdEnd(prompt)
+--   serverHop()           (optional, вызывается когда на сервере нет предметов и включено hopWhenEmpty)
 --   positionOf(entry) -> x, y, z or nil  (optional, defaults to stand_out_pickup.entryPosition)
 function stand_out_pickup.new(deps)
     return setmetatable({
@@ -12061,6 +12203,8 @@ function stand_out_pickup.new(deps)
         taken = 0,
         returnPos = nil,     -- { x, y, z } сохранённая точка до начала серии подборов
         lastTargetName = "",
+        emptySince = nil,    -- когда карта стала пустой (для отсчёта hop_delay)
+        lastHopTry = -99,
     }, Picker)
 end
 
@@ -12072,6 +12216,8 @@ function Picker:stop()
     self.target = nil
     self.returnPos = nil
     self.lastTargetName = ""
+    self.emptySince = nil
+    self.lastHopTry = -99
 end
 
 function Picker:update(now, entries, opts, meX, meY, meZ)
@@ -12207,9 +12353,30 @@ function Picker:update(now, entries, opts, meX, meY, meZ)
                 self.deps.teleportTo(rp.x, rp.y, rp.z)
             end
         end
+        if opts.hopWhenEmpty and (opts.worldItems or opts.buried) then
+            if self.emptySince == nil then
+                self.emptySince = now
+            end
+            local waitLeft = stand_out_pickup.hop_delay - (now - self.emptySince)
+            if waitLeft > 0 then
+                self.lastTargetName = string.format("Пусто -> хоп %dс", math.ceil(waitLeft))
+            else
+                self.lastTargetName = "Смена сервера..."
+                if self.deps.serverHop ~= nil and now - self.lastHopTry >= stand_out_pickup.hop_retry then
+                    self.lastHopTry = now
+                    pcall(self.deps.serverHop)
+                end
+            end
+        else
+            if self.emptySince ~= nil then
+                self.emptySince = nil
+                self.lastTargetName = ""
+            end
+        end
         return nil
     end
 
+    self.emptySince = nil
     if self.returnPos == nil then
         self.returnPos = { x = meX, y = meY, z = meZ }
     end
