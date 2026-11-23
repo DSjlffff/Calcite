@@ -6413,6 +6413,8 @@ function main.start(env)
                 local pg = localPlayer:FindFirstChildOfClass("PlayerGui")
                 local ssGui = pg and pg:FindFirstChild("StandStorage")
                 local dGui = pg and pg:FindFirstChild("DarbyGoFish")
+                local cam = workspace.CurrentCamera
+                sb.darby.tableCamera = cam ~= nil and cam:FindFirstChild("StandStorageCamera") ~= nil
                 if ssGui ~= nil and ssGui.Enabled == true then
                     if not sb.darby.storageOpen then
                         sb.darby.storageOpen = true
@@ -11383,6 +11385,7 @@ stand_out_bounty.darby_symbol_ids = {
 function stand_out_bounty.newDarbyState()
     return {
         storageOpen = false,
+        tableCamera = false,
         active = false,
         view = nil,
         seq = 0,
@@ -11391,7 +11394,8 @@ function stand_out_bounty.newDarbyState()
         lastSentSeq = -1,
         lastSentActionId = -1,
         lastSentAt = -99,
-        readyAt = 0, -- ждём окончания анимации раздачи ("Wait for the cards.")
+        readyAt = 0,   -- ждём окончания анимации раздачи ("Wait for the cards.")
+        busyUntil = 0, -- защита от телепорта/повторного [H] во время перехода CHALLENGE -> диалог -> Go Fish
     }
 end
 
@@ -11421,18 +11425,21 @@ function stand_out_bounty.applyDarbyEvent(st, kind, data, now)
         if kind == "Open" then
             st.storageOpen = true
             waitUntil(now + 3.5)
+            st.busyUntil = math.max(st.busyUntil or 0, now + 5.0)
         end
         return
     end
     if kind == "Close" then
         st.storageOpen = false
         st.active = false
+        st.busyUntil = 0
         return
     end
     if kind ~= "Fish" then
         return
     end
 
+    st.busyUntil = math.max(st.busyUntil or 0, now + 6.0)
     if data.Started == true then
         st.active = true
         st.view = nil
@@ -11896,7 +11903,9 @@ function Runner:update(now, opts, meX, meY, meZ)
     local darbySt = self.deps.darbyState ~= nil and self.deps.darbyState() or nil
     local inInspection = ui.jewelryOpen == true or ui.jewelryActionBtn ~= nil or puzzle ~= nil
     local inDarbyGame = ui.darbyOpen == true or (darbySt ~= nil and darbySt.active == true)
-    local inDarbyStorage = ui.standStorageOpen == true and (ui.darbyBountyPrompt == true or stand_out_bounty.isDarbyObjective(ui.trackerObjective, ui.trackerTitle))
+    local darbyBusy = darbySt ~= nil and ((darbySt.tableCamera == true) or (darbySt.busyUntil ~= nil and now < darbySt.busyUntil))
+    local inDarbyStorage = (ui.standStorageOpen == true or darbyBusy)
+        and (ui.darbyBountyPrompt == true or stand_out_bounty.isDarbyObjective(ui.trackerObjective, ui.trackerTitle) or darbyBusy)
 
     -- Парсим прогресс баунти (например 1/2 -> не завершено; 4/4 -> все шаги выполнены)
     local progCur, progTotal = stand_out_bounty.parseProgress(ui.trackerTitle)
@@ -12004,13 +12013,19 @@ function Runner:update(now, opts, meX, meY, meZ)
                 pcall(self.deps.stopFighting)
             end
             local opt = stand_out_bounty.pickDialogueOption(ui.dialogueOptions, objLow)
-            if opt ~= nil and now - self.lastAction >= 0.5 then
+            if opt ~= nil and now - self.lastAction >= 0.65 then
                 self.lastAction = now
-                if opt.button ~= nil then
-                    self.deps.activateButton(opt.button)
+                if darbySt ~= nil and (inDarbyStorage or inDarbyGame or stand_out_bounty.isDarbyObjective(ui.trackerObjective, ui.trackerTitle)) then
+                    -- Даём игре 8 с на анимацию рассадки за стол и раздачу карт, не трогая персонажа!
+                    darbySt.busyUntil = math.max(darbySt.busyUntil or 0, now + 8.0)
                 end
-                if opt.key ~= nil and self.deps.pressKey ~= nil then
+                local isGuiBtn = opt.button ~= nil and (safeIsA(opt.button, "TextButton") or safeIsA(opt.button, "ImageButton") or type(opt.button) == "string")
+                if isGuiBtn then
+                    self.deps.activateButton(opt.button)
+                elseif opt.key ~= nil and self.deps.pressKey ~= nil then
                     pcall(self.deps.pressKey, opt.key)
+                elseif opt.button ~= nil then
+                    self.deps.activateButton(opt.button)
                 end
             end
             self.statusText = title .. " | диалог NPC"
@@ -12021,7 +12036,7 @@ function Runner:update(now, opts, meX, meY, meZ)
         local isDarby = stand_out_bounty.isDarbyObjective(ui.trackerObjective, ui.trackerTitle) or ui.darbyBountyPrompt == true
         local readyToClaimNow = string.find(objLow, "claim your reward", 1, true) ~= nil
             or (string.find(objLow, "return to petyr", 1, true) ~= nil and not hasIncompleteSteps)
-        if readyToClaimNow and (ui.standStorageOpen or (darbySt ~= nil and darbySt.storageOpen)) then
+        if readyToClaimNow and (ui.standStorageOpen or (darbySt ~= nil and (darbySt.storageOpen or darbySt.tableCamera))) then
             -- После победы над D'Arby закрываем StandStorage, чтобы камера/персонаж разблокировались для полёта к Petyr
             if self.deps.sendStandStorage ~= nil and now - self.lastAction >= 0.6 then
                 self.lastAction = now
@@ -12029,12 +12044,13 @@ function Runner:update(now, opts, meX, meY, meZ)
                 if darbySt ~= nil then
                     darbySt.storageOpen = false
                     darbySt.active = false
+                    darbySt.busyUntil = 0
                 end
             end
             self.statusText = title .. " | выхожу из D'Arby"
             return
         end
-        if not readyToClaimNow and (inDarbyGame or (isDarby and (ui.standStorageOpen or (darbySt ~= nil and darbySt.storageOpen)))) then
+        if not readyToClaimNow and (inDarbyGame or (isDarby and (ui.standStorageOpen or darbyBusy or (darbySt ~= nil and darbySt.storageOpen)))) then
             self:_releasePrompt()
             if self.deps.stopFighting ~= nil then
                 pcall(self.deps.stopFighting)
@@ -12046,11 +12062,19 @@ function Runner:update(now, opts, meX, meY, meZ)
                     self.statusText = title .. " | Go Fish: жду стол..."
                     return
                 end
-                if now - self.lastAction >= 1.5 then
+                if now - self.lastAction >= 2.0 then
                     self.lastAction = now
+                    if darbySt ~= nil then
+                        darbySt.busyUntil = math.max(darbySt.busyUntil or 0, now + 6.0)
+                    end
                     self.deps.activateButton(ui.darbyChallengeBtn)
                 end
                 self.statusText = title .. " | жму CHALLENGE"
+                return
+            end
+            -- Во время переходной сценки (после нажатия CHALLENGE / "1. Just deal.") просто ждём появления диалога или карт
+            if not inDarbyGame and not ui.standStorageOpen and darbyBusy then
+                self.statusText = title .. " | Go Fish: посадка за стол..."
                 return
             end
             if darbySt ~= nil and self.deps.sendStandStorage ~= nil then
