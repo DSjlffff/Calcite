@@ -6079,7 +6079,7 @@ function main.start(env)
 
     do
         local keyMap = {
-            E = "E",
+            E = "E", B = "B",
             ["1"] = "One", ["2"] = "Two", ["3"] = "Three", ["4"] = "Four", ["5"] = "Five",
             ["6"] = "Six", ["7"] = "Seven", ["8"] = "Eight", ["9"] = "Nine",
         }
@@ -6420,9 +6420,16 @@ function main.start(env)
                     local pg = localPlayer:FindFirstChildOfClass("PlayerGui")
                     local jw = pg and pg:FindFirstChild("JewelryInspection")
                     if jw ~= nil and jw.Enabled == true then
+                        sb.puzzleSawGui = true
                         return sb.puzzle
                     end
-                    -- Если GUI закрылось после задержки > 1.5 с с момента получения пакета — очищаем
+                    -- Если GUI уже открывалось и закрылось (после CLOSE [ESC / B]) — сразу сбрасываем, чтобы ре-открыть промпт!
+                    if sb.puzzleSawGui then
+                        sb.puzzle = nil
+                        sb.puzzleSawGui = false
+                        return nil
+                    end
+                    -- Если GUI так и не открылось за 1.5 с с момента получения пакета — очищаем
                     if sb.puzzleAt ~= nil and env.clock() - sb.puzzleAt > 1.5 then
                         sb.puzzle = nil
                     else
@@ -7201,6 +7208,7 @@ function main.start(env)
                                     if isPuzzleEvt then
                                         if data.Open == false then
                                             sb.puzzle = nil
+                                            sb.puzzleSawGui = false
                                             return
                                         end
                                         local ver = data.Version
@@ -7212,13 +7220,15 @@ function main.start(env)
                                             kind = data.Kind or (sb.puzzle and sb.puzzle.kind),
                                             version = ver,
                                             serverVersion = ver,
-                                            retryStep = 0,
+                                            sentCount = 0,
+                                            sentAt = nil,
                                             target = data.Target or (sb.puzzle and sb.puzzle.target),
                                             values = data.Values or (sb.puzzle and sb.puzzle.values),
                                             placed = data.Placed or (sb.puzzle and sb.puzzle.placed),
                                             open = true,
                                             attempted = {},
                                         }
+                                        sb.puzzleSawGui = false
                                         sb.puzzleAt = env.clock()
                                     end
                                 end
@@ -11021,6 +11031,7 @@ function stand_out_bounty.readUi(playerGui)
         dialogueOptions = {}, -- { button, text, key }
         jewelryOpen = false,
         jewelryActionBtn = nil,
+        jewelryCloseBtn = nil,
         standStorageOpen = false,
         darbyChallengeBtn = nil,
         darbyBountyPrompt = false,
@@ -11040,6 +11051,10 @@ function stand_out_bounty.readUi(playerGui)
             local actBtn = foot and foot:FindFirstChild("Action")
             if actBtn ~= nil and actBtn.Visible == true then
                 info.jewelryActionBtn = actBtn
+            end
+            local closeBtn = foot and foot:FindFirstChild("Close")
+            if closeBtn ~= nil and closeBtn.Visible ~= false then
+                info.jewelryCloseBtn = closeBtn
             end
         end
 
@@ -11705,6 +11720,45 @@ function stand_out_bounty.pickDialogueOption(options, objLow)
     return options[1]
 end
 
+-- Проверяет, остались ли ещё невыполненные ходы в головоломке (без изменения puzzle.attempted).
+function stand_out_bounty.puzzleMovesRemaining(puzzle)
+    if type(puzzle) ~= "table" or puzzle.open == false then
+        return 0
+    end
+    local attempted = puzzle.attempted or {}
+    local count = 0
+    if puzzle.kind == "Rails" and type(puzzle.target) == "table" then
+        for r, want in pairs(puzzle.target) do
+            if type(r) == "number" then
+                local cur = type(puzzle.values) == "table" and puzzle.values[r] or nil
+                if cur ~= want and not attempted[r] then
+                    count += 1
+                end
+            end
+        end
+        return count
+    end
+    if puzzle.kind == "Assembly" then
+        local placedMap = {}
+        if type(puzzle.placed) == "table" then
+            for k, v in pairs(puzzle.placed) do
+                if type(k) == "string" and v then
+                    placedMap[k] = true
+                elseif type(v) == "string" then
+                    placedMap[v] = true
+                end
+            end
+        end
+        for _, comp in { "Heart", "Star", "Moon", "Clasp" } do
+            if not placedMap[comp] and not attempted[comp] then
+                count += 1
+            end
+        end
+        return count
+    end
+    return 0
+end
+
 -- Генерирует следующий пакет решения головоломки Cheap Jewelry (Rails -> PlaceClasp, Assembly -> FitComponent).
 function stand_out_bounty.nextPuzzleMove(puzzle)
     if type(puzzle) ~= "table" or puzzle.open == false then
@@ -12065,22 +12119,67 @@ function Runner:update(now, opts, meX, meY, meZ)
                 self.statusText = title .. " | забираю улику"
                 return
             end
-            if puzzle ~= nil and self.deps.sendIncident ~= nil then
-                if now - self.lastAction >= 0.35 then
-                    local move = stand_out_bounty.nextPuzzleMove(puzzle)
-                    if move ~= nil then
-                        self.lastAction = now
-                        pcall(self.deps.sendIncident, move)
-                    elseif now - self.lastAction >= 1.6 then
-                        -- Если сервер ещё не закрыл окно — повторяем проход (сначала с serverVersion, затем с +1..+3 на случай скрытого инкремента)
-                        puzzle.attempted = {}
-                        puzzle.retryStep = ((puzzle.retryStep or 0) + 1) % 4
-                        puzzle.version = (puzzle.serverVersion or 0) + puzzle.retryStep
-                        self.lastAction = now - 1.25
-                    end
+            local function closeInspection(puz)
+                local closed = false
+                if ui.jewelryCloseBtn ~= nil and self.deps.clickUiButton ~= nil then
+                    local okC, resC = pcall(self.deps.clickUiButton, ui.jewelryCloseBtn)
+                    closed = okC and resC == true
+                end
+                if not closed and self.deps.pressKey ~= nil then
+                    pcall(self.deps.pressKey, "B")
+                end
+                if not closed and ui.jewelryCloseBtn ~= nil and self.deps.activateButton ~= nil then
+                    pcall(self.deps.activateButton, ui.jewelryCloseBtn)
+                end
+                if puz ~= nil and puz.closeTries ~= nil and puz.closeTries >= 1 and self.deps.sendIncident ~= nil then
+                    pcall(self.deps.sendIncident, {
+                        Action = "ClosePuzzle",
+                        Id = puz.id,
+                        Token = puz.token,
+                    })
+                end
+                if puz ~= nil then
+                    puz.closeTries = (puz.closeTries or 0) + 1
                 end
             end
-            self.statusText = title .. (puzzle ~= nil and puzzle.kind == "Assembly" and " | собираю ожерелье" or " | решаю замок")
+            if puzzle ~= nil and self.deps.sendIncident ~= nil then
+                -- Stand Out принимает 1 действие за открытие и инкрементит Version на сервере без обратного Puzzle-пакета,
+                -- поэтому: отправляем 1 ход с актуальным (Token, Version), ждём ~0.9s (на последнем ходе Assembly — 1.8s
+                -- для появления TAKE HOWLER RECORD), и если сервер не прислал новый Puzzle — закрываем окно (CLOSE/B),
+                -- чтобы промпт сразу переоткрыл его со свежим (Token, Version+1, обновлёнными Values/Placed)!
+                if (puzzle.sentCount or 0) == 0 then
+                    if now - self.lastAction >= 0.35 then
+                        local move = stand_out_bounty.nextPuzzleMove(puzzle)
+                        if move ~= nil then
+                            puzzle.sentCount = 1
+                            puzzle.sentAt = now
+                            puzzle.moreAfterSend = stand_out_bounty.puzzleMovesRemaining(puzzle) > 0
+                            self.lastAction = now
+                            pcall(self.deps.sendIncident, move)
+                        elseif now - self.lastAction >= 1.5 then
+                            self.lastAction = now
+                            closeInspection(puzzle)
+                        end
+                    end
+                    self.statusText = title .. (puzzle.kind == "Assembly" and " | собираю ожерелье" or " | решаю замок")
+                    return
+                else
+                    local waitClose = (puzzle.kind == "Assembly" and not puzzle.moreAfterSend) and 1.8 or 0.9
+                    if puzzle.sentAt ~= nil and now - puzzle.sentAt >= waitClose and now - self.lastAction >= 0.7 then
+                        self.lastAction = now
+                        closeInspection(puzzle)
+                    end
+                    self.statusText = title .. " | обновляю замок"
+                    return
+                end
+            elseif ui.jewelryOpen then
+                -- Окно было открыто до включения Auto Bounty (пакет Puzzle не перехвачен) — закрываем, чтобы переоткрыть самим
+                if now - self.lastAction >= 1.0 then
+                    self.lastAction = now
+                    closeInspection(nil)
+                end
+            end
+            self.statusText = title .. " | решаю замок"
             return
         end
 
