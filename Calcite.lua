@@ -4014,6 +4014,7 @@ local stand_out = require("./stand_out")
 local stand_out_pickup = require("./stand_out_pickup")
 local stand_out_mobs = require("./stand_out_mobs")
 local stand_out_bounty = require("./stand_out_bounty")
+local stand_out_howler = require("./stand_out_howler")
 local glider = require("./glider")
 local yba_npcs = require("./yba_npcs")
 local yba_waypoints = require("./yba_waypoints")
@@ -4200,6 +4201,7 @@ function main.start(env)
         _soPick = { picker = nil, entries = {}, wasOn = false },
         _soMob = { farmer = nil, noclip = nil, entries = {}, wasOn = false },
         _soBounty = { runner = nil, mobs = {}, prompt = nil, px = nil, py = nil, pz = nil, lastPromptScan = -99, wasOn = false, mod = nil, modTried = false },
+        _soHowler = { collector = nil, remote = nil, conn = nil, tried = false },
         _charMove = { savedWs = nil, savedJp = nil, savedUseJp = nil, wasWs = false, wasJp = false, lastChar = nil },
     }
 
@@ -4977,6 +4979,17 @@ function main.start(env)
             end)
             handle._soBounty.ssConn = nil
         end
+        if handle._soHowler.collector ~= nil then
+            pcall(function()
+                handle._soHowler.collector:stop(true)
+            end)
+        end
+        if handle._soHowler.conn ~= nil then
+            pcall(function()
+                handle._soHowler.conn:Disconnect()
+            end)
+            handle._soHowler.conn = nil
+        end
         pcall(function()
             local cm = handle._charMove
             local ch = localPlayer and localPlayer.Character
@@ -5124,6 +5137,19 @@ function main.start(env)
             local ok, err = pcall(env.fireproximityprompt, prompt)
             if not ok then
                 ui.notify("Calcite", "fireproximityprompt упал: " .. tostring(err))
+            end
+        end,
+        onStandOutHowler = function()
+            local sh = handle._soHowler
+            if sh.collector == nil then
+                return
+            end
+            local ch = localPlayer and localPlayer.Character
+            local rt = ch and ch:FindFirstChild("HumanoidRootPart")
+            local p = rt and rt.Position
+            sh.collector:toggle(env.clock(), p and p.X, p and p.Y, p and p.Z)
+            if ui ~= nil and ui.setStandOutHowler ~= nil then
+                ui.setStandOutHowler(sh.collector.statusText)
             end
         end,
     })
@@ -6679,6 +6705,54 @@ function main.start(env)
                 end
             end,
         })
+
+        handle._soHowler.collector = stand_out_howler.new({
+            readOpened = function()
+                local ok, val = pcall(function()
+                    local d = localPlayer and localPlayer:FindFirstChild("Data")
+                    local st = d and d:FindFirstChild("Stats")
+                    local sv = st and st:FindFirstChild("HowlerCasesOpened")
+                    return sv and sv.Value or ""
+                end)
+                return ok and type(val) == "string" and val or ""
+            end,
+            teleportTo = function(x, y, z)
+                local character = localPlayer.Character
+                local root = character and character:FindFirstChild("HumanoidRootPart")
+                if root ~= nil then
+                    root.CFrame = env.CFrame.new(x, y, z)
+                    root.AssemblyLinearVelocity = env.Vector3.new(0, 0, 0)
+                end
+            end,
+            sendHowler = function(cmd, arg)
+                local sh = handle._soHowler
+                local rem = sh.remote
+                if rem == nil then
+                    pcall(function()
+                        local rs = game:GetService("ReplicatedStorage")
+                        local rems = rs and rs:FindFirstChild("Remotes")
+                        rem = rems and rems:FindFirstChild("HowlerCases")
+                        sh.remote = rem
+                    end)
+                end
+                if rem ~= nil then
+                    pcall(function() rem:FireServer(cmd, arg) end)
+                end
+            end,
+            scanLocal = function()
+                return stand_out_howler.scanLocalProps(workspace)
+            end,
+            firePrompt = function(prompt)
+                if type(env.fireproximityprompt) == "function" then
+                    pcall(env.fireproximityprompt, prompt)
+                end
+            end,
+            notify = function(title, text)
+                if ui ~= nil and ui.notify ~= nil then
+                    ui.notify(title, text)
+                end
+            end,
+        })
     end
 
     -- what follows listens to Steal an Egg and looks through its plots: in any other game there is nothing of it
@@ -7738,9 +7812,37 @@ function main.start(env)
             stealer:stop()
         end
 
+        -- Stand Out Howler's Cases: подписка на Reveal + шаг автосбора (имеет приоритет над автофармом пока активен)
+        local howlerBusy = false
+        if modes.has(mode, "StandOutPickup") and handle._soHowler.collector ~= nil then
+            if handle._soHowler.conn == nil and not handle._soHowler.tried then
+                handle._soHowler.tried = true
+                pcall(function()
+                    local rs = game:GetService("ReplicatedStorage")
+                    local rems = rs and rs:FindFirstChild("Remotes")
+                    local hRem = rems and rems:FindFirstChild("HowlerCases")
+                    if hRem ~= nil then
+                        handle._soHowler.remote = hRem
+                        handle._soHowler.conn = hRem.OnClientEvent:Connect(function(ev, id, cf)
+                            if ev == "Reveal" and type(id) == "string" and cf ~= nil and cf.Position ~= nil then
+                                handle._soHowler.collector:onReveal(id, cf.Position.X, cf.Position.Y, cf.Position.Z)
+                            end
+                        end)
+                    end
+                end)
+            end
+            local okH, busyH = pcall(function()
+                return handle._soHowler.collector:update(now, haveLocal and localX or nil, haveLocal and localY or nil, haveLocal and localZ or nil)
+            end)
+            if okH then
+                howlerBusy = busyH == true
+            end
+            ui.setStandOutHowler(handle._soHowler.collector.statusText)
+        end
+
         -- Stand Out Auto Pick Up: телепорт к ближайшему мировому предмету / закопанному припасу и подбор
         local soPick = handle._soPick
-        if s.standOutPickup ~= nil and s.standOutPickup.enabled and haveLocal and soPick.picker ~= nil then
+        if not howlerBusy and s.standOutPickup ~= nil and s.standOutPickup.enabled and haveLocal and soPick.picker ~= nil then
             if not soPick.wasOn then
                 soPick.entries = stand_out_pickup.scan(workspace, s.standOutPickup)
                 soPick.wasOn = true
@@ -7770,8 +7872,8 @@ function main.start(env)
                 localAlive = false
             end
         end
-        local itemBusy = s.standOutPickup ~= nil and s.standOutPickup.enabled
-            and soPick.picker ~= nil and soPick.picker.target ~= nil
+        local itemBusy = howlerBusy or (s.standOutPickup ~= nil and s.standOutPickup.enabled
+            and soPick.picker ~= nil and soPick.picker.target ~= nil)
         -- Stand Out Auto Bounty (использует Farm Config для боя с мобами баунти; уступает Item farm на подбор)
         local soBounty = handle._soBounty
         local bountyOn = s.standOutBounty ~= nil and s.standOutBounty.enabled and localAlive and soBounty.runner ~= nil
@@ -8293,6 +8395,17 @@ function menu.create(deps)
     toggle(soFarm.bountyGroup, "StandOutBountySkipIncidents", "Пропускать мини-игры", settings.standOutBounty, "skipIncidents")
     soFarm.bountyStatus = soFarm.bountyGroup:AddLabel("Завершено: 0")
 
+    soFarm.howlerGroup = farmTab:AddRightGroupbox("Howler's Cases")
+    soFarm.howlerGroup:AddButton({
+        Text = "Collect Howler's Case",
+        Func = function()
+            if deps.onStandOutHowler ~= nil then
+                deps.onStandOutHowler()
+            end
+        end,
+    })
+    soFarm.howlerStatus = soFarm.howlerGroup:AddLabel("Кейсы: 0/10")
+
     -- aim
     local aimGroup = aimTab:AddLeftGroupbox("Наведение")
     -- the keypicker is attached to the toggle so a right-click on "Включено" opens its binding and mode (Always,
@@ -8697,6 +8810,7 @@ function menu.create(deps)
         soFarm.mobGroup:SetVisible(modes.has(mode, "StandOutMobs"))
         soFarm.cfgGroup:SetVisible(modes.has(mode, "StandOutMobs") or modes.has(mode, "StandOutBounty"))
         soFarm.bountyGroup:SetVisible(modes.has(mode, "StandOutBounty"))
+        soFarm.howlerGroup:SetVisible(modes.has(mode, "StandOutPickup"))
         teamCheck:SetVisible(modes.has(mode, "TeamCheck"))
         throughWalls:SetVisible(modes.has(mode, "Wallbang"))
         autoStop:SetVisible(modes.has(mode, "AutoStop"))
@@ -8766,6 +8880,14 @@ function menu.create(deps)
         if text ~= soFarm.shownBounty then
             soFarm.shownBounty = text
             soFarm.bountyStatus:SetText(text)
+        end
+    end
+
+    function ui.setStandOutHowler(statusText)
+        local text = statusText or "Кейсы: 0/10"
+        if text ~= soFarm.shownHowler then
+            soFarm.shownHowler = text
+            soFarm.howlerStatus:SetText(text)
         end
     end
 
@@ -12652,6 +12774,421 @@ function Runner:update(now, opts, meX, meY, meZ)
 end
 
 return stand_out_bounty
+end
+
+__modules["stand_out_howler"] = function(require)
+-- Stand Out Howler's Cases: автосбор всех 10 кейсов Howler (case_01..case_10) на карте.
+-- Факты игры из Modules.HowlerCases / standout_probe_howler2.lua:
+--   • 10 кейсов: case_01..case_10 (1000 монет + 15% опыта за каждый, Howler Jacket + Howler Pants за все 10)
+--   • Прогресс игрока: LocalPlayer.Data.Stats.HowlerCasesOpened (StringValue, список через запятую)
+--   • Ремоут: ReplicatedStorage.Remotes.HowlerCases:
+--       S->C: ("Reveal", id, CFrame, Size) / ("Hide", id) — спавнит модель Case в Workspace.LocalProps (attr HowlerCaseId)
+--       C->S: ("Hold", id) -> пауза HoldDuration (0.8s) -> ("Open", id)
+--   • RevealRange = 200, PromptRange = 8.
+-- Чистая логика поверх deps, проверяется tests/stand_out_howler_test.lua.
+local stand_out_howler = {}
+
+stand_out_howler.ids = {
+    "case_01", "case_02", "case_03", "case_04", "case_05",
+    "case_06", "case_07", "case_08", "case_09", "case_10",
+}
+stand_out_howler.total = 10
+stand_out_howler.hold_duration = 0.92
+stand_out_howler.settle = 0.22
+stand_out_howler.confirm_wait = 0.45
+stand_out_howler.sweep_step = 0.30
+stand_out_howler.above = 3.0
+
+local Collector = {}
+Collector.__index = Collector
+
+local function finite(v)
+    return type(v) == "number" and v == v and v ~= math.huge and v ~= -math.huge
+end
+
+local function safeAttr(obj, name)
+    if obj == nil or obj.GetAttribute == nil then
+        return nil
+    end
+    local ok, val = pcall(function()
+        return obj:GetAttribute(name)
+    end)
+    if ok then
+        return val
+    end
+    return nil
+end
+
+-- Парсит Data.Stats.HowlerCasesOpened ("case_03,case_10") -> (map, count).
+function stand_out_howler.decodeOpened(raw)
+    local opened = {}
+    local count = 0
+    if type(raw) ~= "string" or raw == "" then
+        return opened, 0
+    end
+    for tok in string.gmatch(raw, "[^,%s;]+") do
+        if string.match(tok, "^case_%d%d$") and not opened[tok] then
+            opened[tok] = true
+            count += 1
+        end
+    end
+    return opened, count
+end
+
+-- Возвращает список ещё не открытых case_01..case_10.
+function stand_out_howler.unopenedIds(raw)
+    local opened = stand_out_howler.decodeOpened(raw)
+    local out = {}
+    for _, id in stand_out_howler.ids do
+        if not opened[id] then
+            table.insert(out, id)
+        end
+    end
+    return out
+end
+
+-- Сетка облёта острова (шаг 320 при RevealRange = 200 гарантирует перекрытие каждой точки карты)
+-- плюс яхта и прибрежные локации. Змейка по строкам ускоряет стриминг Roblox.
+function stand_out_howler.buildSweepPoints()
+    local pts = {}
+    -- Сначала ключевые особые точки (яхта, берег Howler)
+    table.insert(pts, { x = -2779, y = 58, z = 3645 })
+    table.insert(pts, { x = -1133, y = 26, z = 2567 })
+
+    local step = 320
+    local row = 0
+    for z = 600, 2860, step do
+        row += 1
+        if row % 2 == 1 then
+            for x = -2150, 220, step do
+                table.insert(pts, { x = x, y = 45, z = z })
+            end
+        else
+            for x = 220, -2150, -step do
+                table.insert(pts, { x = x, y = 45, z = z })
+            end
+        end
+    end
+    -- Дополнительно берег и ближний океан (вокруг острова)
+    for _, extra in {
+        { x = -2450, y = 35, z = 1700 },
+        { x = -2450, y = 35, z = 2400 },
+        { x = -2450, y = 35, z = 3100 },
+        { x = -1700, y = 35, z = 3200 },
+        { x = -900, y = 35, z = 3200 },
+        { x = -100, y = 35, z = 3200 },
+        { x = 500, y = 45, z = 1600 },
+        { x = 500, y = 45, z = 2400 },
+        { x = -1000, y = 45, z = 250 },
+        { x = -1800, y = 45, z = 250 },
+    } do
+        table.insert(pts, extra)
+    end
+    return pts
+end
+
+-- Ищет уже раскрытые кейсы в Workspace.LocalProps (attr HowlerCaseId).
+function stand_out_howler.scanLocalProps(workspace)
+    local out = {}
+    if workspace == nil then
+        return out
+    end
+    local lp = workspace:FindFirstChild("LocalProps")
+    if lp == nil or lp.GetChildren == nil then
+        return out
+    end
+    for _, child in lp:GetChildren() do
+        local id = safeAttr(child, "HowlerCaseId")
+        if type(id) == "string" and string.match(id, "^case_%d%d$") then
+            local part = child.FindFirstChild ~= nil and child:FindFirstChild("PromptAnchor") or nil
+            if part == nil then
+                part = child.PrimaryPart
+            end
+            if part == nil and child.FindFirstChildWhichIsA ~= nil then
+                part = child:FindFirstChildWhichIsA("BasePart", true)
+            end
+            local prompt = child.FindFirstChildWhichIsA ~= nil and child:FindFirstChildWhichIsA("ProximityPrompt", true) or nil
+            if part ~= nil and part.Position ~= nil then
+                local p = part.Position
+                if finite(p.X) and finite(p.Y) and finite(p.Z) then
+                    out[id] = { id = id, x = p.X, y = p.Y, z = p.Z, prompt = prompt }
+                end
+            end
+        end
+    end
+    return out
+end
+
+-- deps:
+--   readOpened() -> string
+--   teleportTo(x, y, z)
+--   sendHowler(cmd, arg)       ("Hold" | "Open" | "Ready", id)
+--   scanLocal() -> { [id] = { id, x, y, z, prompt } }  (optional)
+--   firePrompt(prompt)         (optional)
+--   notify(title, text)        (optional)
+function stand_out_howler.new(deps)
+    return setmetatable({
+        deps = deps,
+        running = false,
+        phase = "idle",       -- "idle" | "remote_hold" | "remote_confirm" | "sweep" | "open_settle" | "open_hold" | "open_confirm"
+        since = 0,
+        startPos = nil,
+        revealed = {},        -- [id] = { x, y, z }
+        failedOpen = {},      -- [id] = tries
+        targetId = nil,
+        targetPos = nil,
+        targetPrompt = nil,
+        remoteWorks = nil,    -- nil = unknown, true = works without distance, false = needs proximity sweep
+        sweepPts = nil,
+        sweepIdx = 0,
+        statusText = "",
+    }, Collector)
+end
+
+function Collector:onReveal(id, x, y, z)
+    if type(id) == "string" and finite(x) and finite(y) and finite(z) then
+        self.revealed[id] = { x = x, y = y, z = z }
+    end
+end
+
+function Collector:stop(silent)
+    local wasRunning = self.running
+    self.running = false
+    self.phase = "idle"
+    self.targetId = nil
+    self.targetPos = nil
+    self.targetPrompt = nil
+    if wasRunning and self.startPos ~= nil and self.deps.teleportTo ~= nil then
+        local sp = self.startPos
+        self.startPos = nil
+        pcall(self.deps.teleportTo, sp.x, sp.y, sp.z)
+    else
+        self.startPos = nil
+    end
+    local _, cnt = stand_out_howler.decodeOpened(self.deps.readOpened())
+    self.statusText = string.format("Кейсы: %d/%d", cnt, stand_out_howler.total)
+    if wasRunning and not silent and self.deps.notify ~= nil then
+        pcall(self.deps.notify, "Howler's Cases", string.format("Сбор остановлен (%d/%d).", cnt, stand_out_howler.total))
+    end
+end
+
+function Collector:toggle(now, meX, meY, meZ)
+    if self.running then
+        self:stop(false)
+        return false
+    end
+    local raw = self.deps.readOpened()
+    local _, cnt = stand_out_howler.decodeOpened(raw)
+    if cnt >= stand_out_howler.total then
+        self.statusText = string.format("Кейсы: %d/%d (все собраны!)", cnt, stand_out_howler.total)
+        if self.deps.notify ~= nil then
+            pcall(self.deps.notify, "Howler's Cases", "Все 10 кейсов Howler уже собраны!")
+        end
+        return false
+    end
+    if meX ~= nil and meY ~= nil and meZ ~= nil then
+        self.startPos = { x = meX, y = meY, z = meZ }
+    else
+        self.startPos = nil
+    end
+    self.running = true
+    self.failedOpen = {}
+    self.remoteWorks = nil
+    self.sweepPts = stand_out_howler.buildSweepPoints()
+    self.sweepIdx = 0
+    self.targetId = nil
+    self.targetPos = nil
+    self.targetPrompt = nil
+    self.phase = "idle"
+    self.since = now
+    self.statusText = string.format("Кейсы: %d/%d | старт...", cnt, stand_out_howler.total)
+    if self.deps.notify ~= nil then
+        pcall(self.deps.notify, "Howler's Cases", string.format("Запущен сбор кейсов (%d/%d)...", cnt, stand_out_howler.total))
+    end
+    return true
+end
+
+function Collector:_findRevealedUnopened(opened)
+    local localCases = self.deps.scanLocal ~= nil and self.deps.scanLocal() or nil
+    if type(localCases) == "table" then
+        for id, info in localCases do
+            self.revealed[id] = { x = info.x, y = info.y, z = info.z, prompt = info.prompt }
+        end
+    end
+    for _, id in stand_out_howler.ids do
+        if not opened[id] and self.revealed[id] ~= nil and (self.failedOpen[id] or 0) < 2 then
+            return id, self.revealed[id]
+        end
+    end
+    return nil, nil
+end
+
+function Collector:_finish(cnt, msg)
+    local sp = self.startPos
+    self.running = false
+    self.phase = "idle"
+    self.targetId = nil
+    self.targetPos = nil
+    self.targetPrompt = nil
+    self.startPos = nil
+    if sp ~= nil and self.deps.teleportTo ~= nil then
+        pcall(self.deps.teleportTo, sp.x, sp.y, sp.z)
+    end
+    self.statusText = string.format("Кейсы: %d/%d", cnt, stand_out_howler.total)
+    if self.deps.notify ~= nil then
+        pcall(self.deps.notify, "Howler's Cases", msg)
+    end
+end
+
+function Collector:update(now, meX, meY, meZ)
+    local raw = self.deps.readOpened()
+    local opened, cnt = stand_out_howler.decodeOpened(raw)
+
+    if not self.running then
+        self.statusText = string.format("Кейсы: %d/%d", cnt, stand_out_howler.total)
+        return false
+    end
+
+    if meX == nil or meY == nil or meZ == nil then
+        return true
+    end
+    if self.startPos == nil then
+        self.startPos = { x = meX, y = meY, z = meZ }
+    end
+
+    if cnt >= stand_out_howler.total then
+        self:_finish(cnt, string.format("Готово! Собраны все %d/%d кейсов Howler!", cnt, stand_out_howler.total))
+        return false
+    end
+
+    -- 1) Этап проверки / прямого открытия по ремоуту (если сервер не требует близости)
+    if self.phase == "remote_hold" then
+        if opened[self.targetId] then
+            self.remoteWorks = true
+            self.phase = "idle"
+            self.targetId = nil
+        elseif now - self.since >= stand_out_howler.hold_duration then
+            self.deps.sendHowler("Open", self.targetId)
+            self.phase = "remote_confirm"
+            self.since = now
+        end
+        self.statusText = string.format("Кейсы: %d/%d | %s", cnt, stand_out_howler.total, tostring(self.targetId or ""))
+        return true
+    elseif self.phase == "remote_confirm" then
+        if opened[self.targetId] then
+            self.remoteWorks = true
+            self.phase = "idle"
+            self.targetId = nil
+        elseif now - self.since >= stand_out_howler.confirm_wait then
+            -- Сервер требует физически быть у кейса -> переходим на быстрый облёт карты
+            self.remoteWorks = false
+            self.targetId = nil
+            self.phase = "sweep"
+            self.since = now - stand_out_howler.sweep_step
+        end
+        return true
+    end
+
+    -- 2) Этап открытия физически найденного кейса (телепорт к кейсу -> Hold -> 0.92s -> Open)
+    if self.phase == "open_settle" then
+        if opened[self.targetId] then
+            self.phase = "sweep"
+            self.targetId = nil
+            return true
+        end
+        local tp = self.targetPos
+        self.deps.teleportTo(tp.x, tp.y + stand_out_howler.above, tp.z)
+        if now - self.since >= stand_out_howler.settle then
+            self.deps.sendHowler("Hold", self.targetId)
+            self.phase = "open_hold"
+            self.since = now
+        end
+        self.statusText = string.format("Кейсы: %d/%d | открываю %s", cnt, stand_out_howler.total, tostring(self.targetId))
+        return true
+    elseif self.phase == "open_hold" then
+        if opened[self.targetId] then
+            self.phase = "sweep"
+            self.targetId = nil
+            return true
+        end
+        local tp = self.targetPos
+        self.deps.teleportTo(tp.x, tp.y + stand_out_howler.above, tp.z)
+        if now - self.since >= stand_out_howler.hold_duration then
+            self.deps.sendHowler("Open", self.targetId)
+            if self.targetPrompt ~= nil and self.deps.firePrompt ~= nil then
+                pcall(self.deps.firePrompt, self.targetPrompt)
+            end
+            self.phase = "open_confirm"
+            self.since = now
+        end
+        self.statusText = string.format("Кейсы: %d/%d | открываю %s", cnt, stand_out_howler.total, tostring(self.targetId))
+        return true
+    elseif self.phase == "open_confirm" then
+        if opened[self.targetId] then
+            self.targetId = nil
+            self.targetPos = nil
+            self.targetPrompt = nil
+            self.phase = "sweep"
+            self.since = now - stand_out_howler.sweep_step
+            return true
+        end
+        local tp = self.targetPos
+        self.deps.teleportTo(tp.x, tp.y + stand_out_howler.above, tp.z)
+        if now - self.since >= stand_out_howler.confirm_wait then
+            self.failedOpen[self.targetId] = (self.failedOpen[self.targetId] or 0) + 1
+            self.targetId = nil
+            self.targetPos = nil
+            self.targetPrompt = nil
+            self.phase = "sweep"
+            self.since = now - stand_out_howler.sweep_step
+        end
+        return true
+    end
+
+    -- 3) Сначала проверяем, не раскрылся ли уже какой-то неоткрытый кейс (OnClientEvent Reveal / LocalProps)
+    local revId, revInfo = self:_findRevealedUnopened(opened)
+    if revId ~= nil then
+        self.targetId = revId
+        self.targetPos = { x = revInfo.x, y = revInfo.y, z = revInfo.z }
+        self.targetPrompt = revInfo.prompt
+        self.phase = "open_settle"
+        self.since = now
+        self.deps.teleportTo(revInfo.x, revInfo.y + stand_out_howler.above, revInfo.z)
+        self.statusText = string.format("Кейсы: %d/%d | лечу к %s", cnt, stand_out_howler.total, revId)
+        return true
+    end
+
+    -- 4) Если прямой ремоут ещё не проверен или работает — пробуем следующий неоткрытый кейс по ремоуту
+    if self.remoteWorks ~= false then
+        local rem = stand_out_howler.unopenedIds(raw)
+        if #rem > 0 then
+            self.targetId = rem[1]
+            self.deps.sendHowler("Hold", self.targetId)
+            self.phase = "remote_hold"
+            self.since = now
+            self.statusText = string.format("Кейсы: %d/%d | %s", cnt, stand_out_howler.total, self.targetId)
+            return true
+        end
+    end
+
+    -- 5) Облёт сетки карты, чтобы сервер прислал Reveal на все спрятанные кейсы
+    self.phase = "sweep"
+    if now - self.since >= stand_out_howler.sweep_step then
+        self.sweepIdx += 1
+        local pt = self.sweepPts[self.sweepIdx]
+        if pt == nil then
+            self:_finish(cnt, string.format("Облёт завершён: собрано %d/%d кейсов Howler.", cnt, stand_out_howler.total))
+            return false
+        end
+        self.since = now
+        self.deps.teleportTo(pt.x, pt.y, pt.z)
+    end
+    local totalPts = self.sweepPts ~= nil and #self.sweepPts or 1
+    self.statusText = string.format("Кейсы: %d/%d | поиск %d/%d", cnt, stand_out_howler.total, self.sweepIdx, totalPts)
+    return true
+end
+
+return stand_out_howler
 end
 
 __modules["stand_out_mobs"] = function(require)
