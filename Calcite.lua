@@ -3253,6 +3253,7 @@ local pairs = {
     ["Drop задержка"] = "Drop delay", ["WalkSpeed (Walk mode)"] = "Walking speed",
     ["Скорость глайдера (Glide mode)"] = "Glide speed", ["Z-detour (обход guard-зон)"] = "Avoid guard areas",
     ["Z коридора обхода"] = "Detour corridor Z", ["Базы"] = "Plots", ["Бхоп"] = "Bunny hop",
+    ["Персонаж"] = "Character", ["Скорость ходьбы"] = "WalkSpeed", ["Сила прыжка"] = "JumpPower",
     ["Полёт"] = "Fly", ["Свет"] = "Lighting", ["Прицел"] = "Crosshair", ["Цвет"] = "Color",
     ["Длина плеча"] = "Arm length", ["Отступ от центра"] = "Center gap", ["Точка в центре"] = "Center dot",
     ["Ватермарка (FPS/ping)"] = "Watermark (FPS/ping)", ["Индикатор перезарядки (MVS)"] = "Reload indicator (MVS)",
@@ -4199,6 +4200,7 @@ function main.start(env)
         _soPick = { picker = nil, entries = {}, wasOn = false },
         _soMob = { farmer = nil, noclip = nil, entries = {}, wasOn = false },
         _soBounty = { runner = nil, mobs = {}, prompt = nil, px = nil, py = nil, pz = nil, lastPromptScan = -99, wasOn = false, mod = nil, modTried = false },
+        _charMove = { savedWs = nil, savedJp = nil, savedUseJp = nil, wasWs = false, wasJp = false, lastChar = nil },
     }
 
     -- what the executor gives back for a connection is known from its documentation only: one that cannot be
@@ -4969,6 +4971,18 @@ function main.start(env)
             end)
             handle._soBounty.remoteConn = nil
         end
+        pcall(function()
+            local cm = handle._charMove
+            local ch = localPlayer and localPlayer.Character
+            local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+            if hum ~= nil then
+                if cm.wasWs and cm.savedWs ~= nil then hum.WalkSpeed = cm.savedWs end
+                if cm.wasJp then
+                    if cm.savedUseJp ~= nil then hum.UseJumpPower = cm.savedUseJp end
+                    if cm.savedJp ~= nil then hum.JumpPower = cm.savedJp end
+                end
+            end
+        end)
 
         if walker ~= nil then
             pcall(function()
@@ -7372,6 +7386,50 @@ function main.start(env)
             fullbright.step(s.fullbright.enabled == true, lighting)
         end
 
+        -- Player WalkSpeed / JumpPower: применяем каждый кадр пока включено, восстанавливаем при выключении
+        pcall(function()
+            local cm = handle._charMove
+            local ch = localPlayer and localPlayer.Character
+            if ch ~= cm.lastChar then
+                cm.lastChar = ch
+                cm.savedWs = nil
+                cm.savedJp = nil
+                cm.savedUseJp = nil
+                cm.wasWs = false
+                cm.wasJp = false
+            end
+            local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+            if hum ~= nil then
+                if s.walkSpeed ~= nil and s.walkSpeed.enabled then
+                    if not cm.wasWs then
+                        cm.savedWs = hum.WalkSpeed
+                        cm.wasWs = true
+                    end
+                    hum.WalkSpeed = s.walkSpeed.value or 32
+                elseif cm.wasWs then
+                    cm.wasWs = false
+                    if cm.savedWs ~= nil then hum.WalkSpeed = cm.savedWs end
+                    cm.savedWs = nil
+                end
+
+                if s.jumpPower ~= nil and s.jumpPower.enabled then
+                    if not cm.wasJp then
+                        cm.savedJp = hum.JumpPower
+                        cm.savedUseJp = hum.UseJumpPower
+                        cm.wasJp = true
+                    end
+                    hum.UseJumpPower = true
+                    hum.JumpPower = s.jumpPower.value or 80
+                elseif cm.wasJp then
+                    cm.wasJp = false
+                    if cm.savedUseJp ~= nil then hum.UseJumpPower = cm.savedUseJp end
+                    if cm.savedJp ~= nil then hum.JumpPower = cm.savedJp end
+                    cm.savedUseJp = nil
+                    cm.savedJp = nil
+                end
+            end
+        end)
+
         -- NoClip (Town): Humanoid каждый тик возвращает CanCollide=true, поэтому цикл нужен каждый кадр;
         -- при выключении шаг восстанавливает коллизию у частей, которые мы трогали
         if s.noclip ~= nil then
@@ -8330,6 +8388,13 @@ function menu.create(deps)
     noclipGroup:AddLabel("Проходишь сквозь стены — убирает коллизию у всех частей твоего персонажа каждый " ..
         "кадр. Чтобы пройти в чужую базу — просто иди вперёд. При выключении коллизия возвращается.", true)
 
+    -- WalkSpeed / JumpPower (группируется в soFarm чтобы не тратить регистры menu.create)
+    soFarm.charGroup = playerTab:AddLeftGroupbox("Персонаж")
+    toggle(soFarm.charGroup, "WalkSpeedEnabled", "WalkSpeed", settings.walkSpeed, "enabled")
+    slider(soFarm.charGroup, "WalkSpeedValue", "Скорость ходьбы", settings.walkSpeed, "value", 16, 200, " st/s")
+    toggle(soFarm.charGroup, "JumpPowerEnabled", "JumpPower", settings.jumpPower, "enabled")
+    slider(soFarm.charGroup, "JumpPowerValue", "Сила прыжка", settings.jumpPower, "value", 50, 250, "")
+
     -- Fullbright: убирает ночь/туман/тени через Lighting (Town). Переехал в Visuals из Player
     local fullbrightGroup = visualsTab:AddRightGroupbox("Свет")
     toggle(fullbrightGroup, "FullbrightEnabled", "Fullbright", settings.fullbright, "enabled")
@@ -8383,10 +8448,12 @@ function menu.create(deps)
         itemsGroup:SetVisible(modes.has(mode, "Items"))
         aimTab:SetVisible(modes.has(mode, "Aim"))
         hitboxTab:SetVisible(modes.has(mode, "Aim"))
-        playerTab:SetVisible(modes.has(mode, "Bhop") or modes.has(mode, "Fly") or modes.has(mode, "NoClip"))
+        playerTab:SetVisible(modes.has(mode, "Bhop") or modes.has(mode, "Fly") or modes.has(mode, "NoClip")
+            or modes.has(mode, "CharMove"))
         bhopGroup:SetVisible(modes.has(mode, "Bhop"))
         flyGroup:SetVisible(modes.has(mode, "Fly"))
         noclipGroup:SetVisible(modes.has(mode, "NoClip"))
+        soFarm.charGroup:SetVisible(modes.has(mode, "CharMove"))
         -- Visuals-only группы: Fullbright и Crosshair теперь в visualsTab, видимы только в своих режимах
         fullbrightGroup:SetVisible(modes.has(mode, "Fullbright"))
         crosshairGroup:SetVisible(modes.has(mode, "Crosshair"))
@@ -8663,8 +8730,8 @@ local features = {
     ItemAsylum = { Players = true, Health = true, Aim = true, IaWeapon = true },
     -- Rivals: team shooter — пока основа (ESP с здоровьем + aim + team check)
     Rivals = { Players = true, Health = true, TeamCheck = true, Aim = true },
-    -- Stand Out: без команд; ESP игроков + автоподбор + фарм мобов + авто-баунти
-    StandOut = { Players = true, Health = true, StandOutInfo = true, StandOutPickup = true, StandOutMobs = true, StandOutBounty = true },
+    -- Stand Out: без команд; ESP игроков + автоподбор + фарм мобов + авто-баунти + WalkSpeed/JumpPower
+    StandOut = { Players = true, Health = true, StandOutInfo = true, StandOutPickup = true, StandOutMobs = true, StandOutBounty = true, CharMove = true },
 }
 
 -- what a mode starts with set otherwise than the settings are written: fields of the table of settings.defaults
@@ -9937,6 +10004,15 @@ function settings.defaults(mode)
             tier = "Max",         -- "Max" | "1".."8"
             skipIncidents = true, -- пропускать инциденты с ручными мини-играми
         },
+        -- Player WalkSpeed / JumpPower
+        walkSpeed = {
+            enabled = false,
+            value = 32,
+        },
+        jumpPower = {
+            enabled = false,
+            value = 80,
+        },
         -- MVS Silent Aim: клик ЛКМ зовёт Net:RemoteEvent("GunKill") на цель Аима (mvs.lua).
         -- Rage mode собирается из Aim + Silent + AutoFire на вкладке — отдельного тумблера нет
         mvsSilent = {
@@ -10201,6 +10277,13 @@ function settings.inEffect(s, mode)
     e.standOutBounty = table.clone(s.standOutBounty)
     if not modes.has(mode, "StandOutBounty") then
         e.standOutBounty.enabled = false
+    end
+
+    e.walkSpeed = table.clone(s.walkSpeed)
+    e.jumpPower = table.clone(s.jumpPower)
+    if not modes.has(mode, "CharMove") then
+        e.walkSpeed.enabled = false
+        e.jumpPower.enabled = false
     end
 
     -- whether any Silent Aim (Town/MVS/Strike) is on
