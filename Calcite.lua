@@ -6342,7 +6342,8 @@ function main.start(env)
                 end
             end,
             clickUiButton = function(btn)
-                -- Реальный клик VirtualInputManager с учётом GuiInset (для StandStorage CHALLENGE, где firesignal роняет корутину)
+                -- Реальный клик VirtualInputManager: в Roblox AbsolutePosition ВСЕГДА смещён на -GuiInset (+58px даже при IgnoreGuiInset=true!),
+                -- а перед кликом нужен SendMouseMoveEvent, чтобы GuiButton поймал наведение и сработал Activated
                 if btn == nil or env.virtualInputManager == nil then
                     return false
                 end
@@ -6352,13 +6353,10 @@ function main.start(env)
                 end
                 local ix, iy = 0, 0
                 pcall(function()
-                    local sg = btn:FindFirstAncestorOfClass("ScreenGui")
-                    if sg == nil or sg.IgnoreGuiInset ~= true then
-                        local gs = game:GetService("GuiService")
-                        if gs ~= nil and gs.GetGuiInset ~= nil then
-                            local tl = gs:GetGuiInset()
-                            if tl ~= nil then ix, iy = tl.X, tl.Y end
-                        end
+                    local gs = game:GetService("GuiService")
+                    if gs ~= nil and gs.GetGuiInset ~= nil then
+                        local tl = gs:GetGuiInset()
+                        if tl ~= nil then ix, iy = tl.X, tl.Y end
                     end
                 end)
                 local cx = math.floor(pos.X + sz.X * 0.5 + ix)
@@ -6369,13 +6367,18 @@ function main.start(env)
                         return false
                     end
                 end
-                pcall(function() env.virtualInputManager:SendMouseButtonEvent(cx, cy, 0, true, game, 1) end)
+                local vim = env.virtualInputManager
+                pcall(function() vim:SendMouseMoveEvent(cx, cy, game) end)
                 if env.task and env.task.delay then
-                    env.task.delay(0.04, function()
-                        pcall(function() env.virtualInputManager:SendMouseButtonEvent(cx, cy, 0, false, game, 1) end)
+                    env.task.delay(0.03, function()
+                        pcall(function() vim:SendMouseButtonEvent(cx, cy, 0, true, game, 0) end)
+                        env.task.delay(0.05, function()
+                            pcall(function() vim:SendMouseButtonEvent(cx, cy, 0, false, game, 0) end)
+                        end)
                     end)
                 else
-                    pcall(function() env.virtualInputManager:SendMouseButtonEvent(cx, cy, 0, false, game, 1) end)
+                    pcall(function() vim:SendMouseButtonEvent(cx, cy, 0, true, game, 0) end)
+                    pcall(function() vim:SendMouseButtonEvent(cx, cy, 0, false, game, 0) end)
                 end
                 return true
             end,
