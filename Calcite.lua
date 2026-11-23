@@ -6742,6 +6742,9 @@ function main.start(env)
             scanLocal = function()
                 return stand_out_howler.scanLocalProps(workspace)
             end,
+            scanAreas = function()
+                return stand_out_howler.scanAreaPoints(workspace)
+            end,
             firePrompt = function(prompt)
                 if type(env.fireproximityprompt) == "function" then
                     pcall(env.fireproximityprompt, prompt)
@@ -6761,6 +6764,22 @@ function main.start(env)
             saveSpots = function(text)
                 if type(env.writefile) == "function" and type(text) == "string" then
                     pcall(env.writefile, "calcite_so_howler_spots.txt", text)
+                end
+            end,
+            loadVisited = function()
+                if type(env.isfile) == "function" and type(env.readfile) == "function" then
+                    local ok, raw = pcall(function()
+                        return env.isfile("calcite_so_howler_visited.txt") and env.readfile("calcite_so_howler_visited.txt") or ""
+                    end)
+                    if ok and type(raw) == "string" then
+                        return raw
+                    end
+                end
+                return ""
+            end,
+            saveVisited = function(text)
+                if type(env.writefile) == "function" and type(text) == "string" then
+                    pcall(env.writefile, "calcite_so_howler_visited.txt", text)
                 end
             end,
             notify = function(title, text)
@@ -12816,11 +12835,52 @@ stand_out_howler.sweep_step = 0.30
 stand_out_howler.above = 3.0
 stand_out_howler.visited_radius = 230
 
+-- Подтверждённые координаты кейсов (обновляются и дополняются из calcite_so_howler_spots.txt)
+stand_out_howler.known_spots = {
+    case_01 = { x = -233.61, y = 16.91, z = 1042.95 },
+    case_02 = { x = -1344.33, y = 17.57, z = 2184.88 },
+    case_03 = { x = -1846.06, y = 16.78, z = 1206.74 },
+    case_06 = { x = 179.50, y = 18.19, z = 1045.34 },
+    case_07 = { x = -777.55, y = 34.19, z = 2595.42 },
+    case_08 = { x = -854.96, y = 17.63, z = 1424.96 },
+    case_09 = { x = 185.34, y = 18.19, z = 1717.10 },
+    case_10 = { x = -791.88, y = 17.26, z = 697.64 },
+}
+
 local Collector = {}
 Collector.__index = Collector
 
 local function finite(v)
     return type(v) == "number" and v == v and v ~= math.huge and v ~= -math.huge
+end
+
+-- Парсинг/сохранение посещённых зон (calcite_so_howler_visited.txt): "x,z" на строку
+function stand_out_howler.parseVisitedCache(raw)
+    local out = {}
+    if type(raw) ~= "string" or raw == "" then
+        return out
+    end
+    for line in string.gmatch(raw, "[^\r\n]+") do
+        local sx, sz = string.match(line, "^%s*([%-%.%d]+)%s*,%s*([%-%.%d]+)%s*$")
+        local x, z = tonumber(sx), tonumber(sz)
+        if finite(x) and finite(z) then
+            table.insert(out, { x = x, z = z })
+        end
+    end
+    return out
+end
+
+function stand_out_howler.formatVisitedCache(list)
+    if type(list) ~= "table" then
+        return ""
+    end
+    local lines = {}
+    for _, v in list do
+        if type(v) == "table" and finite(v.x) and finite(v.z) then
+            table.insert(lines, string.format("%.0f,%.0f", v.x, v.z))
+        end
+    end
+    return table.concat(lines, "\n")
 end
 
 -- Сериализация/парсинг кэша координат кейсов (calcite_so_howler_spots.txt): "case_01=-123.4,19.5,456.7"
@@ -12894,43 +12954,81 @@ function stand_out_howler.unopenedIds(raw)
     return out
 end
 
--- Сетка облёта острова (шаг 320 при RevealRange = 200 гарантирует перекрытие каждой точки карты)
--- плюс яхта и прибрежные локации. Змейка по строкам ускоряет стриминг Roblox.
-function stand_out_howler.buildSweepPoints()
+-- Собирает точки всех именованных локаций из Workspace.Game.Areas / StrengthSpawns / StoryLocations / Spawns,
+-- чтобы сначала мгновенно проверить все острова, бухты, горы и здания игры.
+function stand_out_howler.scanAreaPoints(workspace)
     local pts = {}
-    -- Сначала ключевые особые точки (яхта, берег Howler)
-    table.insert(pts, { x = -2779, y = 58, z = 3645 })
-    table.insert(pts, { x = -1133, y = 26, z = 2567 })
+    if workspace == nil then
+        return pts
+    end
+    local gf = workspace:FindFirstChild("Game")
+    if gf == nil then
+        return pts
+    end
+    for _, folderName in { "Areas", "StrengthSpawns", "StoryLocations", "Spawns", "WorldEventSites" } do
+        local folder = gf:FindFirstChild(folderName)
+        if folder ~= nil and folder.GetChildren ~= nil then
+            for _, child in folder:GetChildren() do
+                local pos = nil
+                pcall(function()
+                    if child:IsA("BasePart") then
+                        pos = child.Position
+                    elseif child:IsA("Model") then
+                        local pp = child.PrimaryPart or child:FindFirstChildWhichIsA("BasePart", true)
+                        if pp ~= nil then pos = pp.Position end
+                    end
+                end)
+                if pos ~= nil and finite(pos.X) and finite(pos.Y) and finite(pos.Z) then
+                    table.insert(pts, { x = pos.X, y = math.max(pos.Y + 8, 22), z = pos.Z })
+                end
+            end
+        end
+    end
+    return pts
+end
 
-    local step = 320
+-- Сетка облёта всей карты (Areas + особые острова/высоты + широкая сетка X:-3100..+1300, Z:-300..+3850).
+-- Змейка по строкам ускоряет стриминг Roblox, а visitedZones пропускает все уже проверенные радиусы.
+function stand_out_howler.buildSweepPoints(extraPts)
+    local pts = {}
+    -- 1) Сначала все именованные зоны игры (Workspace.Game.Areas, StrengthSpawns, StoryLocations...)
+    if type(extraPts) == "table" then
+        for _, p in extraPts do
+            if type(p) == "table" and finite(p.x) and finite(p.y) and finite(p.z) then
+                table.insert(pts, { x = p.x, y = p.y, z = p.z })
+            end
+        end
+    end
+
+    -- 2) Известные удалённые/высокие ориентиры (яхта, Key West, южные/восточные/северные острова)
+    for _, landmark in {
+        { x = -2779, y = 58, z = 3645 },
+        { x = -2851, y = 118, z = 3692 },
+        { x = -1133, y = 26, z = 2567 },
+        { x = 165, y = 24, z = 3474 },
+        { x = -1773, y = 24, z = 2946 },
+        { x = 949, y = 24, z = 2984 },
+        { x = -607, y = 24, z = -34 },
+    } do
+        table.insert(pts, landmark)
+    end
+
+    -- 3) Широкая сетка по всему архипелагу (шаг 340 при RevealRange=200 покрывает весь квадрат)
+    local step = 340
     local row = 0
-    for z = 600, 2860, step do
+    for z = -300, 3850, step do
         row += 1
         if row % 2 == 1 then
-            for x = -2150, 220, step do
+            for x = -3100, 1300, step do
                 table.insert(pts, { x = x, y = 45, z = z })
             end
         else
-            for x = 220, -2150, -step do
+            for x = 1300, -3100, -step do
                 table.insert(pts, { x = x, y = 45, z = z })
             end
         end
     end
-    -- Дополнительно берег и ближний океан (вокруг острова)
-    for _, extra in {
-        { x = -2450, y = 35, z = 1700 },
-        { x = -2450, y = 35, z = 2400 },
-        { x = -2450, y = 35, z = 3100 },
-        { x = -1700, y = 35, z = 3200 },
-        { x = -900, y = 35, z = 3200 },
-        { x = -100, y = 35, z = 3200 },
-        { x = 500, y = 45, z = 1600 },
-        { x = 500, y = 45, z = 2400 },
-        { x = -1000, y = 45, z = 250 },
-        { x = -1800, y = 45, z = 250 },
-    } do
-        table.insert(pts, extra)
-    end
+
     return pts
 end
 
@@ -12971,16 +13069,31 @@ end
 --   teleportTo(x, y, z)
 --   sendHowler(cmd, arg)       ("Hold" | "Open" | "Ready", id)
 --   scanLocal() -> { [id] = { id, x, y, z, prompt } }  (optional)
+--   scanAreas() -> { { x, y, z }, ... }                (optional)
 --   firePrompt(prompt)         (optional)
 --   loadSpots() -> string      (optional, читает calcite_so_howler_spots.txt)
 --   saveSpots(text)            (optional, сохраняет calcite_so_howler_spots.txt)
+--   loadVisited() -> string    (optional, читает calcite_so_howler_visited.txt)
+--   saveVisited(text)          (optional, сохраняет calcite_so_howler_visited.txt)
 --   notify(title, text)        (optional)
 function stand_out_howler.new(deps)
     local initialSpots = {}
+    for id, pos in stand_out_howler.known_spots do
+        initialSpots[id] = { x = pos.x, y = pos.y, z = pos.z }
+    end
     if deps ~= nil and type(deps.loadSpots) == "function" then
         local ok, raw = pcall(deps.loadSpots)
         if ok and type(raw) == "string" then
-            initialSpots = stand_out_howler.parseSpotsCache(raw)
+            for id, pos in stand_out_howler.parseSpotsCache(raw) do
+                initialSpots[id] = pos
+            end
+        end
+    end
+    local initialVisited = {}
+    if deps ~= nil and type(deps.loadVisited) == "function" then
+        local okV, rawV = pcall(deps.loadVisited)
+        if okV and type(rawV) == "string" then
+            initialVisited = stand_out_howler.parseVisitedCache(rawV)
         end
     end
     return setmetatable({
@@ -12989,8 +13102,9 @@ function stand_out_howler.new(deps)
         phase = "idle",       -- "idle" | "remote_hold" | "remote_confirm" | "sweep" | "open_settle" | "open_hold" | "open_confirm"
         since = 0,
         startPos = nil,
-        revealed = initialSpots, -- [id] = { x, y, z } (кэш + живые Reveal)
-        visitedZones = {},    -- { { x, z }, ... } уже обследованные области в этой сессии
+        revealed = initialSpots,      -- [id] = { x, y, z } (вшитые + файл + живые Reveal)
+        visitedZones = initialVisited, -- { { x, z }, ... } сохранённые проверенные зоны
+        visitedDirty = false,
         failedOpen = {},      -- [id] = tries
         targetId = nil,
         targetPos = nil,
@@ -13000,6 +13114,13 @@ function stand_out_howler.new(deps)
         sweepIdx = 0,
         statusText = "",
     }, Collector)
+end
+
+function Collector:_flushVisited()
+    if self.visitedDirty and self.deps ~= nil and type(self.deps.saveVisited) == "function" then
+        self.visitedDirty = false
+        pcall(self.deps.saveVisited, stand_out_howler.formatVisitedCache(self.visitedZones))
+    end
 end
 
 function Collector:_isVisited(x, z)
@@ -13019,6 +13140,7 @@ function Collector:_markVisited(x, z)
     end
     if not self:_isVisited(x, z) then
         table.insert(self.visitedZones, { x = x, z = z })
+        self.visitedDirty = true
     end
 end
 
@@ -13037,6 +13159,7 @@ function Collector:onReveal(id, x, y, z)
 end
 
 function Collector:stop(silent)
+    self:_flushVisited()
     local wasRunning = self.running
     self.running = false
     self.phase = "idle"
@@ -13079,8 +13202,9 @@ function Collector:toggle(now, meX, meY, meZ)
     self.running = true
     self.failedOpen = {}
     self.remoteWorks = nil
-    -- Оставляем только ещё НЕ посещённые в этой сессии точки сетки; если все уже проверены — начинаем свежий круг
-    local allPts = stand_out_howler.buildSweepPoints()
+    -- Оставляем только ещё НЕ посещённые точки (Areas + расширенная сетка); если все уже проверены — начинаем свежий круг
+    local areaPts = (self.deps ~= nil and type(self.deps.scanAreas) == "function") and self.deps.scanAreas() or nil
+    local allPts = stand_out_howler.buildSweepPoints(areaPts)
     local freshPts = {}
     for _, pt in allPts do
         if not self:_isVisited(pt.x, pt.z) then
@@ -13089,6 +13213,8 @@ function Collector:toggle(now, meX, meY, meZ)
     end
     if #freshPts == 0 then
         self.visitedZones = {}
+        self.visitedDirty = true
+        self:_flushVisited()
         freshPts = allPts
     end
     self.sweepPts = freshPts
@@ -13127,6 +13253,7 @@ function Collector:_findRevealedUnopened(opened)
 end
 
 function Collector:_finish(cnt, msg)
+    self:_flushVisited()
     local sp = self.startPos
     self.running = false
     self.phase = "idle"
@@ -13296,6 +13423,9 @@ function Collector:update(now, meX, meY, meZ)
         end
         self.since = now
         self:_markVisited(pt.x, pt.z)
+        if #self.visitedZones % 5 == 0 then
+            self:_flushVisited()
+        end
         self.deps.teleportTo(pt.x, pt.y, pt.z)
     end
     local totalPts = self.sweepPts ~= nil and #self.sweepPts or 1
