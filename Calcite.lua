@@ -6099,16 +6099,43 @@ function main.start(env)
                 end
             end,
             clickM1 = function()
-                -- Не кликаем M1 пока открыто меню Calcite (ClickGUI), чтобы не переключать настройки в центре экрана
-                if ui ~= nil and ui.menuOpen() then return end
                 local okTb, focused = pcall(function() return UserInputService:GetFocusedTextBox() end)
                 if okTb and focused ~= nil then return end
+                local menuIsOpen = ui ~= nil and ui.menuOpen()
                 local vim = env.virtualInputManager
                 if vim ~= nil then
-                    local cx, cy = 400, 300
+                    local vw, vh = 800, 600
                     if camera ~= nil and camera.ViewportSize ~= nil then
-                        cx = math.floor(camera.ViewportSize.X * 0.5)
-                        cy = math.floor(camera.ViewportSize.Y * 0.5)
+                        vw = math.floor(camera.ViewportSize.X)
+                        vh = math.floor(camera.ViewportSize.Y)
+                    end
+                    local cx, cy = math.floor(vw * 0.5), math.floor(vh * 0.5)
+                    if menuIsOpen then
+                        -- Кликаем строго ВНЕ окна ClickGUI (и мимо топбара/хотбара), чтобы M1 работал даже с открытым меню
+                        local mx, my, mw, mh = nil, nil, nil, nil
+                        if ui.menuRect ~= nil then
+                            mx, my, mw, mh = ui.menuRect()
+                        end
+                        local pad = 20
+                        local candidates = {
+                            { 12, math.floor(vh * 0.5) },
+                            { math.max(12, vw - 12), math.floor(vh * 0.5) },
+                            { math.floor(vw * 0.5), 76 },
+                            { 12, math.max(80, vh - 140) },
+                            { math.max(12, vw - 12), math.max(80, vh - 140) },
+                        }
+                        local picked = false
+                        for _, pt in candidates do
+                            local px, py = pt[1], pt[2]
+                            local hitsMenu = mx ~= nil and px >= mx - pad and px <= mx + mw + pad
+                                and py >= my - pad and py <= my + mh + pad
+                            if not hitsMenu then
+                                cx, cy = px, py
+                                picked = true
+                                break
+                            end
+                        end
+                        if not picked then return end
                     end
                     pcall(function() vim:SendMouseButtonEvent(cx, cy, 0, true, game, 1) end)
                     if env.task and env.task.delay then
@@ -6118,7 +6145,7 @@ function main.start(env)
                     else
                         pcall(function() vim:SendMouseButtonEvent(cx, cy, 0, false, game, 1) end)
                     end
-                elseif type(env.mouse1press) == "function" and type(env.mouse1release) == "function" then
+                elseif not menuIsOpen and type(env.mouse1press) == "function" and type(env.mouse1release) == "function" then
                     pcall(env.mouse1press)
                     if env.task and env.task.delay then
                         env.task.delay(0.03, function() pcall(env.mouse1release) end)
@@ -8414,6 +8441,18 @@ function menu.create(deps)
     -- while the window is open the mouse is the user's
     function ui.menuOpen()
         return Library.Toggled == true
+    end
+
+    function ui.menuRect()
+        local frame = Window and Window.MainFrame
+        if frame == nil then return nil end
+        local ok, pos, sz = pcall(function()
+            return frame.AbsolutePosition, frame.AbsoluteSize
+        end)
+        if ok and pos ~= nil and sz ~= nil then
+            return pos.X, pos.Y, sz.X, sz.Y
+        end
+        return nil
     end
 
     function ui.notify(title, description)
