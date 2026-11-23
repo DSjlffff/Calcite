@@ -6747,6 +6747,22 @@ function main.start(env)
                     pcall(env.fireproximityprompt, prompt)
                 end
             end,
+            loadSpots = function()
+                if type(env.isfile) == "function" and type(env.readfile) == "function" then
+                    local ok, raw = pcall(function()
+                        return env.isfile("calcite_so_howler_spots.txt") and env.readfile("calcite_so_howler_spots.txt") or ""
+                    end)
+                    if ok and type(raw) == "string" then
+                        return raw
+                    end
+                end
+                return ""
+            end,
+            saveSpots = function(text)
+                if type(env.writefile) == "function" and type(text) == "string" then
+                    pcall(env.writefile, "calcite_so_howler_spots.txt", text)
+                end
+            end,
             notify = function(title, text)
                 if ui ~= nil and ui.notify ~= nil then
                     ui.notify(title, text)
@@ -12798,12 +12814,43 @@ stand_out_howler.settle = 0.22
 stand_out_howler.confirm_wait = 0.45
 stand_out_howler.sweep_step = 0.30
 stand_out_howler.above = 3.0
+stand_out_howler.visited_radius = 230
 
 local Collector = {}
 Collector.__index = Collector
 
 local function finite(v)
     return type(v) == "number" and v == v and v ~= math.huge and v ~= -math.huge
+end
+
+-- Сериализация/парсинг кэша координат кейсов (calcite_so_howler_spots.txt): "case_01=-123.4,19.5,456.7"
+function stand_out_howler.parseSpotsCache(raw)
+    local out = {}
+    if type(raw) ~= "string" or raw == "" then
+        return out
+    end
+    for line in string.gmatch(raw, "[^\r\n]+") do
+        local id, sx, sy, sz = string.match(line, "^%s*(case_%d%d)%s*=%s*([%-%.%d]+)%s*,%s*([%-%.%d]+)%s*,%s*([%-%.%d]+)%s*$")
+        local x, y, z = tonumber(sx), tonumber(sy), tonumber(sz)
+        if id ~= nil and finite(x) and finite(y) and finite(z) then
+            out[id] = { x = x, y = y, z = z }
+        end
+    end
+    return out
+end
+
+function stand_out_howler.formatSpotsCache(spots)
+    if type(spots) ~= "table" then
+        return ""
+    end
+    local lines = {}
+    for _, id in stand_out_howler.ids do
+        local p = spots[id]
+        if type(p) == "table" and finite(p.x) and finite(p.y) and finite(p.z) then
+            table.insert(lines, string.format("%s=%.2f,%.2f,%.2f", id, p.x, p.y, p.z))
+        end
+    end
+    return table.concat(lines, "\n")
 end
 
 local function safeAttr(obj, name)
@@ -12925,15 +12972,25 @@ end
 --   sendHowler(cmd, arg)       ("Hold" | "Open" | "Ready", id)
 --   scanLocal() -> { [id] = { id, x, y, z, prompt } }  (optional)
 --   firePrompt(prompt)         (optional)
+--   loadSpots() -> string      (optional, читает calcite_so_howler_spots.txt)
+--   saveSpots(text)            (optional, сохраняет calcite_so_howler_spots.txt)
 --   notify(title, text)        (optional)
 function stand_out_howler.new(deps)
+    local initialSpots = {}
+    if deps ~= nil and type(deps.loadSpots) == "function" then
+        local ok, raw = pcall(deps.loadSpots)
+        if ok and type(raw) == "string" then
+            initialSpots = stand_out_howler.parseSpotsCache(raw)
+        end
+    end
     return setmetatable({
         deps = deps,
         running = false,
         phase = "idle",       -- "idle" | "remote_hold" | "remote_confirm" | "sweep" | "open_settle" | "open_hold" | "open_confirm"
         since = 0,
         startPos = nil,
-        revealed = {},        -- [id] = { x, y, z }
+        revealed = initialSpots, -- [id] = { x, y, z } (кэш + живые Reveal)
+        visitedZones = {},    -- { { x, z }, ... } уже обследованные области в этой сессии
         failedOpen = {},      -- [id] = tries
         targetId = nil,
         targetPos = nil,
@@ -12945,9 +13002,37 @@ function stand_out_howler.new(deps)
     }, Collector)
 end
 
+function Collector:_isVisited(x, z)
+    local r2 = stand_out_howler.visited_radius * stand_out_howler.visited_radius
+    for _, v in self.visitedZones do
+        local dx, dz = x - v.x, z - v.z
+        if dx * dx + dz * dz < r2 then
+            return true
+        end
+    end
+    return false
+end
+
+function Collector:_markVisited(x, z)
+    if not finite(x) or not finite(z) then
+        return
+    end
+    if not self:_isVisited(x, z) then
+        table.insert(self.visitedZones, { x = x, z = z })
+    end
+end
+
 function Collector:onReveal(id, x, y, z)
     if type(id) == "string" and finite(x) and finite(y) and finite(z) then
+        local prev = self.revealed[id]
+        local changed = prev == nil
+            or math.abs(prev.x - x) > 0.5
+            or math.abs(prev.y - y) > 0.5
+            or math.abs(prev.z - z) > 0.5
         self.revealed[id] = { x = x, y = y, z = z }
+        if changed and self.deps ~= nil and type(self.deps.saveSpots) == "function" then
+            pcall(self.deps.saveSpots, stand_out_howler.formatSpotsCache(self.revealed))
+        end
     end
 end
 
@@ -12994,8 +13079,23 @@ function Collector:toggle(now, meX, meY, meZ)
     self.running = true
     self.failedOpen = {}
     self.remoteWorks = nil
-    self.sweepPts = stand_out_howler.buildSweepPoints()
+    -- Оставляем только ещё НЕ посещённые в этой сессии точки сетки; если все уже проверены — начинаем свежий круг
+    local allPts = stand_out_howler.buildSweepPoints()
+    local freshPts = {}
+    for _, pt in allPts do
+        if not self:_isVisited(pt.x, pt.z) then
+            table.insert(freshPts, pt)
+        end
+    end
+    if #freshPts == 0 then
+        self.visitedZones = {}
+        freshPts = allPts
+    end
+    self.sweepPts = freshPts
     self.sweepIdx = 0
+    if meX ~= nil and meZ ~= nil then
+        self:_markVisited(meX, meZ)
+    end
     self.targetId = nil
     self.targetPos = nil
     self.targetPrompt = nil
@@ -13012,7 +13112,10 @@ function Collector:_findRevealedUnopened(opened)
     local localCases = self.deps.scanLocal ~= nil and self.deps.scanLocal() or nil
     if type(localCases) == "table" then
         for id, info in localCases do
-            self.revealed[id] = { x = info.x, y = info.y, z = info.z, prompt = info.prompt }
+            self:onReveal(id, info.x, info.y, info.z)
+            if self.revealed[id] ~= nil then
+                self.revealed[id].prompt = info.prompt
+            end
         end
     end
     for _, id in stand_out_howler.ids do
@@ -13153,6 +13256,7 @@ function Collector:update(now, meX, meY, meZ)
         self.targetPrompt = revInfo.prompt
         self.phase = "open_settle"
         self.since = now
+        self:_markVisited(revInfo.x, revInfo.z)
         self.deps.teleportTo(revInfo.x, revInfo.y + stand_out_howler.above, revInfo.z)
         self.statusText = string.format("Кейсы: %d/%d | лечу к %s", cnt, stand_out_howler.total, revId)
         return true
@@ -13171,20 +13275,31 @@ function Collector:update(now, meX, meY, meZ)
         end
     end
 
-    -- 5) Облёт сетки карты, чтобы сервер прислал Reveal на все спрятанные кейсы
+    -- 5) Облёт сетки карты, пропуская уже посещённые зоны (радиус visited_radius = 230 ст)
     self.phase = "sweep"
     if now - self.since >= stand_out_howler.sweep_step then
-        self.sweepIdx += 1
-        local pt = self.sweepPts[self.sweepIdx]
+        local pt = nil
+        while true do
+            self.sweepIdx += 1
+            local cand = self.sweepPts[self.sweepIdx]
+            if cand == nil then
+                break
+            end
+            if not self:_isVisited(cand.x, cand.z) then
+                pt = cand
+                break
+            end
+        end
         if pt == nil then
             self:_finish(cnt, string.format("Облёт завершён: собрано %d/%d кейсов Howler.", cnt, stand_out_howler.total))
             return false
         end
         self.since = now
+        self:_markVisited(pt.x, pt.z)
         self.deps.teleportTo(pt.x, pt.y, pt.z)
     end
     local totalPts = self.sweepPts ~= nil and #self.sweepPts or 1
-    self.statusText = string.format("Кейсы: %d/%d | поиск %d/%d", cnt, stand_out_howler.total, self.sweepIdx, totalPts)
+    self.statusText = string.format("Кейсы: %d/%d | поиск %d/%d", cnt, stand_out_howler.total, math.min(self.sweepIdx, totalPts), totalPts)
     return true
 end
 
