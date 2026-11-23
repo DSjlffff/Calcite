@@ -6531,6 +6531,24 @@ function main.start(env)
                 end
                 return nil
             end,
+            activeRohan = function()
+                local sb = handle._soBounty
+                if sb.rohan ~= nil then
+                    -- Если прошло > 65 с без событий Drawing — сбрасываем, чтобы не зависнуть
+                    if sb.rohanAt ~= nil and env.clock() - sb.rohanAt > 65.0 then
+                        sb.rohan = nil
+                        return nil
+                    end
+                    return sb.rohan
+                end
+                return nil
+            end,
+            makeV2 = function(x, y)
+                if env.Vector2 ~= nil then
+                    return env.Vector2.new(x, y)
+                end
+                return { X = x, Y = y }
+            end,
             sendIncident = function(payload)
                 local sb = handle._soBounty
                 local rem = sb.remote
@@ -7378,7 +7396,27 @@ function main.start(env)
                         if bRem ~= nil then
                             sb.remote = bRem
                             sb.remoteConn = bRem.OnClientEvent:Connect(function(kind, bountyId, sub, data)
+                                if kind == "Incident" then
+                                    if sub == "ClosePuzzle" then
+                                        sb.puzzle = nil
+                                        sb.puzzleSawGui = false
+                                        return
+                                    end
+                                    if type(sub) == "string" and (string.find(sub, "Drawing", 1, true) ~= nil or string.find(string.lower(sub), "rohan", 1, true) ~= nil) then
+                                        local nowR = env.clock()
+                                        sb.rohan = stand_out_bounty.applyRohanEvent(sb.rohan, bountyId, sub, data, nowR)
+                                        sb.rohanAt = nowR
+                                        return
+                                    end
+                                end
                                 if kind == "Incident" and type(data) == "table" then
+                                    -- Пре-челендж Rohan иногда приходит с sub="Puzzle" и без Target/Values/Placed (только Token для DrawingChallenge)
+                                    if sub == "Puzzle" and data.Kind == "Drawing" and data.Token ~= nil then
+                                        local nowR = env.clock()
+                                        sb.rohan = stand_out_bounty.applyRohanEvent(sb.rohan, bountyId, "DrawingIntro", data, nowR)
+                                        sb.rohanAt = nowR
+                                        return
+                                    end
                                     local isPuzzleEvt = sub == "Puzzle"
                                         or (sb.puzzle ~= nil and data.Token ~= nil and data.Token == sb.puzzle.token)
                                         or (sb.puzzle ~= nil and type(sub) == "string" and string.find(string.lower(sub), "puzzle", 1, true) ~= nil)
@@ -11136,14 +11174,12 @@ stand_out_bounty.open_retry = 1.2
 stand_out_bounty.begin_wait = 1.8
 stand_out_bounty.travel_retry = 2.0
 
--- Инциденты с ручными мини-играми (рисование, караоке и т.п.) из Modules.Bounty.IncidentRules.Names.
--- "Small Change, Big Problem" (Harvest), "Trust Me on This One" (Hey Ya!) и
--- "Cheap Jewelry, Expensive Problem" (Dragona/Meryl) исключены — полностью поддерживаются автопрохождением!
+-- Инциденты с ручными мини-играми (караоке, чай и т.п.) из Modules.Bounty.IncidentRules.Names.
+-- Harvest, Hey Ya!, Cheap Jewelry, D'Arby и Rohan's Drawing Contest исключены — полностью поддерживаются автопрохождением!
 local INCIDENT_NAMES = {
     ["iced tea run"] = true,
     ["usagi's karaoke night"] = true,
     ["paco's challenge"] = true,
-    ["rohan's drawing contest"] = true,
     ["your personal helper friend"] = true,
 }
 
@@ -11666,6 +11702,9 @@ function stand_out_bounty.isNpcObjective(objectiveText)
         or string.find(low, "d'arby", 1, true) ~= nil
         or string.find(low, "darby", 1, true) ~= nil
         or string.find(low, "go fish", 1, true) ~= nil
+        or string.find(low, "rohan", 1, true) ~= nil
+        or string.find(low, "drawing", 1, true) ~= nil
+        or string.find(low, "sketch", 1, true) ~= nil
 end
 
 function stand_out_bounty.isDarbyObjective(objectiveText, titleText)
@@ -11925,8 +11964,8 @@ function stand_out_bounty.pickDialogueOption(options, objLow)
         return nil
     end
 
-    local preferred = findMatch({ "just deal", "dragona", "let's open", "open them", "howler", "payment record", "record", "evidence" })
-        or findMatch({ "necklace", "pendant", "stones", "restored", "fixed", "rebuilt", "here", "ready", "yes" })
+    local preferred = findMatch({ "just deal", "challenge", "draw", "sketch", "contest", "dragona", "let's open", "open them", "howler", "payment record", "record", "evidence" })
+        or findMatch({ "necklace", "pendant", "stones", "restored", "fixed", "rebuilt", "accept", "start", "here", "ready", "yes" })
     if preferred ~= nil then
         return preferred
     end
@@ -11947,6 +11986,176 @@ function stand_out_bounty.pickDialogueOption(options, objLow)
         end
     end
     return options[1]
+end
+
+-- Равномерно ресемплирует полилинию штриха (массив Vector2 / {X,Y}) ровно в count точек (128, как клиент Rohan).
+function stand_out_bounty.sampleStroke(pts, count, makeV2)
+    local out = {}
+    if type(pts) ~= "table" or #pts == 0 then
+        return out
+    end
+    local n = math.max(2, tonumber(count) or 128)
+    local ctor = makeV2 or function(x, y) return { X = x, Y = y } end
+    local m = #pts
+    if m == 1 then
+        local p = pts[1]
+        for _ = 1, n do
+            table.insert(out, ctor(p.X, p.Y))
+        end
+        return out
+    end
+
+    local cum = { 0 }
+    local total = 0
+    for i = 2, m do
+        local a, b = pts[i - 1], pts[i]
+        local dx, dy = (b.X - a.X), (b.Y - a.Y)
+        total += math.sqrt(dx * dx + dy * dy)
+        cum[i] = total
+    end
+
+    if total <= 1e-6 then
+        local p = pts[1]
+        for _ = 1, n do
+            table.insert(out, ctor(p.X, p.Y))
+        end
+        return out
+    end
+
+    local seg = 1
+    for i = 0, n - 1 do
+        local d = (i / (n - 1)) * total
+        while seg < m - 1 and cum[seg + 1] < d do
+            seg += 1
+        end
+        local d0, d1 = cum[seg], cum[seg + 1]
+        local span = d1 - d0
+        local t = span > 1e-9 and math.clamp((d - d0) / span, 0, 1) or 0
+        local a, b = pts[seg], pts[seg + 1]
+        table.insert(out, ctor(a.X + (b.X - a.X) * t, a.Y + (b.Y - a.Y) * t))
+    end
+    return out
+end
+
+-- Обрабатывает серверные пакеты ReplicatedStorage.Remotes.Bounty.OnClientEvent("Incident", bountyId, sub, data)
+-- для ROHAN'S DRAWING CONTEST (DrawingOpen -> DrawingStart -> DrawingStroke -> DrawingClose).
+function stand_out_bounty.applyRohanEvent(state, bountyId, sub, data, now)
+    if type(sub) ~= "string" then
+        return state
+    end
+    if sub == "DrawingClose" then
+        return nil
+    end
+    if type(data) ~= "table" then
+        return state
+    end
+    if sub == "DrawingOpen" then
+        return {
+            id = bountyId or (state and state.id),
+            token = data.Token,
+            strokes = type(data.Strokes) == "table" and data.Strokes or {},
+            nextIdx = 1,
+            started = false,
+            readySent = false,
+            waitingAck = false,
+            openedAt = now,
+            lastSentAt = 0,
+            challengeToken = nil,
+        }
+    end
+    if sub == "DrawingStart" then
+        if state == nil then
+            return nil
+        end
+        if data.Token == nil or data.Token == state.token then
+            state.started = true
+            state.lastSentAt = 0
+        end
+        return state
+    end
+    if sub == "DrawingStroke" then
+        if state == nil then
+            return nil
+        end
+        if data.Token == nil or data.Token == state.token then
+            state.waitingAck = false
+            if data.Accepted == true and type(data.Next) == "number" then
+                state.nextIdx = data.Next
+            end
+        end
+        return state
+    end
+    -- Пре-челендж (если перед DrawingOpen пришёл пакет с Token для DrawingChallenge)
+    local subLow = string.lower(sub)
+    if (string.find(subLow, "drawing", 1, true) ~= nil or string.find(subLow, "rohan", 1, true) ~= nil)
+        and data.Token ~= nil and (state == nil or state.strokes == nil) then
+        return {
+            id = bountyId or (state and state.id),
+            challengeToken = data.Token,
+            strokes = nil,
+            openedAt = now,
+            lastSentAt = 0,
+        }
+    end
+    return state
+end
+
+-- Генерирует следующий пакет для ROHAN'S DRAWING CONTEST (100% точность по эталонным Strokes от сервера).
+function stand_out_bounty.nextRohanMove(rohan, now, makeV2)
+    if type(rohan) ~= "table" then
+        return nil, nil
+    end
+    if rohan.challengeToken ~= nil and rohan.strokes == nil then
+        if now - (rohan.lastSentAt or 0) >= 0.8 then
+            rohan.lastSentAt = now
+            return {
+                Id = rohan.id,
+                Token = rohan.challengeToken,
+                Action = "DrawingChallenge",
+            }, "Rohan: начинаю конкурс"
+        end
+        return nil, "Rohan: запуск..."
+    end
+    if type(rohan.strokes) ~= "table" or #rohan.strokes == 0 then
+        return nil, nil
+    end
+    local total = #rohan.strokes
+    if not rohan.started then
+        if not rohan.readySent and now - (rohan.openedAt or 0) >= 0.45 then
+            rohan.readySent = true
+            rohan.lastSentAt = now
+            return {
+                Id = rohan.id,
+                Token = rohan.token,
+                Action = "DrawingReady",
+            }, "Rohan: готов к рисованию"
+        end
+        return nil, "Rohan: жду старт..."
+    end
+
+    local idx = rohan.nextIdx or 1
+    if idx > total then
+        return nil, string.format("Rohan: готово %d/%d (100%%)", total, total)
+    end
+
+    -- Ждём подтверждения предыдущего штриха до 0.8s (обычно приходит за 0.05s), затем шлём следующий
+    if rohan.waitingAck and now - (rohan.lastSentAt or 0) < 0.8 then
+        return nil, string.format("Rohan: штрих %d/%d", idx, total)
+    end
+    if now - (rohan.lastSentAt or 0) < 0.14 then
+        return nil, string.format("Rohan: штрих %d/%d", idx, total)
+    end
+
+    local pts = stand_out_bounty.sampleStroke(rohan.strokes[idx], 128, makeV2)
+    rohan.waitingAck = true
+    rohan.lastSentAt = now
+    return {
+        Action = "DrawingStroke",
+        Id = rohan.id,
+        Token = rohan.token,
+        Index = idx,
+        Points = pts,
+    }, string.format("Rohan: штрих %d/%d", idx, total)
 end
 
 -- Проверяет, остались ли ещё невыполненные ходы в головоломке (без изменения puzzle.attempted).
@@ -12255,8 +12464,10 @@ function Runner:update(now, opts, meX, meY, meZ)
     local ui = self.deps.readUi()
 
     local puzzle = self.deps.activePuzzle ~= nil and self.deps.activePuzzle() or nil
+    local rohan = self.deps.activeRohan ~= nil and self.deps.activeRohan() or nil
     local darbySt = self.deps.darbyState ~= nil and self.deps.darbyState() or nil
     local inInspection = ui.jewelryOpen == true or ui.jewelryActionBtn ~= nil or puzzle ~= nil
+    local inRohan = rohan ~= nil
     local inDarbyGame = ui.darbyOpen == true or (darbySt ~= nil and darbySt.active == true)
     local darbyBusy = darbySt ~= nil and ((darbySt.tableCamera == true) or (darbySt.busyUntil ~= nil and now < darbySt.busyUntil))
     local inDarbyStorage = (ui.standStorageOpen == true or darbyBusy)
@@ -12267,10 +12478,10 @@ function Runner:update(now, opts, meX, meY, meZ)
     local hasIncompleteSteps = progCur ~= nil and progTotal ~= nil and progCur < progTotal
 
     -- Дополнительно сверяем с атрибутом BountyNavigationActive (CanvasGroup трекера может оставаться Visible=true),
-    -- но если на трекере явно видны незавершённые шаги (например MISSING FROG 1/2), таймер ИЛИ открыто окно JewelryInspection / DarbyGoFish / StandStorage
+    -- но если на трекере явно видны незавершённые шаги (например MISSING FROG 1/2), таймер ИЛИ открыто окно мини-игры
     -- (игра может прятать BountyTracker во время мини-игры!) — баунти точно активно!
-    local hasActiveBounty = ui.trackerActive or inInspection or inDarbyGame or inDarbyStorage
-    if hasActiveBounty and not hasIncompleteSteps and not inInspection and not inDarbyGame and not inDarbyStorage and self.deps.navActive ~= nil then
+    local hasActiveBounty = ui.trackerActive or inInspection or inRohan or inDarbyGame or inDarbyStorage
+    if hasActiveBounty and not hasIncompleteSteps and not inInspection and not inRohan and not inDarbyGame and not inDarbyStorage and self.deps.navActive ~= nil then
         local okNav, nav = pcall(self.deps.navActive)
         if okNav and nav == false then
             local hasClock = string.find(ui.trackerTitle or "", "%d+:%d%d") ~= nil
@@ -12290,7 +12501,7 @@ function Runner:update(now, opts, meX, meY, meZ)
 
     -- Если на персонаже уже висит инцидент с мини-игрой, а включено «Пропускать мини-игры»,
     -- идём к Petyr и перезаписываем его на боевой/поисковый баунти!
-    local replaceIncident = hasActiveBounty and not inInspection and not inDarbyGame and (opts.skipIncidents ~= false) and stand_out_bounty.isIncident(ui.trackerTitle)
+    local replaceIncident = hasActiveBounty and not inInspection and not inRohan and not inDarbyGame and (opts.skipIncidents ~= false) and stand_out_bounty.isIncident(ui.trackerTitle)
 
     -- Отслеживаем завершение баунти (трекер был активен -> исчез)
     if self.wasTrackerActive and not hasActiveBounty then
@@ -12323,6 +12534,25 @@ function Runner:update(now, opts, meX, meY, meZ)
                 end
             end
             self.statusText = "Забираю награду..."
+            return
+        end
+
+        -- 0.45) ROHAN'S DRAWING CONTEST: отправляем эталонные штрихи из DrawingOpen (128 точек каждый -> 100% точность)
+        if inRohan then
+            self:_releasePrompt()
+            if self.deps.stopFighting ~= nil then
+                pcall(self.deps.stopFighting)
+            end
+            if self.deps.sendIncident ~= nil then
+                local move, suffix = stand_out_bounty.nextRohanMove(rohan, now, self.deps.makeV2)
+                if move ~= nil then
+                    self.lastAction = now
+                    pcall(self.deps.sendIncident, move)
+                end
+                self.statusText = title .. " | " .. (suffix or "Rohan: рисую...")
+            else
+                self.statusText = title .. " | Rohan: рисую..."
+            end
             return
         end
 
@@ -12835,11 +13065,12 @@ stand_out_howler.sweep_step = 0.28
 stand_out_howler.above = 3.0
 stand_out_howler.visited_radius = 155 -- строго меньше RevealRange=200 с запасом, чтобы не было слепых дыр между клетками
 
--- Подтверждённые координаты кейсов (обновляются и дополняются из calcite_so_howler_spots.txt)
+-- Подтверждённые координаты всех 10 кейсов (обновляются и дополняются из calcite_so_howler_spots.txt)
 stand_out_howler.known_spots = {
     case_01 = { x = -233.61, y = 16.91, z = 1042.95 },
     case_02 = { x = -1344.33, y = 17.57, z = 2184.88 },
     case_03 = { x = -1846.06, y = 16.78, z = 1206.74 },
+    case_04 = { x = 2378.16, y = 26.38, z = 1324.87 },
     case_05 = { x = -2248.65, y = 15.38, z = 823.66 },
     case_06 = { x = 179.50, y = 18.19, z = 1045.34 },
     case_07 = { x = -777.55, y = 34.19, z = 2595.42 },
