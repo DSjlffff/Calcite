@@ -10428,12 +10428,11 @@ stand_out_bounty.begin_wait = 1.8
 stand_out_bounty.travel_retry = 2.0
 
 -- Инциденты с ручными мини-играми (рисование, слайдеры ювелирки, караоке и т.п.) из Modules.Bounty.IncidentRules.Names.
--- "Small Change, Big Problem" (Harvest) исключён отсюда, т.к. полностью поддерживается автопрохождением!
+-- "Small Change, Big Problem" (Harvest) и "Trust Me on This One" (Hey Ya!) исключены, т.к. полностью поддерживаются автопрохождением!
 local INCIDENT_NAMES = {
     ["iced tea run"] = true,
     ["usagi's karaoke night"] = true,
     ["paco's challenge"] = true,
-    ["trust me on this one"] = true,
     ["rohan's drawing contest"] = true,
     ["your personal helper friend"] = true,
     ["cheap jewelry, expensive problem"] = true,
@@ -10884,8 +10883,12 @@ function stand_out_bounty.findMyPrompt(workspace, userId, tx, ty, tz, allowWorld
     -- 1) Приоритет: наша папка BountyWorld.Party_<userId> (быстрый обход)
     local bw = gameFolder:FindFirstChild("BountyWorld")
     local partyFolder = bw and bw:FindFirstChild("Party_" .. tostring(userId))
+    local partyOwnsPrompts = false
     if partyFolder ~= nil and partyFolder.GetDescendants ~= nil then
         for _, d in partyFolder:GetDescendants() do
+            if safeIsA(d, "ProximityPrompt") or safeIsA(d, "ClickDetector") then
+                partyOwnsPrompts = true
+            end
             if promptUsable(d) then
                 local x, y, z = stand_out_bounty.promptPosition(d)
                 if x ~= nil then
@@ -10893,6 +10896,12 @@ function stand_out_bounty.findMyPrompt(workspace, userId, tx, ty, tz, allowWorld
                 end
             end
         end
+    end
+
+    -- Если сцена инцидента в Party_<userId> сама содержит промпты (Harvest / Hey Ya!), но сейчас все выключены
+    -- (идёт сценка или шаг "Stand still on the gold square") — не хватаем случайные промпты мира рядом!
+    if partyOwnsPrompts then
+        return nil, nil, nil, nil
     end
 
     -- 2) Фолбэк: любой включённый ProximityPrompt / ClickDetector в радиусе 25 студов от VisibleBountyTrackerPosition
@@ -11119,6 +11128,28 @@ function Runner:update(now, opts, meX, meY, meZ)
         end
 
         local tx, ty, tz = self.deps.trackerPosition()
+
+        -- 2.5) Спец-шаги без кнопок (Trust Me on This One / Hey Ya!):
+        --   • "Stand still on the gold square (no button needed)" / "Stay on the square..." -> встать СТРОГО В ЦЕНТР квадрата и не двигаться!
+        --   • "Watch where the can goes" / "Watch the case land..." -> просто подождать 1-2 с до включения следующего промпта
+        local isStandSquare = string.find(objLow, "stand still", 1, true) ~= nil
+            or string.find(objLow, "gold square", 1, true) ~= nil
+            or string.find(objLow, "stay on the square", 1, true) ~= nil
+        if isStandSquare and tx ~= nil then
+            self:_releasePrompt()
+            local dx, dy, dz = tx - meX, ty - meY, tz - meZ
+            if dx * dx + dz * dz > 2.25 or math.abs(dy) > 8 then
+                self.deps.teleportTo(tx, ty + 3.0, tz)
+                self.lastAction = now
+            end
+            self.statusText = title .. " | стою на квадрате"
+            return
+        end
+        if string.find(objLow, "watch ", 1, true) ~= nil then
+            self:_releasePrompt()
+            self.statusText = title .. " | жду сценку"
+            return
+        end
 
         -- 3) Ищем активный промпт баунти (кэшируется в slow-pass, позиция читается живьём для бегающих Harvest)
         local prompt, px, py, pz = self.deps.myPrompt(tx, ty, tz)
