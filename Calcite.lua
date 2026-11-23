@@ -7380,77 +7380,79 @@ function main.start(env)
                 end
                 handle._soMob.entries = stand_out_mobs.scan(workspace, pNames)
             end
+            -- Подписываемся на ReplicatedStorage.Remotes.Bounty.OnClientEvent сразу в Stand Out,
+            -- чтобы не пропустить DrawingOpen/Puzzle даже если Auto Bounty включили после открытия окна
+            if handle._soBounty.runner ~= nil and handle._soBounty.remoteConn == nil and not handle._soBounty.remoteTried then
+                local sb = handle._soBounty
+                sb.remoteTried = true
+                pcall(function()
+                    local rs = game:GetService("ReplicatedStorage")
+                    local rems = rs and rs:FindFirstChild("Remotes")
+                    local bRem = rems and rems:FindFirstChild("Bounty")
+                    if bRem ~= nil then
+                        sb.remote = bRem
+                        sb.remoteConn = bRem.OnClientEvent:Connect(function(kind, bountyId, sub, data)
+                            if kind == "Incident" then
+                                if sub == "ClosePuzzle" then
+                                    sb.puzzle = nil
+                                    sb.puzzleSawGui = false
+                                    return
+                                end
+                                if type(sub) == "string" and (string.find(sub, "Drawing", 1, true) ~= nil or string.find(string.lower(sub), "rohan", 1, true) ~= nil) then
+                                    local nowR = env.clock()
+                                    sb.rohan = stand_out_bounty.applyRohanEvent(sb.rohan, bountyId, sub, data, nowR)
+                                    sb.rohanAt = nowR
+                                    return
+                                end
+                            end
+                            if kind == "Incident" and type(data) == "table" then
+                                -- Пре-челендж Rohan иногда приходит с sub="Puzzle" и без Target/Values/Placed (только Token для DrawingChallenge)
+                                if sub == "Puzzle" and data.Kind == "Drawing" and data.Token ~= nil then
+                                    local nowR = env.clock()
+                                    sb.rohan = stand_out_bounty.applyRohanEvent(sb.rohan, bountyId, "DrawingIntro", data, nowR)
+                                    sb.rohanAt = nowR
+                                    return
+                                end
+                                local isPuzzleEvt = sub == "Puzzle"
+                                    or (sb.puzzle ~= nil and data.Token ~= nil and data.Token == sb.puzzle.token)
+                                    or (sb.puzzle ~= nil and type(sub) == "string" and string.find(string.lower(sub), "puzzle", 1, true) ~= nil)
+                                if isPuzzleEvt then
+                                    if data.Open == false then
+                                        sb.puzzle = nil
+                                        sb.puzzleSawGui = false
+                                        return
+                                    end
+                                    local ver = data.Version
+                                    if ver == nil and sb.puzzle ~= nil then ver = sb.puzzle.serverVersion end
+                                    ver = ver or 0
+                                    sb.puzzle = {
+                                        id = bountyId or (sb.puzzle and sb.puzzle.id),
+                                        token = data.Token or (sb.puzzle and sb.puzzle.token),
+                                        kind = data.Kind or (sb.puzzle and sb.puzzle.kind),
+                                        version = ver,
+                                        serverVersion = ver,
+                                        sentCount = 0,
+                                        sentAt = nil,
+                                        target = data.Target or (sb.puzzle and sb.puzzle.target),
+                                        values = data.Values or (sb.puzzle and sb.puzzle.values),
+                                        placed = data.Placed or (sb.puzzle and sb.puzzle.placed),
+                                        open = true,
+                                        attempted = {},
+                                    }
+                                    sb.puzzleSawGui = false
+                                    sb.puzzleAt = env.clock()
+                                end
+                            end
+                        end)
+                    end
+                end)
+            end
             if s.standOutBounty ~= nil and s.standOutBounty.enabled then
                 local pNames = {}
                 for _, pl in Players:GetPlayers() do
                     pNames[pl.Name] = true
                 end
                 local sb = handle._soBounty
-                -- Подписываемся на ReplicatedStorage.Remotes.Bounty.OnClientEvent для перехвата головоломок (Cheap Jewelry)
-                if sb.remoteConn == nil and not sb.remoteTried then
-                    sb.remoteTried = true
-                    pcall(function()
-                        local rs = game:GetService("ReplicatedStorage")
-                        local rems = rs and rs:FindFirstChild("Remotes")
-                        local bRem = rems and rems:FindFirstChild("Bounty")
-                        if bRem ~= nil then
-                            sb.remote = bRem
-                            sb.remoteConn = bRem.OnClientEvent:Connect(function(kind, bountyId, sub, data)
-                                if kind == "Incident" then
-                                    if sub == "ClosePuzzle" then
-                                        sb.puzzle = nil
-                                        sb.puzzleSawGui = false
-                                        return
-                                    end
-                                    if type(sub) == "string" and (string.find(sub, "Drawing", 1, true) ~= nil or string.find(string.lower(sub), "rohan", 1, true) ~= nil) then
-                                        local nowR = env.clock()
-                                        sb.rohan = stand_out_bounty.applyRohanEvent(sb.rohan, bountyId, sub, data, nowR)
-                                        sb.rohanAt = nowR
-                                        return
-                                    end
-                                end
-                                if kind == "Incident" and type(data) == "table" then
-                                    -- Пре-челендж Rohan иногда приходит с sub="Puzzle" и без Target/Values/Placed (только Token для DrawingChallenge)
-                                    if sub == "Puzzle" and data.Kind == "Drawing" and data.Token ~= nil then
-                                        local nowR = env.clock()
-                                        sb.rohan = stand_out_bounty.applyRohanEvent(sb.rohan, bountyId, "DrawingIntro", data, nowR)
-                                        sb.rohanAt = nowR
-                                        return
-                                    end
-                                    local isPuzzleEvt = sub == "Puzzle"
-                                        or (sb.puzzle ~= nil and data.Token ~= nil and data.Token == sb.puzzle.token)
-                                        or (sb.puzzle ~= nil and type(sub) == "string" and string.find(string.lower(sub), "puzzle", 1, true) ~= nil)
-                                    if isPuzzleEvt then
-                                        if data.Open == false then
-                                            sb.puzzle = nil
-                                            sb.puzzleSawGui = false
-                                            return
-                                        end
-                                        local ver = data.Version
-                                        if ver == nil and sb.puzzle ~= nil then ver = sb.puzzle.serverVersion end
-                                        ver = ver or 0
-                                        sb.puzzle = {
-                                            id = bountyId or (sb.puzzle and sb.puzzle.id),
-                                            token = data.Token or (sb.puzzle and sb.puzzle.token),
-                                            kind = data.Kind or (sb.puzzle and sb.puzzle.kind),
-                                            version = ver,
-                                            serverVersion = ver,
-                                            sentCount = 0,
-                                            sentAt = nil,
-                                            target = data.Target or (sb.puzzle and sb.puzzle.target),
-                                            values = data.Values or (sb.puzzle and sb.puzzle.values),
-                                            placed = data.Placed or (sb.puzzle and sb.puzzle.placed),
-                                            open = true,
-                                            attempted = {},
-                                        }
-                                        sb.puzzleSawGui = false
-                                        sb.puzzleAt = env.clock()
-                                    end
-                                end
-                            end)
-                        end
-                    end)
-                end
                 -- Подписываемся на ReplicatedStorage.Remotes.StandStorage.OnClientEvent для D'Arby Go Fish
                 if sb.ssConn == nil and not sb.ssTried then
                     sb.ssTried = true
@@ -11301,6 +11303,8 @@ function stand_out_bounty.readUi(playerGui)
         darbyChallengeBtn = nil,
         darbyBountyPrompt = false,
         darbyOpen = false,
+        rohanOpen = false,
+        rohanSubmitBtn = nil,
         bounties = {}, -- { button, title, complete, isIncident }
     }
     if playerGui == nil then
@@ -11355,6 +11359,65 @@ function stand_out_bounty.readUi(playerGui)
         local dGui = playerGui:FindFirstChild("DarbyGoFish")
         if dGui ~= nil and dGui.Enabled == true then
             info.darbyOpen = true
+        end
+
+        -- Окно мини-игры ROHAN'S DRAWING CONTEST ("YOUR DRAWING" + кнопка "SUBMIT")
+        local function scanRohanContainer(container)
+            if container == nil or container.GetDescendants == nil then return false end
+            local hasRohanTitle = false
+            local submitBtn = nil
+            for _, d in container:GetDescendants() do
+                if safeIsA(d, "TextLabel") and d.Visible ~= false and type(d.Text) == "string" and d.Text ~= "" then
+                    local tl = string.lower(d.Text)
+                    if string.find(tl, "rohan's drawing", 1, true) ~= nil or string.find(tl, "your drawing", 1, true) ~= nil then
+                        hasRohanTitle = true
+                    end
+                elseif (safeIsA(d, "TextButton") or safeIsA(d, "ImageButton")) and d.Visible ~= false then
+                    local txt = ""
+                    if safeIsA(d, "TextButton") and type(d.Text) == "string" and d.Text ~= "" then
+                        txt = d.Text
+                    elseif d.GetDescendants ~= nil then
+                        for _, sub in d:GetDescendants() do
+                            if safeIsA(sub, "TextLabel") and type(sub.Text) == "string" and sub.Text ~= "" then
+                                txt = sub.Text
+                                break
+                            end
+                        end
+                    end
+                    if string.match(string.lower(txt), "^%s*submit%s*$") ~= nil then
+                        submitBtn = d
+                    end
+                end
+            end
+            if hasRohanTitle then
+                info.rohanOpen = true
+                if submitBtn ~= nil then
+                    info.rohanSubmitBtn = submitBtn
+                end
+                return true
+            end
+            return false
+        end
+        if playerGui.GetChildren ~= nil then
+            for _, gui in playerGui:GetChildren() do
+                if safeIsA(gui, "ScreenGui") and gui.Enabled == true then
+                    local gn = gui.Name or ""
+                    if gn ~= "Dialogue" and gn ~= "JewelryInspection" and gn ~= "StandStorage" and gn ~= "DarbyGoFish"
+                        and string.sub(gn, 1, 7) ~= "Calcite" then
+                        if gn == "Bounty" then
+                            if gui.GetChildren ~= nil then
+                                for _, ch in gui:GetChildren() do
+                                    if ch.Name ~= "BountyTracker" and ch.Name ~= "BountySelect" and ch.Visible == true then
+                                        if scanRohanContainer(ch) then break end
+                                    end
+                                end
+                            end
+                        elseif scanRohanContainer(gui) then
+                            break
+                        end
+                    end
+                end
+            end
         end
 
         -- Проверяем активный диалог (Petyr claim/yes, а также квестовые NPC вроде Meryl Mei Qi и Dragona)
@@ -12055,9 +12118,12 @@ function stand_out_bounty.applyRohanEvent(state, bountyId, sub, data, now)
             token = data.Token,
             strokes = type(data.Strokes) == "table" and data.Strokes or {},
             nextIdx = 1,
+            acceptedCount = 0,
             started = false,
             readySent = false,
             waitingAck = false,
+            submitStage = 0,
+            submittedAt = 0,
             openedAt = now,
             lastSentAt = 0,
             challengeToken = nil,
@@ -12079,8 +12145,13 @@ function stand_out_bounty.applyRohanEvent(state, bountyId, sub, data, now)
         end
         if data.Token == nil or data.Token == state.token then
             state.waitingAck = false
-            if data.Accepted == true and type(data.Next) == "number" then
-                state.nextIdx = data.Next
+            if data.Accepted == true then
+                state.acceptedCount = (state.acceptedCount or 0) + 1
+                if type(data.Next) == "number" then
+                    state.nextIdx = data.Next
+                else
+                    state.nextIdx = (state.nextIdx or 1) + 1
+                end
             end
         end
         return state
@@ -12130,12 +12201,46 @@ function stand_out_bounty.nextRohanMove(rohan, now, makeV2)
                 Action = "DrawingReady",
             }, "Rohan: готов к рисованию"
         end
-        return nil, "Rohan: жду старт..."
+        if rohan.readySent and now - (rohan.openedAt or 0) >= 1.5 then
+            rohan.started = true
+            rohan.lastSentAt = 0
+        else
+            return nil, "Rohan: жду старт..."
+        end
     end
 
     local idx = rohan.nextIdx or 1
     if idx > total then
-        return nil, string.format("Rohan: готово %d/%d (100%%)", total, total)
+        local stage = rohan.submitStage or 0
+        if stage == 0 then
+            if now - (rohan.lastSentAt or 0) < 0.25 then
+                return nil, string.format("Rohan: готово %d/%d", total, total)
+            end
+            rohan.submitStage = 1
+            rohan.lastSentAt = now
+            rohan.submittedAt = now
+            return {
+                Action = "DrawingSubmit",
+                Id = rohan.id,
+                Token = rohan.token,
+            }, string.format("Rohan: сдаю %d/%d", total, total)
+        elseif stage == 2 and now - (rohan.lastSentAt or 0) >= 0.8 then
+            rohan.submitStage = 3
+            rohan.lastSentAt = now
+            return {
+                Action = "DrawingFinish",
+                Id = rohan.id,
+                Token = rohan.token,
+            }, string.format("Rohan: сдаю %d/%d", total, total)
+        elseif stage >= 3 and now - (rohan.lastSentAt or 0) >= 2.0 then
+            rohan.lastSentAt = now
+            return {
+                Action = "DrawingSubmit",
+                Id = rohan.id,
+                Token = rohan.token,
+            }, string.format("Rohan: сдаю %d/%d", total, total)
+        end
+        return nil, string.format("Rohan: сдаю %d/%d", total, total)
     end
 
     -- Ждём подтверждения предыдущего штриха до 0.8s (обычно приходит за 0.05s), затем шлём следующий
@@ -12467,7 +12572,7 @@ function Runner:update(now, opts, meX, meY, meZ)
     local rohan = self.deps.activeRohan ~= nil and self.deps.activeRohan() or nil
     local darbySt = self.deps.darbyState ~= nil and self.deps.darbyState() or nil
     local inInspection = ui.jewelryOpen == true or ui.jewelryActionBtn ~= nil or puzzle ~= nil
-    local inRohan = rohan ~= nil
+    local inRohan = rohan ~= nil or ui.rohanOpen == true
     local inDarbyGame = ui.darbyOpen == true or (darbySt ~= nil and darbySt.active == true)
     local darbyBusy = darbySt ~= nil and ((darbySt.tableCamera == true) or (darbySt.busyUntil ~= nil and now < darbySt.busyUntil))
     local inDarbyStorage = (ui.standStorageOpen == true or darbyBusy)
@@ -12537,21 +12642,51 @@ function Runner:update(now, opts, meX, meY, meZ)
             return
         end
 
-        -- 0.45) ROHAN'S DRAWING CONTEST: отправляем эталонные штрихи из DrawingOpen (128 точек каждый -> 100% точность)
+        -- 0.45) ROHAN'S DRAWING CONTEST: отправляем эталонные штрихи из DrawingOpen (128 точек каждый -> 100% точность),
+        -- затем отправляем DrawingSubmit и нажимаем кнопку SUBMIT в UI
         if inRohan then
             self:_releasePrompt()
             if self.deps.stopFighting ~= nil then
                 pcall(self.deps.stopFighting)
             end
-            if self.deps.sendIncident ~= nil then
-                local move, suffix = stand_out_bounty.nextRohanMove(rohan, now, self.deps.makeV2)
-                if move ~= nil then
-                    self.lastAction = now
-                    pcall(self.deps.sendIncident, move)
+            if rohan ~= nil then
+                local suffix = nil
+                if self.deps.sendIncident ~= nil then
+                    local move
+                    move, suffix = stand_out_bounty.nextRohanMove(rohan, now, self.deps.makeV2)
+                    if move ~= nil then
+                        self.lastAction = now
+                        pcall(self.deps.sendIncident, move)
+                    end
+                end
+                local function clickSubmitBtn()
+                    if ui.rohanSubmitBtn == nil then
+                        return false
+                    end
+                    local clicked = false
+                    if self.deps.clickUiButton ~= nil then
+                        local okC, resC = pcall(self.deps.clickUiButton, ui.rohanSubmitBtn)
+                        clicked = okC and resC == true
+                    end
+                    if not clicked and self.deps.activateButton ~= nil then
+                        pcall(self.deps.activateButton, ui.rohanSubmitBtn)
+                        clicked = true
+                    end
+                    return clicked
+                end
+                if rohan.submitStage == 1 and rohan.submittedAt ~= nil and now - rohan.submittedAt >= 0.45 then
+                    if clickSubmitBtn() then
+                        self.lastAction = now
+                    end
+                    rohan.submitStage = 2
+                elseif (rohan.submitStage or 0) >= 2 and ui.rohanSubmitBtn ~= nil and now - self.lastAction >= 1.2 then
+                    if clickSubmitBtn() then
+                        self.lastAction = now
+                    end
                 end
                 self.statusText = title .. " | " .. (suffix or "Rohan: рисую...")
             else
-                self.statusText = title .. " | Rohan: рисую..."
+                self.statusText = title .. " | Rohan: жду пакет..."
             end
             return
         end
