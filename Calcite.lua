@@ -4979,6 +4979,12 @@ function main.start(env)
             end)
             handle._soBounty.ssConn = nil
         end
+        if handle._soBounty.karaokeConn ~= nil then
+            pcall(function()
+                handle._soBounty.karaokeConn:Disconnect()
+            end)
+            handle._soBounty.karaokeConn = nil
+        end
         if handle._soHowler.collector ~= nil then
             pcall(function()
                 handle._soHowler.collector:stop(true)
@@ -6563,6 +6569,63 @@ function main.start(env)
                 end
                 return nil
             end,
+            activeKaraoke = function()
+                local sb = handle._soBounty
+                if sb.karaoke ~= nil then
+                    local limit = math.max((sb.karaoke.duration or 30) + 25, 65)
+                    if sb.karaokeAt ~= nil and env.clock() - sb.karaokeAt > limit then
+                        sb.karaoke = nil
+                        return nil
+                    end
+                    return sb.karaoke
+                end
+                return nil
+            end,
+            serverTime = function()
+                if workspace ~= nil and workspace.GetServerTimeNow ~= nil then
+                    local okT, t = pcall(function() return workspace:GetServerTimeNow() end)
+                    if okT and type(t) == "number" then
+                        return t
+                    end
+                end
+                return env.clock()
+            end,
+            karaokeSongPlaying = function()
+                local pg = localPlayer:FindFirstChildOfClass("PlayerGui")
+                local kGui = pg and pg:FindFirstChild("Karaoke")
+                if kGui == nil or kGui.Enabled ~= true then
+                    return false
+                end
+                local rp = kGui:FindFirstChild("RhythmPanel")
+                local songLbl = rp and rp:FindFirstChild("Song")
+                if songLbl ~= nil and type(songLbl.Text) == "string" and songLbl.Text ~= "" and string.lower(songLbl.Text) ~= "ready" then
+                    return true
+                end
+                return false
+            end,
+            sendKaraoke = function(cmd, a1, a2, a3)
+                local sb = handle._soBounty
+                local rem = sb.karaokeRemote
+                if rem == nil then
+                    pcall(function()
+                        local rs = game:GetService("ReplicatedStorage")
+                        local rems = rs and rs:FindFirstChild("Remotes")
+                        rem = rems and rems:FindFirstChild("Karaoke")
+                        sb.karaokeRemote = rem
+                    end)
+                end
+                if rem ~= nil then
+                    pcall(function()
+                        if a3 ~= nil then
+                            rem:FireServer(cmd, a1, a2, a3)
+                        elseif a2 ~= nil then
+                            rem:FireServer(cmd, a1, a2)
+                        else
+                            rem:FireServer(cmd, a1)
+                        end
+                    end)
+                end
+            end,
             makeV2 = function(x, y)
                 if env.Vector2 ~= nil then
                     return env.Vector2.new(x, y)
@@ -7463,6 +7526,31 @@ function main.start(env)
                                     sb.puzzleAt = env.clock()
                                 end
                             end
+                        end)
+                    end
+                end)
+            end
+            -- Подписываемся на ReplicatedStorage.Remotes.Karaoke.OnClientEvent сразу в Stand Out (Usagi's Karaoke Night)
+            if handle._soBounty.runner ~= nil and handle._soBounty.karaokeConn == nil and not handle._soBounty.karaokeTried then
+                local sb = handle._soBounty
+                sb.karaokeTried = true
+                pcall(function()
+                    local rs = game:GetService("ReplicatedStorage")
+                    local rems = rs and rs:FindFirstChild("Remotes")
+                    local kRem = rems and rems:FindFirstChild("Karaoke")
+                    if kRem ~= nil then
+                        sb.karaokeRemote = kRem
+                        sb.karaokeConn = kRem.OnClientEvent:Connect(function(kind, data)
+                            local nowK = env.clock()
+                            local nowSrv = nowK
+                            if workspace ~= nil and workspace.GetServerTimeNow ~= nil then
+                                local okT, t = pcall(function() return workspace:GetServerTimeNow() end)
+                                if okT and type(t) == "number" then
+                                    nowSrv = t
+                                end
+                            end
+                            sb.karaoke = stand_out_bounty.applyKaraokeEvent(sb.karaoke, kind, data, nowSrv, nowK)
+                            sb.karaokeAt = nowK
                         end)
                     end
                 end)
@@ -11196,11 +11284,10 @@ stand_out_bounty.open_retry = 1.2
 stand_out_bounty.begin_wait = 1.8
 stand_out_bounty.travel_retry = 2.0
 
--- Инциденты с ручными мини-играми (караоке, чай и т.п.) из Modules.Bounty.IncidentRules.Names.
--- Harvest, Hey Ya!, Cheap Jewelry, D'Arby и Rohan's Drawing Contest исключены — полностью поддерживаются автопрохождением!
+-- Инциденты с ручными мини-играми (чай, Пако и т.п.) из Modules.Bounty.IncidentRules.Names.
+-- Harvest, Hey Ya!, Cheap Jewelry, D'Arby, Rohan's Drawing Contest и Usagi's Karaoke Night поддерживаются автопрохождением!
 local INCIDENT_NAMES = {
     ["iced tea run"] = true,
-    ["usagi's karaoke night"] = true,
     ["paco's challenge"] = true,
     ["your personal helper friend"] = true,
 }
@@ -11806,6 +11893,9 @@ function stand_out_bounty.isNpcObjective(objectiveText)
         or string.find(low, "rohan", 1, true) ~= nil
         or string.find(low, "drawing", 1, true) ~= nil
         or string.find(low, "sketch", 1, true) ~= nil
+        or string.find(low, "usagi", 1, true) ~= nil
+        or string.find(low, "karaoke", 1, true) ~= nil
+        or string.find(low, "sing ", 1, true) ~= nil
 end
 
 function stand_out_bounty.isDarbyObjective(objectiveText, titleText)
@@ -12065,8 +12155,18 @@ function stand_out_bounty.pickDialogueOption(options, objLow)
         return nil
     end
 
-    local preferred = findMatch({ "just deal", "challenge", "draw", "sketch", "contest", "dragona", "let's open", "open them", "howler", "payment record", "record", "evidence" })
-        or findMatch({ "necklace", "pendant", "stones", "restored", "fixed", "rebuilt", "accept", "start", "here", "ready", "yes" })
+    if type(objLow) == "string" then
+        local reqSong = string.match(objLow, "sing%s+(.-)%s+with")
+        if reqSong ~= nil and #reqSong >= 3 then
+            local songOpt = findMatch({ reqSong })
+            if songOpt ~= nil then
+                return songOpt
+            end
+        end
+    end
+
+    local preferred = findMatch({ "just deal", "challenge", "draw", "sketch", "contest", "karaoke", "sing", "duet", "dragona", "let's open", "open them", "howler", "payment record", "record", "evidence" })
+        or findMatch({ "necklace", "pendant", "stones", "restored", "fixed", "rebuilt", "accept", "start", "let's", "sure", "here", "ready", "yes" })
     if preferred ~= nil then
         return preferred
     end
@@ -12299,6 +12399,199 @@ function stand_out_bounty.nextRohanMove(rohan, now, makeV2)
         Index = idx,
         Points = pts,
     }, string.format("Rohan: штрих %d/%d", idx, total)
+end
+
+-- Определяет длительность удержания hold-ноты караоке (поддерживает разные имена полей)
+local function karaokeHoldDuration(note)
+    if type(note) ~= "table" then
+        return 0
+    end
+    local d = tonumber(note.Hold)
+        or tonumber(note.Duration)
+        or tonumber(note.Length)
+        or tonumber(note.HoldTime)
+        or tonumber(note.HoldDuration)
+        or tonumber(note.Sustain)
+    if d ~= nil and finite(d) and d > 0 then
+        return d
+    end
+    if type(note.EndTime) == "number" and type(note.Time) == "number" and note.EndTime > note.Time then
+        return note.EndTime - note.Time
+    end
+    if note.Hold == true then
+        return 0.6
+    end
+    return 0
+end
+
+-- Обрабатывает серверные пакеты ReplicatedStorage.Remotes.Karaoke.OnClientEvent (Prepare / Start / Hit / End)
+-- для USAGI'S KARAOKE NIGHT.
+function stand_out_bounty.applyKaraokeEvent(state, kind, data, nowServer, nowClock)
+    if type(kind) ~= "string" then
+        return state
+    end
+    if kind == "End" or kind == "Cancel" or kind == "Leave" or kind == "Close" then
+        return nil
+    end
+    if kind == "Prepare" and type(data) == "table" and data.Id ~= nil then
+        local notes = {}
+        if type(data.Notes) == "table" then
+            for i, n in ipairs(data.Notes) do
+                if type(n) == "table" and type(n.Time) == "number" and type(n.Key) == "string" then
+                    table.insert(notes, {
+                        index = i,
+                        time = n.Time,
+                        key = n.Key,
+                        hold = karaokeHoldDuration(n),
+                        pressed = false,
+                        holding = false,
+                    })
+                end
+            end
+            table.sort(notes, function(a, b)
+                if a.time ~= b.time then
+                    return a.time < b.time
+                end
+                return a.index < b.index
+            end)
+        end
+        return {
+            id = data.Id,
+            title = data.Title or data.SongName or "Karaoke",
+            duration = tonumber(data.Duration) or 25,
+            travelTime = tonumber(data.TravelTime) or 4,
+            notes = notes,
+            started = false,
+            readySent = false,
+            playingSynced = false,
+            songOrigin = nil,
+            preparedAt = nowClock or 0,
+            resolved = 0,
+            perfects = 0,
+            score = 0,
+            pendingReleases = {},
+        }
+    end
+    if state == nil then
+        return nil
+    end
+    if type(data) == "table" and data.Id ~= nil and data.Id ~= state.id then
+        return state
+    end
+    if kind == "Start" then
+        state.started = true
+        local st = type(data) == "table" and tonumber(data.Start) or nil
+        local travel = state.travelTime or 4
+        if st ~= nil and finite(st) then
+            if st > nowServer + 1.0 then
+                state.songOrigin = st
+            else
+                state.songOrigin = st + travel
+            end
+        else
+            state.songOrigin = nowServer + travel
+        end
+        return state
+    end
+    if kind == "Hit" and type(data) == "table" and type(data.Result) == "table" then
+        local res = data.Result
+        if type(res.Resolved) == "number" then
+            state.resolved = res.Resolved
+        end
+        if type(res.Score) == "number" then
+            state.score = res.Score
+        end
+        if res.Grade == "Perfect" then
+            state.perfects = (state.perfects or 0) + 1
+        end
+        if res.Holding == true and type(res.Index) == "number" then
+            -- Страховка на случай hold-ноты без явного числового поля: продлеваем удержание!
+            for _, pr in state.pendingReleases do
+                if pr.noteIdx == res.Index and pr.at < nowServer + 0.25 then
+                    pr.at = nowServer + 0.55
+                end
+            end
+        end
+        return state
+    end
+    return state
+end
+
+-- Выдаёт команды для Remotes.Karaoke:FireServer(...) на текущий кадр:
+-- точные Input / Release ровно по расписанию Notes[i].Time (Perfect на каждой ноте).
+function stand_out_bounty.stepKaraoke(state, nowServer, nowClock, songPlayingInUi)
+    local cmds = {}
+    if type(state) ~= "table" or state.id == nil then
+        return cmds, nil
+    end
+    if not state.started then
+        if not state.readySent and (nowClock - (state.preparedAt or 0)) >= 1.5 then
+            state.readySent = true
+            table.insert(cmds, { "Ready", state.id })
+        end
+        return cmds, "Karaoke: подготовка..."
+    end
+
+    if songPlayingInUi == false then
+        state.sawReadyUi = true
+    elseif songPlayingInUi == true and not state.playingSynced then
+        state.playingSynced = true
+        if state.songOrigin == nil or (state.sawReadyUi and math.abs(nowServer - state.songOrigin) > 0.35) then
+            state.songOrigin = nowServer
+        end
+    end
+
+    if state.songOrigin == nil then
+        return cmds, "Karaoke: жду старт..."
+    end
+
+    local elapsed = nowServer - state.songOrigin
+    if elapsed < 0 then
+        return cmds, string.format("Karaoke: старт %.1fс", -elapsed)
+    end
+
+    -- 1) Отпускаем клавиши, чьё время удержания истекло
+    local keep = {}
+    for _, pr in state.pendingReleases do
+        if nowServer >= pr.at then
+            table.insert(cmds, { "Release", state.id, pr.key, nowServer })
+        else
+            table.insert(keep, pr)
+        end
+    end
+    state.pendingReleases = keep
+
+    -- 2) Нажимаем все ноты, дошедшие до линии попадания (elapsed >= note.time)
+    local pressedCount = 0
+    local total = #state.notes
+    for _, note in state.notes do
+        if note.pressed then
+            pressedCount += 1
+        elseif elapsed >= note.time then
+            -- Если эта же клавиша ещё зажата от предыдущей ноты — сначала отпускаем её
+            local nextKeep = {}
+            for _, pr in state.pendingReleases do
+                if pr.key == note.key then
+                    table.insert(cmds, { "Release", state.id, pr.key, nowServer })
+                else
+                    table.insert(nextKeep, pr)
+                end
+            end
+            state.pendingReleases = nextKeep
+
+            note.pressed = true
+            pressedCount += 1
+            table.insert(cmds, { "Input", state.id, note.key, nowServer })
+            local holdDur = (note.hold ~= nil and note.hold > 0) and note.hold or 0.06
+            table.insert(state.pendingReleases, {
+                key = note.key,
+                at = nowServer + holdDur,
+                noteIdx = note.index,
+            })
+        end
+    end
+
+    return cmds, string.format("Karaoke: %d/%d", pressedCount, total)
 end
 
 -- Проверяет, остались ли ещё невыполненные ходы в головоломке (без изменения puzzle.attempted).
@@ -12608,9 +12901,11 @@ function Runner:update(now, opts, meX, meY, meZ)
 
     local puzzle = self.deps.activePuzzle ~= nil and self.deps.activePuzzle() or nil
     local rohan = self.deps.activeRohan ~= nil and self.deps.activeRohan() or nil
+    local karaoke = self.deps.activeKaraoke ~= nil and self.deps.activeKaraoke() or nil
     local darbySt = self.deps.darbyState ~= nil and self.deps.darbyState() or nil
     local inInspection = ui.jewelryOpen == true or ui.jewelryActionBtn ~= nil or puzzle ~= nil
     local inRohan = rohan ~= nil or ui.rohanOpen == true
+    local inKaraoke = karaoke ~= nil
     local inDarbyGame = ui.darbyOpen == true or (darbySt ~= nil and darbySt.active == true)
     local darbyBusy = darbySt ~= nil and ((darbySt.tableCamera == true) or (darbySt.busyUntil ~= nil and now < darbySt.busyUntil))
     local inDarbyStorage = (ui.standStorageOpen == true or darbyBusy)
@@ -12623,8 +12918,8 @@ function Runner:update(now, opts, meX, meY, meZ)
     -- Дополнительно сверяем с атрибутом BountyNavigationActive (CanvasGroup трекера может оставаться Visible=true),
     -- но если на трекере явно видны незавершённые шаги (например MISSING FROG 1/2), таймер ИЛИ открыто окно мини-игры
     -- (игра может прятать BountyTracker во время мини-игры!) — баунти точно активно!
-    local hasActiveBounty = ui.trackerActive or inInspection or inRohan or inDarbyGame or inDarbyStorage
-    if hasActiveBounty and not hasIncompleteSteps and not inInspection and not inRohan and not inDarbyGame and not inDarbyStorage and self.deps.navActive ~= nil then
+    local hasActiveBounty = ui.trackerActive or inInspection or inRohan or inKaraoke or inDarbyGame or inDarbyStorage
+    if hasActiveBounty and not hasIncompleteSteps and not inInspection and not inRohan and not inKaraoke and not inDarbyGame and not inDarbyStorage and self.deps.navActive ~= nil then
         local okNav, nav = pcall(self.deps.navActive)
         if okNav and nav == false then
             local hasClock = string.find(ui.trackerTitle or "", "%d+:%d%d") ~= nil
@@ -12644,7 +12939,7 @@ function Runner:update(now, opts, meX, meY, meZ)
 
     -- Если на персонаже уже висит инцидент с мини-игрой, а включено «Пропускать мини-игры»,
     -- идём к Petyr и перезаписываем его на боевой/поисковый баунти!
-    local replaceIncident = hasActiveBounty and not inInspection and not inRohan and not inDarbyGame and (opts.skipIncidents ~= false) and stand_out_bounty.isIncident(ui.trackerTitle)
+    local replaceIncident = hasActiveBounty and not inInspection and not inRohan and not inKaraoke and not inDarbyGame and (opts.skipIncidents ~= false) and stand_out_bounty.isIncident(ui.trackerTitle)
 
     -- Отслеживаем завершение баунти (трекер был активен -> исчез)
     if self.wasTrackerActive and not hasActiveBounty then
@@ -12677,6 +12972,25 @@ function Runner:update(now, opts, meX, meY, meZ)
                 end
             end
             self.statusText = "Забираю награду..."
+            return
+        end
+
+        -- 0.42) USAGI'S KARAOKE NIGHT: точные Input/Release по расписанию Notes из Remotes.Karaoke("Prepare")
+        if inKaraoke then
+            self:_releasePrompt()
+            if self.deps.stopFighting ~= nil then
+                pcall(self.deps.stopFighting)
+            end
+            local nowSrv = self.deps.serverTime ~= nil and self.deps.serverTime() or now
+            local songUiPlaying = self.deps.karaokeSongPlaying ~= nil and self.deps.karaokeSongPlaying() == true or false
+            local cmds, suffix = stand_out_bounty.stepKaraoke(karaoke, nowSrv, now, songUiPlaying)
+            if self.deps.sendKaraoke ~= nil and #cmds > 0 then
+                self.lastAction = now
+                for _, c in cmds do
+                    pcall(self.deps.sendKaraoke, c[1], c[2], c[3], c[4])
+                end
+            end
+            self.statusText = title .. " | " .. (suffix or "Karaoke...")
             return
         end
 
