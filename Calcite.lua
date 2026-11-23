@@ -6196,15 +6196,23 @@ function main.start(env)
             myPrompt = function()
                 local sb = handle._soBounty
                 local p = sb.prompt
-                if p ~= nil and p.Parent ~= nil and p.Enabled == true then
-                    local okA, avail = pcall(function() return p:GetAttribute("StoryPromptAvailable") end)
-                    if not (okA and avail == false) then
-                        -- Читаем живую позицию p.Parent (O(1)) — важно для бегающих HarvestUnit1..3!
+                if p ~= nil and p.Parent ~= nil then
+                    local isCd = false
+                    pcall(function() isCd = p:IsA("ClickDetector") end)
+                    if isCd then
                         local lx, ly, lz = stand_out_bounty.promptPosition(p)
-                        if lx ~= nil then
-                            sb.px, sb.py, sb.pz = lx, ly, lz
-                        end
+                        if lx ~= nil then sb.px, sb.py, sb.pz = lx, ly, lz end
                         return p, sb.px, sb.py, sb.pz
+                    elseif p.Enabled == true then
+                        local okA, avail = pcall(function() return p:GetAttribute("StoryPromptAvailable") end)
+                        if not (okA and avail == false) then
+                            -- Читаем живую позицию p.Parent (O(1)) — важно для бегающих HarvestUnit1..3!
+                            local lx, ly, lz = stand_out_bounty.promptPosition(p)
+                            if lx ~= nil then
+                                sb.px, sb.py, sb.pz = lx, ly, lz
+                            end
+                            return p, sb.px, sb.py, sb.pz
+                        end
                     end
                 end
                 sb.prompt = nil
@@ -6212,16 +6220,29 @@ function main.start(env)
             end,
             holdPromptBegin = function(prompt, holdDur)
                 if prompt == nil then return end
-                if holdDur <= 0.05 and type(env.fireproximityprompt) == "function" then
-                    pcall(env.fireproximityprompt, prompt)
+                local vim = env.virtualInputManager
+                local defaultH = env.Enum and env.Enum.KeyCode and env.Enum.KeyCode.H
+                if prompt == "__rawH" then
+                    if vim ~= nil and defaultH ~= nil then
+                        pcall(function() vim:SendKeyEvent(true, defaultH, false, game) end)
+                    end
                     return
                 end
-                -- Для Hold-промптов Stand Out (SquareHoldFeedback) зажимаем клавишу [H] без двойного конфликта
-                local vim = env.virtualInputManager
+                local isCd = false
+                pcall(function() isCd = prompt:IsA("ClickDetector") end)
+                if isCd then
+                    if type(env.fireclickdetector) == "function" then
+                        pcall(env.fireclickdetector, prompt)
+                    end
+                    return
+                end
+                -- Убираем RequiresLineOfSight локально, чтобы камень/столб не перекрывал обзор промпту
+                pcall(function() prompt.RequiresLineOfSight = false end)
                 local kc = nil
                 pcall(function() kc = prompt.KeyboardKeyCode end)
-                if kc == nil and env.Enum and env.Enum.KeyCode then
-                    kc = env.Enum.KeyCode.H
+                kc = kc or defaultH
+                if holdDur <= 0.05 and type(env.fireproximityprompt) == "function" then
+                    pcall(env.fireproximityprompt, prompt)
                 end
                 if vim ~= nil and kc ~= nil then
                     pcall(function() vim:SendKeyEvent(true, kc, false, game) end)
@@ -6232,11 +6253,19 @@ function main.start(env)
             holdPromptEnd = function(prompt)
                 if prompt == nil then return end
                 local vim = env.virtualInputManager
+                local defaultH = env.Enum and env.Enum.KeyCode and env.Enum.KeyCode.H
+                if prompt == "__rawH" then
+                    if vim ~= nil and defaultH ~= nil then
+                        pcall(function() vim:SendKeyEvent(false, defaultH, false, game) end)
+                    end
+                    return
+                end
+                local isCd = false
+                pcall(function() isCd = prompt:IsA("ClickDetector") end)
+                if isCd then return end
                 local kc = nil
                 pcall(function() kc = prompt.KeyboardKeyCode end)
-                if kc == nil and env.Enum and env.Enum.KeyCode then
-                    kc = env.Enum.KeyCode.H
-                end
+                kc = kc or defaultH
                 if vim ~= nil and kc ~= nil then
                     pcall(function() vim:SendKeyEvent(false, kc, false, game) end)
                 end
@@ -6852,10 +6881,17 @@ function main.start(env)
                 sb.mobs = stand_out_bounty.scanMyMobs(workspace, localPlayer.UserId, pNames, localPlayer.Name, tx, ty, tz, uiSnap.trackerObjective)
                 -- Быстрый скан нашей папки BountyWorld.Party_<UserId> (0.25 с) для мгновенного перехода Catch1->Catch2->Stash->Reward;
                 -- тяжёлый фолбэк по Workspace.Game — не чаще раза в 1.0 с
-                local cachedOk = sb.prompt ~= nil and sb.prompt.Parent ~= nil and sb.prompt.Enabled == true
-                if cachedOk then
-                    local okA, avail = pcall(function() return sb.prompt:GetAttribute("StoryPromptAvailable") end)
-                    if okA and avail == false then cachedOk = false end
+                local cachedOk = false
+                if sb.prompt ~= nil and sb.prompt.Parent ~= nil then
+                    local isCd = false
+                    pcall(function() isCd = sb.prompt:IsA("ClickDetector") end)
+                    if isCd then
+                        cachedOk = true
+                    elseif sb.prompt.Enabled == true then
+                        cachedOk = true
+                        local okA, avail = pcall(function() return sb.prompt:GetAttribute("StoryPromptAvailable") end)
+                        if okA and avail == false then cachedOk = false end
+                    end
                 end
                 if not cachedOk then
                     local allowFallback = (now - sb.lastPromptScan >= 1.0)
@@ -10739,7 +10775,7 @@ function stand_out_bounty.scanMyMobs(workspace, userId, playerNames, playerName,
     return nearby
 end
 
--- Возвращает живую мировую позицию промпта (важно для бегающих HarvestUnit1..3).
+-- Возвращает живую мировую позицию промпта (важно для бегающих HarvestUnit1..3 и моделей без PrimaryPart).
 function stand_out_bounty.promptPosition(d)
     if d == nil or d.Parent == nil then
         return nil, nil, nil
@@ -10750,8 +10786,23 @@ function stand_out_bounty.promptPosition(d)
         pos = holder.WorldPosition
     elseif safeIsA(holder, "BasePart") and holder.Position ~= nil then
         pos = holder.Position
-    elseif safeIsA(holder, "Model") and holder.PrimaryPart ~= nil and holder.PrimaryPart.Position ~= nil then
-        pos = holder.PrimaryPart.Position
+    elseif safeIsA(holder, "Model") then
+        if holder.PrimaryPart ~= nil and holder.PrimaryPart.Position ~= nil then
+            pos = holder.PrimaryPart.Position
+        elseif holder.GetPivot ~= nil then
+            local okP, piv = pcall(function() return holder:GetPivot().Position end)
+            if okP and piv ~= nil then
+                pos = piv
+            end
+        end
+        if pos == nil and holder.GetDescendants ~= nil then
+            for _, sub in holder:GetDescendants() do
+                if safeIsA(sub, "BasePart") and sub.Position ~= nil then
+                    pos = sub.Position
+                    break
+                end
+            end
+        end
     end
     if pos ~= nil and finite(pos.X) and finite(pos.Y) and finite(pos.Z) then
         return pos.X, pos.Y, pos.Z
@@ -10789,10 +10840,16 @@ function stand_out_bounty.findMyPrompt(workspace, userId, tx, ty, tz, allowWorld
     end
 
     local function promptUsable(d)
-        if not safeIsA(d, "ProximityPrompt") then return false end
-        local reach = d.MaxActivationDistance
-        local avail = safeAttr(d, "StoryPromptAvailable")
-        return d.Enabled == true and avail ~= false and finite(reach) and reach > 0
+        if safeIsA(d, "ProximityPrompt") then
+            local reach = d.MaxActivationDistance
+            local avail = safeAttr(d, "StoryPromptAvailable")
+            return d.Enabled == true and avail ~= false and finite(reach) and reach > 0
+        end
+        if safeIsA(d, "ClickDetector") then
+            local reach = d.MaxActivationDistance
+            return finite(reach) and reach > 0
+        end
+        return false
     end
 
     -- 1) Приоритет: наша папка BountyWorld.Party_<userId> (быстрый обход)
@@ -10809,29 +10866,44 @@ function stand_out_bounty.findMyPrompt(workspace, userId, tx, ty, tz, allowWorld
         end
     end
 
-    -- 2) Фолбэк: любой включённый ProximityPrompt в радиусе 25 студов от VisibleBountyTrackerPosition
-    -- (пропускаем NPC-промпты Petyr/магазинов, чтобы не перехватывали бой, когда моб вроде Hubert спавнится у Petyr)
-    if allowWorldFallback ~= false and tx ~= nil and ty ~= nil and tz ~= nil and gameFolder.GetDescendants ~= nil then
+    -- 2) Фолбэк: любой включённый ProximityPrompt / ClickDetector в радиусе 25 студов от VisibleBountyTrackerPosition
+    -- (пропускаем NPC-промпты Petyr/магазинов и садовые горшки)
+    if allowWorldFallback ~= false and tx ~= nil and ty ~= nil and tz ~= nil then
         local npcsFolder = gameFolder:FindFirstChild("NPCs")
         local bestPrompt, bestX, bestY, bestZ = nil, nil, nil, nil
         local bestDist2 = 25 * 25
-        for _, d in gameFolder:GetDescendants() do
-            if promptUsable(d) then
-                local inNpcs = npcsFolder ~= nil and d.IsDescendantOf ~= nil and d:IsDescendantOf(npcsFolder)
-                if not inNpcs then
-                    local x, y, z = stand_out_bounty.promptPosition(d)
-                    if x ~= nil then
-                        local dx, dy, dz = x - tx, y - ty, z - tz
-                        local dist2 = dx * dx + dy * dy + dz * dz
-                        if dist2 <= bestDist2 then
-                            bestDist2 = dist2
-                            bestPrompt = d
-                            bestX, bestY, bestZ = x, y, z
+
+        local function scanContainer(container)
+            if container == nil or container.GetDescendants == nil then return end
+            for _, d in container:GetDescendants() do
+                if promptUsable(d) then
+                    local inNpcs = npcsFolder ~= nil and d.IsDescendantOf ~= nil and d:IsDescendantOf(npcsFolder)
+                    if not inNpcs then
+                        local x, y, z = stand_out_bounty.promptPosition(d)
+                        if x ~= nil then
+                            local dx, dy, dz = x - tx, y - ty, z - tz
+                            local dist2 = dx * dx + dy * dy + dz * dz
+                            if dist2 <= bestDist2 then
+                                bestDist2 = dist2
+                                bestPrompt = d
+                                bestX, bestY, bestZ = x, y, z
+                            end
                         end
                     end
                 end
             end
         end
+
+        scanContainer(gameFolder)
+        -- Также проверяем объекты вне Workspace.Game (если объект баунти заспавнен прямо в Workspace)
+        if bestPrompt == nil and workspace.GetChildren ~= nil then
+            for _, top in workspace:GetChildren() do
+                if top ~= gameFolder and top.Name ~= "Terrain" and top.Name ~= "Camera" then
+                    scanContainer(top)
+                end
+            end
+        end
+
         if bestPrompt ~= nil then
             return bestPrompt, bestX, bestY, bestZ
         end
@@ -11031,10 +11103,10 @@ function Runner:update(now, opts, meX, meY, meZ)
                     self.statusText = title .. " | догоняю Harvest"
                     return
                 end
-            elseif dist2 > 36 then
-                -- Статичный объект (Clean The Rock, Stash, RecoveredCase): телепортируемся один раз, дальше стоим спокойно
+            elseif dist2 > 25 then
+                -- Статичный объект (Clean The Rock, Three Wishes, Stash): встаём СБОКУ на земле (не на макушке столба!)
                 self:_releasePrompt()
-                self.deps.teleportTo(px, py + 2.5, pz)
+                self.deps.teleportTo(px + 2.5, py + 1.5, pz)
                 self.lastAction = now
                 self.statusText = title .. " | лечу к объекту"
                 return
@@ -11062,19 +11134,37 @@ function Runner:update(now, opts, meX, meY, meZ)
             end
             self.statusText = title .. (moving and " | ловлю Harvest" or " | держу [H]")
             return
-        else
-            self:_releasePrompt()
         end
 
-        -- 3) Иначе летим на VisibleBountyTrackerPosition, чтобы простримить мобов / предмет
+        -- 4) Нет промпта и нет мобов: летим к VisibleBountyTrackerPosition (встаём чуть сбоку, не на столбе!)
+        -- А если уже стоим рядом с точкой цели (<= 10 ст) и объект подсвечен кастомным [H]-триггером без ProximityPrompt — зажимаем [H]
         if tx ~= nil then
             local dx, dy, dz = tx - meX, ty - meY, tz - meZ
-            if dx * dx + dy * dy + dz * dz > 225 and now - self.lastAction >= stand_out_bounty.travel_retry then
-                self.lastAction = now
-                self.deps.teleportTo(tx, ty + 4, tz)
+            local dist2 = dx * dx + dy * dy + dz * dz
+            if dist2 > 100 then
+                self:_releasePrompt()
+                if now - self.lastAction >= stand_out_bounty.travel_retry then
+                    self.lastAction = now
+                    self.deps.teleportTo(tx + 2.5, ty + 1.5, tz)
+                end
+                self.statusText = title .. " | лечу к цели"
+            else
+                -- Стоим вплотную к точке трекера (напр. Three Wishes / камень с кастомным H-интерактом)
+                if self.promptHolding == "__rawH" then
+                    if now - self.promptSince >= 2.4 then
+                        self:_releasePrompt()
+                        self.lastAction = now
+                    end
+                elseif now - self.lastAction >= 0.8 and self.deps.holdPromptBegin ~= nil then
+                    self:_releasePrompt()
+                    self.promptHolding = "__rawH"
+                    self.promptSince = now
+                    pcall(self.deps.holdPromptBegin, "__rawH", 2.0)
+                end
+                self.statusText = title .. " | взаимодействие [H]"
             end
-            self.statusText = title .. " | лечу к цели"
         else
+            self:_releasePrompt()
             self.statusText = title
         end
         return
