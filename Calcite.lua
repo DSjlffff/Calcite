@@ -11930,18 +11930,25 @@ function stand_out_bounty.isNpcObjective(objectiveText)
     end
     local low = string.lower(objectiveText)
     if string.find(low, "claim your reward", 1, true) ~= nil
-        or string.find(low, "return to petyr", 1, true) ~= nil
-        or string.find(low, "inspect ", 1, true) ~= nil
+        or string.find(low, "return to petyr", 1, true) ~= nil then
+        return false
+    end
+    -- Явный диалог с NPC ("Ask Dragona to help recover the scattered necklace stones", "Ask Meryl...", "Talk to...")
+    -- всегда имеет приоритет, даже если внутри фразы встречается слово "recover" или "rebuild"
+    if string.find(low, "ask ", 1, true) ~= nil
+        or string.find(low, "talk to", 1, true) ~= nil
+        or string.find(low, "speak to", 1, true) ~= nil then
+        return true
+    end
+    -- Шаги осмотра сундуков / сборки на верстаке / подбора камня — НЕ диалог с NPC Dragona!
+    if string.find(low, "inspect ", 1, true) ~= nil
         or string.find(low, "reassemble", 1, true) ~= nil
         or string.find(low, "rebuild", 1, true) ~= nil
         or string.find(low, "recover ", 1, true) ~= nil
         or string.find(low, "workbench", 1, true) ~= nil then
         return false
     end
-    return string.find(low, "ask ", 1, true) ~= nil
-        or string.find(low, "talk to", 1, true) ~= nil
-        or string.find(low, "speak to", 1, true) ~= nil
-        or string.find(low, "meryl", 1, true) ~= nil
+    return string.find(low, "meryl", 1, true) ~= nil
         or string.find(low, "dragona", 1, true) ~= nil
         or string.find(low, "d'arby", 1, true) ~= nil
         or string.find(low, "darby", 1, true) ~= nil
