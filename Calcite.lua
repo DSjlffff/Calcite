@@ -2845,6 +2845,15 @@ local function makeDraggable(frame)
     end))
 end
 
+local function hudFont(preferred, fallback)
+    local f = Enum and Enum.Font
+    if f == nil then return nil end
+    local ok, val = pcall(function() return f[preferred] end)
+    if ok and val ~= nil then return val end
+    local okF, valF = pcall(function() return f[fallback] end)
+    return okF and valF or nil
+end
+
 local function ensureGui()
     if gui ~= nil and gui.Parent ~= nil then return end
     initColors()
@@ -2891,7 +2900,7 @@ local function ensureGui()
     wmText.BackgroundTransparency = 1
     wmText.Size = UDim2.fromScale(1, 1)
     wmText.AutomaticSize = Enum.AutomaticSize.X
-    wmText.Font = Enum.Font.GothamMedium
+    wmText.Font = hudFont("BuilderSansMedium", "GothamMedium")
     wmText.TextSize = 13
     wmText.TextColor3 = textCol
     wmText.TextXAlignment = Enum.TextXAlignment.Left
@@ -2964,7 +2973,7 @@ local function ensureGui()
     hkTitle.Parent = hkFrame
     hkTitle.BackgroundTransparency = 1
     hkTitle.Size = UDim2.new(1, 0, 0, 14)
-    hkTitle.Font = Enum.Font.GothamMedium
+    hkTitle.Font = hudFont("BuilderSansMedium", "GothamMedium")
     hkTitle.TextSize = 11
     hkTitle.TextColor3 = textCol
     hkTitle.TextXAlignment = Enum.TextXAlignment.Left
@@ -3004,7 +3013,7 @@ local function ensureHkRow(id, keyText, nameText, order)
         nameLabel.BackgroundTransparency = 1
         nameLabel.Size = UDim2.new(1, 0, 1, 0)
         nameLabel.Position = UDim2.fromOffset(0, 0)
-        nameLabel.Font = Enum.Font.Gotham
+        nameLabel.Font = hudFont("BuilderSans", "Gotham")
         nameLabel.TextSize = 12
         nameLabel.TextColor3 = textCol
         nameLabel.TextXAlignment = Enum.TextXAlignment.Left
@@ -3013,7 +3022,7 @@ local function ensureHkRow(id, keyText, nameText, order)
         keyLabel.BackgroundTransparency = 1
         keyLabel.Size = UDim2.new(1, 0, 1, 0)
         keyLabel.Position = UDim2.fromOffset(0, 0)
-        keyLabel.Font = Enum.Font.GothamMedium
+        keyLabel.Font = hudFont("BuilderSansMedium", "GothamMedium")
         keyLabel.TextSize = 12
         keyLabel.TextColor3 = mutedCol
         keyLabel.TextXAlignment = Enum.TextXAlignment.Right
@@ -17424,11 +17433,21 @@ local controls = {}
 
 function controls.mount(Library, env, Window)
     local UDim2, UDim, Enum, Vector2 = env.UDim2, env.UDim, env.Enum, env.Vector2
+    local function pickFont(preferred, fallback)
+        local f = Enum and Enum.Font
+        if f == nil then return nil end
+        local ok, val = pcall(function() return f[preferred] end)
+        if ok and val ~= nil then return val end
+        local okF, valF = pcall(function() return f[fallback] end)
+        return okF and valF or nil
+    end
+    local fontRegular = pickFont("BuilderSans", "Gotham")
+    local fontMedium = pickFont("BuilderSansMedium", "GothamMedium") or fontRegular
     local function typography(object, size, medium)
         if object.Name == "__IconFont" then return end
         object.TextScaled = false
         object.TextSize = size
-        object.Font = if medium then Enum.Font.GothamMedium else Enum.Font.Gotham
+        object.Font = if medium then fontMedium else fontRegular
         if medium and Library.Registry[object] then Library.Registry[object].FontFace = nil end
     end
     local function height(object, value)
@@ -17804,6 +17823,14 @@ local style = {}
 local controls = require("./ui_controls")
 style.accents = { Lilac = { 173, 156, 245 }, Blue = { 123, 169, 208 }, Sage = { 133, 181, 146 }, Rose = { 210, 150, 170 } }
 
+local function pickFont(fontEnum, preferred, fallback)
+    if fontEnum == nil then return nil end
+    local ok, val = pcall(function() return fontEnum[preferred] end)
+    if ok and val ~= nil then return val end
+    local okF, valF = pcall(function() return fontEnum[fallback] end)
+    return okF and valF or nil
+end
+
 function style.configure(deps)
     local Library, env = deps.Library, deps.env
     local info = {
@@ -17813,7 +17840,7 @@ function style.configure(deps)
     }
     if env and env.UDim2 and env.Enum and env.Enum.Font then
         info.Size = env.UDim2.fromOffset(1040, 740)
-        info.Font = env.Enum.Font.Gotham
+        info.Font = pickFont(env.Enum.Font, "BuilderSans", "Gotham")
         info.SearchbarSize = env.UDim2.new(0, 280, 0, 34)
     end
     if Library.Scheme then
@@ -17857,6 +17884,7 @@ function style.mount(deps, Window)
 
     local UDim2, UDim, Enum = env.UDim2, env.UDim, env.Enum
     local Vector2, Color3 = env.Vector2, deps.Color3
+    local uiFont = pickFont(Enum and Enum.Font, "BuilderSans", "Gotham")
     local function new(class, props, parent, colors)
         local object = env.Instance.new(class)
         for key, value in props do object[key] = value end
@@ -17873,7 +17901,7 @@ function style.mount(deps, Window)
     local function text(parent, value, x, y, width, size, muted)
         return new("TextLabel", {
             BackgroundTransparency = 1, Position = UDim2.fromOffset(x, y), Size = UDim2.new(1, -width, 0, size + 6),
-            Font = Enum.Font.Gotham, Text = value, TextSize = size, TextTransparency = muted and 0.35 or 0,
+            Font = uiFont, Text = value, TextSize = size, TextTransparency = muted and 0.35 or 0,
             TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 6,
         }, parent, { TextColor3 = "FontColor" })
     end
@@ -17994,7 +18022,7 @@ function style.mount(deps, Window)
         end
         local input = new("TextBox", {
             AnchorPoint = Vector2.new(1, 1), Position = UDim2.fromScale(1, 1), Size = UDim2.fromOffset(80, 30),
-            ClearTextOnFocus = false, Font = Enum.Font.Gotham, TextSize = 16, Text = "", ZIndex = bar.ZIndex + 3,
+            ClearTextOnFocus = false, Font = uiFont, TextSize = 16, Text = "", ZIndex = bar.ZIndex + 3,
         }, holder, { BackgroundColor3 = "MainColor", TextColor3 = "FontColor" })
         round(input, 5)
         new("UIStroke", { Thickness = 1 }, input, { Color = "OutlineColor" })
