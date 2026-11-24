@@ -5015,6 +5015,12 @@ function main.start(env)
             end)
             handle._soBounty.armConn = nil
         end
+        if handle._soBounty.tabletopConn ~= nil then
+            pcall(function()
+                handle._soBounty.tabletopConn:Disconnect()
+            end)
+            handle._soBounty.tabletopConn = nil
+        end
         if handle._soHowler.collector ~= nil then
             pcall(function()
                 handle._soHowler.collector:stop(true)
@@ -6673,6 +6679,34 @@ function main.start(env)
                     end)
                 end
             end,
+            activeTabletop = function()
+                local sb = handle._soBounty
+                if sb.tabletop ~= nil then
+                    if sb.tabletopAt ~= nil and env.clock() - sb.tabletopAt > 45.0 then
+                        sb.tabletop = nil
+                        return nil
+                    end
+                    return sb.tabletop
+                end
+                return nil
+            end,
+            sendTabletop = function(cmd, payload)
+                local sb = handle._soBounty
+                local rem = sb.tabletopRemote
+                if rem == nil then
+                    pcall(function()
+                        local rs = game:GetService("ReplicatedStorage")
+                        local rems = rs and rs:FindFirstChild("Remotes")
+                        rem = rems and rems:FindFirstChild("Tabletop")
+                        sb.tabletopRemote = rem
+                    end)
+                end
+                if rem ~= nil then
+                    pcall(function()
+                        rem:FireServer(cmd, payload)
+                    end)
+                end
+            end,
             serverTime = function()
                 if workspace ~= nil and workspace.GetServerTimeNow ~= nil then
                     local okT, t = pcall(function() return workspace:GetServerTimeNow() end)
@@ -6723,6 +6757,12 @@ function main.start(env)
                     return env.Vector2.new(x, y)
                 end
                 return { X = x, Y = y }
+            end,
+            makeV3 = function(x, y, z)
+                if env.Vector3 ~= nil then
+                    return env.Vector3.new(x, y, z)
+                end
+                return { X = x, Y = y, Z = z }
             end,
             sendIncident = function(payload)
                 local sb = handle._soBounty
@@ -7690,6 +7730,24 @@ function main.start(env)
                             local nowA = env.clock()
                             sb.arm = stand_out_bounty.applyArmWrestlingEvent(sb.arm, kind, data, nowA)
                             sb.armAt = nowA
+                        end)
+                    end
+                end)
+            end
+            -- Подписываемся на ReplicatedStorage.Remotes.Tabletop.OnClientEvent сразу в Stand Out (Iced Tea Run)
+            if handle._soBounty.runner ~= nil and handle._soBounty.tabletopConn == nil and not handle._soBounty.tabletopTried then
+                local sb = handle._soBounty
+                sb.tabletopTried = true
+                pcall(function()
+                    local rs = game:GetService("ReplicatedStorage")
+                    local rems = rs and rs:FindFirstChild("Remotes")
+                    local tRem = rems and rems:FindFirstChild("Tabletop")
+                    if tRem ~= nil then
+                        sb.tabletopRemote = tRem
+                        sb.tabletopConn = tRem.OnClientEvent:Connect(function(kind, data)
+                            local nowT = env.clock()
+                            sb.tabletop = stand_out_bounty.applyTabletopEvent(sb.tabletop, kind, data, nowT)
+                            sb.tabletopAt = nowT
                         end)
                     end
                 end)
@@ -11482,11 +11540,9 @@ stand_out_bounty.open_retry = 1.2
 stand_out_bounty.begin_wait = 1.8
 stand_out_bounty.travel_retry = 2.0
 
--- Инциденты с ручными мини-играми (чай) из Modules.Bounty.IncidentRules.Names.
--- Harvest, Hey Ya!, Cheap Jewelry, D'Arby, Rohan, Usagi's Karaoke, Your Personal Helper Friend и Paco's Challenge поддерживаются автопрохождением!
-local INCIDENT_NAMES = {
-    ["iced tea run"] = true,
-}
+-- Все известные инциденты Stand Out (Harvest, Hey Ya!, Cheap Jewelry, D'Arby, Rohan, Usagi's Karaoke,
+-- Your Personal Helper Friend, Paco's Challenge и Iced Tea Run) поддерживаются автопрохождением!
+local INCIDENT_NAMES = {}
 
 local Runner = {}
 Runner.__index = Runner
@@ -13008,6 +13064,159 @@ function stand_out_bounty.stepArmWrestling(state, nowServer)
     return nil, label
 end
 
+local function tabletopBandMid(band)
+    if type(band) ~= "table" then
+        return nil
+    end
+    local lo = tonumber(band.Min) or tonumber(band.min) or tonumber(band.Low) or tonumber(band.low)
+        or tonumber(band.Start) or tonumber(band.From) or tonumber(band[1])
+    local hi = tonumber(band.Max) or tonumber(band.max) or tonumber(band.High) or tonumber(band.high)
+        or tonumber(band.End) or tonumber(band.To) or tonumber(band[2])
+    if lo ~= nil and hi ~= nil and finite(lo) and finite(hi) and hi > lo then
+        if hi > 1.5 then
+            lo = lo / 100
+            hi = hi / 100
+        end
+        return math.clamp((lo + hi) * 0.5, 0.05, 0.95)
+    end
+    -- Стандартный зелёный диапазон ICED TEA RUN ("stop between 75% and 90%")
+    return 0.825
+end
+
+-- Обрабатывает серверные пакеты ReplicatedStorage.Remotes.Tabletop.OnClientEvent (Start / State / End)
+-- для ICED TEA RUN (приготовление 4 стаканов чая: Hold POUR -> Drag Ice -> Drag Lemon -> Hold STIR -> Drag Glass).
+function stand_out_bounty.applyTabletopEvent(state, kind, data, nowClock)
+    if type(kind) ~= "string" then
+        return state
+    end
+    if kind == "End" or kind == "Cancel" or kind == "Close" then
+        return nil
+    end
+    if kind == "Start" and type(data) == "table" and data.Token ~= nil then
+        local st = type(data.State) == "table" and data.State or {}
+        return {
+            token = data.Token,
+            title = tostring(data.Title or "Iced tea"),
+            steps = type(data.Steps) == "table" and data.Steps or {},
+            index = tonumber(st.Index) or 1,
+            fill = tonumber(st.Fill) or 0,
+            done = st.Done == true,
+            openedAt = nowClock or 0,
+            stepChangedAt = nowClock or 0,
+            lastActionAt = 0,
+            holding = false,
+            holdStart = nil,
+            serverHoldStart = nil,
+            holdEndSent = false,
+        }
+    end
+    if state == nil or type(data) ~= "table" then
+        return state
+    end
+    if data.Token ~= nil and data.Token ~= state.token then
+        return state
+    end
+    if kind == "State" and type(data.State) == "table" then
+        local st = data.State
+        local prevIndex = state.index
+        local newIndex = tonumber(st.Index) or prevIndex
+        state.index = newIndex
+        state.fill = tonumber(st.Fill) or 0
+        state.done = st.Done == true
+        if type(st.HoldStart) == "number" and finite(st.HoldStart) then
+            state.serverHoldStart = st.HoldStart
+        else
+            state.serverHoldStart = nil
+        end
+        local cue = tostring(data.Cue or "")
+        if newIndex ~= prevIndex then
+            state.stepChangedAt = nowClock or 0
+            state.holding = false
+            state.holdStart = nil
+            state.serverHoldStart = nil
+            state.holdEndSent = false
+        elseif cue == "Short" or cue == "Spill" or cue == "Miss" or cue == "Reset" then
+            state.holding = false
+            state.holdStart = nil
+            state.serverHoldStart = nil
+            state.holdEndSent = false
+        end
+    end
+    return state
+end
+
+-- Выдаёт следующую команду для Remotes.Tabletop:FireServer(cmd, payload) по текущему шагу Steps[Index].
+function stand_out_bounty.stepTabletop(state, nowServer, nowClock, makeV3)
+    if type(state) ~= "table" or state.token == nil or state.done then
+        return nil, nil, nil
+    end
+    local idx = state.index or 1
+    local step = type(state.steps) == "table" and state.steps[idx] or nil
+    if type(step) ~= "table" then
+        return nil, nil, state.title .. ": готово"
+    end
+    local label = string.format("%s (%d/%d)", state.title, idx, #state.steps)
+    local sinceStep = (nowClock or 0) - (state.stepChangedAt or state.openedAt or 0)
+    if sinceStep < 0.25 then
+        return nil, nil, label
+    end
+
+    if step.Kind == "Hold" then
+        local secs = tonumber(step.Seconds) or 2.0
+        local targetFill = tabletopBandMid(step.Band)
+        if not state.holding then
+            if (nowClock or 0) - (state.lastActionAt or 0) >= 0.35 then
+                state.holding = true
+                state.holdStart = nowServer
+                state.serverHoldStart = nil
+                state.holdEndSent = false
+                state.lastActionAt = nowClock or 0
+                return "HoldBegin", { Token = state.token, At = nowServer }, label
+            end
+            return nil, nil, label
+        end
+        local startTs = state.serverHoldStart or state.holdStart or nowServer
+        if targetFill ~= nil then
+            -- Наливание с зелёной зоной (POUR): отпускаем ровно в середине диапазона (82.5%)
+            local remaining = math.max(0.04, targetFill - (state.fill or 0))
+            local holdDur = secs * remaining
+            if not state.holdEndSent and nowServer >= startTs + holdDur then
+                state.holdEndSent = true
+                state.lastActionAt = nowClock or 0
+                return "HoldEnd", { Token = state.token, At = nowServer }, label
+            elseif state.holdEndSent and (nowClock or 0) - (state.lastActionAt or 0) >= 1.2 then
+                state.holding = false
+                state.holdEndSent = false
+            end
+        else
+            -- Автозавершающееся удержание (STIR): сервер сам переведёт на следующий шаг через Seconds;
+            -- страховка HoldEnd только если затянулось на +0.8с сверх нормы
+            if not state.holdEndSent and nowServer >= startTs + secs + 0.8 then
+                state.holdEndSent = true
+                state.lastActionAt = nowClock or 0
+                return "HoldEnd", { Token = state.token, At = nowServer }, label
+            end
+        end
+        return nil, nil, label
+    elseif step.Kind == "Drag" then
+        local key = step.Prop
+        local to = step.To
+        if key ~= nil and to ~= nil and (nowClock or 0) - (state.lastActionAt or 0) >= 0.45 then
+            state.lastActionAt = nowClock or 0
+            local dropY = (to.Y or 0) + (tonumber(step.MinHeight) or 0) + 0.15
+            local ctor = makeV3 or function(x, y, z) return { X = x, Y = y, Z = z } end
+            return "Drop", {
+                Token = state.token,
+                Key = key,
+                Point = ctor(to.X or 0, dropY, to.Z or 0),
+            }, label
+        end
+        return nil, nil, label
+    end
+
+    return nil, nil, label
+end
+
 -- Проверяет, остались ли ещё невыполненные ходы в головоломке (без изменения puzzle.attempted).
 function stand_out_bounty.puzzleMovesRemaining(puzzle)
     if type(puzzle) ~= "table" or puzzle.open == false then
@@ -13146,6 +13355,10 @@ function stand_out_bounty.findMyPrompt(workspace, userId, tx, ty, tz, allowWorld
     local bw = gameFolder:FindFirstChild("BountyWorld")
     local partyFolder = bw and bw:FindFirstChild("Party_" .. tostring(userId))
     local partyOwnsPrompts = false
+    local wantPitcherOnly = string.find(objLow, "make the iced tea", 1, true) ~= nil
+        or string.find(objLow, "make iced tea", 1, true) ~= nil
+    local wantGlassOnly = string.find(objLow, "drink", 1, true) ~= nil
+        and string.find(objLow, "tea", 1, true) ~= nil
     if partyFolder ~= nil and partyFolder.GetDescendants ~= nil then
         local bestP, bestX, bestY, bestZ = nil, nil, nil, nil
         local bestDist2 = math.huge
@@ -13157,17 +13370,22 @@ function stand_out_bounty.findMyPrompt(workspace, userId, tx, ty, tz, allowWorld
                 end
             end
             if promptUsable(d) then
-                local x, y, z = stand_out_bounty.promptPosition(d)
-                if x ~= nil then
-                    if tx ~= nil and ty ~= nil and tz ~= nil then
-                        local dx, dy, dz = x - tx, y - ty, z - tz
-                        local d2 = dx * dx + dy * dy + dz * dz
-                        if d2 < bestDist2 then
-                            bestDist2 = d2
-                            bestP, bestX, bestY, bestZ = d, x, y, z
+                local pname = tostring(d.Name or "")
+                local skipTeaMismatch = (wantPitcherOnly and string.find(pname, "BountyIncident_Glass", 1, true) ~= nil)
+                    or (wantGlassOnly and string.find(pname, "BountyIncident_Pitcher", 1, true) ~= nil)
+                if not skipTeaMismatch then
+                    local x, y, z = stand_out_bounty.promptPosition(d)
+                    if x ~= nil then
+                        if tx ~= nil and ty ~= nil and tz ~= nil then
+                            local dx, dy, dz = x - tx, y - ty, z - tz
+                            local d2 = dx * dx + dy * dy + dz * dz
+                            if d2 < bestDist2 then
+                                bestDist2 = d2
+                                bestP, bestX, bestY, bestZ = d, x, y, z
+                            end
+                        else
+                            return d, x, y, z
                         end
-                    else
-                        return d, x, y, z
                     end
                 end
             end
@@ -13406,12 +13624,14 @@ function Runner:update(now, opts, meX, meY, meZ)
     local rohan = self.deps.activeRohan ~= nil and self.deps.activeRohan() or nil
     local karaoke = self.deps.activeKaraoke ~= nil and self.deps.activeKaraoke() or nil
     local arm = self.deps.activeArmWrestling ~= nil and self.deps.activeArmWrestling() or nil
+    local tabletop = self.deps.activeTabletop ~= nil and self.deps.activeTabletop() or nil
     local verity = self.deps.activeVerity ~= nil and self.deps.activeVerity() or nil
     local darbySt = self.deps.darbyState ~= nil and self.deps.darbyState() or nil
     local inInspection = ui.jewelryOpen == true or ui.jewelryActionBtn ~= nil or puzzle ~= nil
     local inRohan = rohan ~= nil or ui.rohanOpen == true
     local inKaraoke = karaoke ~= nil
     local inArm = arm ~= nil
+    local inTabletop = tabletop ~= nil
     local inVerity = verity ~= nil
     local inDarbyGame = ui.darbyOpen == true or (darbySt ~= nil and darbySt.active == true)
     local darbyBusy = darbySt ~= nil and ((darbySt.tableCamera == true) or (darbySt.busyUntil ~= nil and now < darbySt.busyUntil))
@@ -13425,8 +13645,8 @@ function Runner:update(now, opts, meX, meY, meZ)
     -- Дополнительно сверяем с атрибутом BountyNavigationActive (CanvasGroup трекера может оставаться Visible=true),
     -- но если на трекере явно видны незавершённые шаги (например MISSING FROG 1/2), таймер ИЛИ открыто окно мини-игры
     -- (игра может прятать BountyTracker во время мини-игры!) — баунти точно активно!
-    local hasActiveBounty = ui.trackerActive or inInspection or inRohan or inKaraoke or inArm or inVerity or inDarbyGame or inDarbyStorage
-    if hasActiveBounty and not hasIncompleteSteps and not inInspection and not inRohan and not inKaraoke and not inArm and not inVerity and not inDarbyGame and not inDarbyStorage and self.deps.navActive ~= nil then
+    local hasActiveBounty = ui.trackerActive or inInspection or inRohan or inKaraoke or inArm or inTabletop or inVerity or inDarbyGame or inDarbyStorage
+    if hasActiveBounty and not hasIncompleteSteps and not inInspection and not inRohan and not inKaraoke and not inArm and not inTabletop and not inVerity and not inDarbyGame and not inDarbyStorage and self.deps.navActive ~= nil then
         local okNav, nav = pcall(self.deps.navActive)
         if okNav and nav == false then
             local hasClock = string.find(ui.trackerTitle or "", "%d+:%d%d") ~= nil
@@ -13446,7 +13666,7 @@ function Runner:update(now, opts, meX, meY, meZ)
 
     -- Если на персонаже уже висит инцидент с мини-игрой, а включено «Пропускать мини-игры»,
     -- идём к Petyr и перезаписываем его на боевой/поисковый баунти!
-    local replaceIncident = hasActiveBounty and not inInspection and not inRohan and not inKaraoke and not inArm and not inVerity and not inDarbyGame and (opts.skipIncidents ~= false) and stand_out_bounty.isIncident(ui.trackerTitle)
+    local replaceIncident = hasActiveBounty and not inInspection and not inRohan and not inKaraoke and not inArm and not inTabletop and not inVerity and not inDarbyGame and (opts.skipIncidents ~= false) and stand_out_bounty.isIncident(ui.trackerTitle)
 
     -- Отслеживаем завершение баунти (трекер был активен -> исчез)
     if self.wasTrackerActive and not hasActiveBounty then
@@ -13514,6 +13734,22 @@ function Runner:update(now, opts, meX, meY, meZ)
                 pcall(self.deps.sendArmWrestling, cmd[1], cmd[2], cmd[3], cmd[4])
             end
             self.statusText = title .. " | " .. (suffix or "Arm Wrestling...")
+            return
+        end
+
+        -- 0.415) ICED TEA RUN — Tabletop мини-игра: Hold POUR (82.5%) -> Drop Ice -> Drop Lemon -> Hold STIR -> Drop Glass
+        if inTabletop then
+            self:_releasePrompt()
+            if self.deps.stopFighting ~= nil then
+                pcall(self.deps.stopFighting)
+            end
+            local nowSrv = self.deps.serverTime ~= nil and self.deps.serverTime() or now
+            local cmd, payload, suffix = stand_out_bounty.stepTabletop(tabletop, nowSrv, now, self.deps.makeV3)
+            if cmd ~= nil and self.deps.sendTabletop ~= nil then
+                self.lastAction = now
+                pcall(self.deps.sendTabletop, cmd, payload)
+            end
+            self.statusText = title .. " | " .. (suffix or "Iced Tea...")
             return
         end
 
