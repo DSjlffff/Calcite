@@ -6749,18 +6749,25 @@ function main.start(env)
                     end
                     return
                 end
-                -- Убираем RequiresLineOfSight локально, чтобы камень/столб не перекрывал обзор промпту
+                -- Убираем RequiresLineOfSight локально, чтобы камень/столб/знак не перекрывал обзор промпту
                 pcall(function() prompt.RequiresLineOfSight = false end)
                 local kc = nil
                 pcall(function() kc = prompt.KeyboardKeyCode end)
                 kc = kc or defaultH
-                if holdDur <= 0.05 and type(env.fireproximityprompt) == "function" then
+                local pname = ""
+                pcall(function() pname = tostring(prompt.Name or "") end)
+                -- Промпты сундуков/камней/сборки Cheap Jewelry (BountyIncident_Box*/Gem*/Assembly):
+                -- бьём НАПРЯМУЮ по самому ProximityPrompt (InputHoldBegin + fireproximityprompt),
+                -- чтобы стоящий рядом дорожный знак [P] (тоже на [H]) никогда не перехватывал клавишу H!
+                local isDirectJewelry = string.find(pname, "BountyIncident_Box", 1, true) ~= nil
+                    or string.find(pname, "BountyIncident_Gem", 1, true) ~= nil
+                    or string.find(pname, "BountyIncident_Assembly", 1, true) ~= nil
+                pcall(function() prompt:InputHoldBegin() end)
+                if (holdDur <= 0.05 or isDirectJewelry) and type(env.fireproximityprompt) == "function" then
                     pcall(env.fireproximityprompt, prompt)
                 end
-                if vim ~= nil and kc ~= nil then
+                if not isDirectJewelry and vim ~= nil and kc ~= nil then
                     pcall(function() vim:SendKeyEvent(true, kc, false, game) end)
-                else
-                    pcall(function() prompt:InputHoldBegin() end)
                 end
             end,
             holdPromptEnd = function(prompt)
@@ -13360,7 +13367,7 @@ function Runner:update(now, opts, meX, meY, meZ)
             self.statusText = title .. " | стою на квадрате"
             return
         end
-        if string.find(objLow, "watch ", 1, true) ~= nil then
+        if string.match(objLow, "^%s*watch%s+") ~= nil then
             self:_releasePrompt()
             self.statusText = title .. " | жду сценку"
             return
@@ -13385,13 +13392,21 @@ function Runner:update(now, opts, meX, meY, meZ)
                     return
                 end
             else
-                -- Гистерезис дистанции: до начала удержания подлетаем ближе 6 ст,
-                -- а пока [H] уже зажат — не сбрасываем удержание из-за толчка об коллизию камня (до 10 ст)
-                local maxStaticDist2 = isHoldingThis and 100 or 36
+                local pname = tostring(prompt.Name or "")
+                local isJewelryBox = string.find(pname, "BountyIncident_Box", 1, true) ~= nil
+                    or string.find(pname, "BountyIncident_Gem", 1, true) ~= nil
+                    or string.find(pname, "BountyIncident_Assembly", 1, true) ~= nil
+                -- Гистерезис дистанции: для сундуков Jewelry подлетаем ближе (<= 4 ст) прямо к нужному сундуку
+                -- (не вбок +2.5, где рядом дорожный знак [P] и забор!), для остальных — 6 ст / 10 ст во время удержания
+                local maxStaticDist2 = isJewelryBox and (isHoldingThis and 36 or 16) or (isHoldingThis and 100 or 36)
                 if dist2 > maxStaticDist2 then
-                    -- Статичный объект (Clean The Rock, Three Wishes, Stash): встаём СБОКУ на земле (не на макушке столба!)
                     self:_releasePrompt()
-                    self.deps.teleportTo(px + 2.5, py + 1.5, pz)
+                    if isJewelryBox then
+                        self.deps.teleportTo(px, py + 2.2, pz)
+                    else
+                        -- Статичный объект (Clean The Rock, Three Wishes, Stash): встаём СБОКУ на земле (не на макушке столба!)
+                        self.deps.teleportTo(px + 2.5, py + 1.5, pz)
+                    end
                     self.lastAction = now
                     self.statusText = title .. " | лечу к объекту"
                     return
