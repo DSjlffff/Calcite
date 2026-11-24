@@ -14774,7 +14774,7 @@ local function firstBasePart(root)
     if root.IsA ~= nil and root:IsA("BasePart") then
         return root
     end
-    if root.PrimaryPart ~= nil then
+    if root.IsA ~= nil and root:IsA("Model") and root.PrimaryPart ~= nil then
         return root.PrimaryPart
     end
     if root.GetDescendants ~= nil then
@@ -14922,11 +14922,16 @@ local function scanSeaTrash(out, mapFolder)
     end
 end
 
-local function scanFolder(out, folder, kind, attrName)
-    if folder == nil or folder.GetChildren == nil then
+local function scanFolder(out, folder, kind, attrName, depth)
+    if folder == nil or folder.GetChildren == nil or (depth or 0) > 3 then
         return
     end
     for _, child in folder:GetChildren() do
+        -- WorldEventDrops может содержать вложенные Folder (напр. MoneyTransport_<guid>) с несколькими дропами внутри
+        if child.IsA ~= nil and child:IsA("Folder") then
+            scanFolder(out, child, kind, attrName, (depth or 0) + 1)
+            continue
+        end
         if kind == "buried" and safeAttr(child, "GardenSupplyAvailable") == false then
             continue
         end
