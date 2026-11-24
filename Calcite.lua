@@ -2952,7 +2952,7 @@ local function ensureGui()
     hkFrame.BackgroundColor3 = bg
     hkFrame.BackgroundTransparency = 0.08
     hkFrame.BorderSizePixel = 0
-    hkFrame.Size = UDim2.fromOffset(136, 0)
+    hkFrame.Size = UDim2.fromOffset(176, 0)
     hkFrame.AutomaticSize = Enum.AutomaticSize.Y
     hkFrame.Position = UDim2.new(1, -12, 0, 50)
     hkFrame.AnchorPoint = Vector2.new(1, 0)
@@ -7947,7 +7947,7 @@ function main.start(env)
             end
             local hum = ch and ch:FindFirstChildOfClass("Humanoid")
             if hum ~= nil then
-                if s.walkSpeed ~= nil and s.walkSpeed.enabled then
+                if s.walkSpeed ~= nil and s.walkSpeed.enabled and (ui.walkSpeedActive == nil or ui.walkSpeedActive()) then
                     if not cm.wasWs then
                         cm.savedWs = hum.WalkSpeed
                         cm.wasWs = true
@@ -7959,7 +7959,7 @@ function main.start(env)
                     cm.savedWs = nil
                 end
 
-                if s.jumpPower ~= nil and s.jumpPower.enabled then
+                if s.jumpPower ~= nil and s.jumpPower.enabled and (ui.jumpPowerActive == nil or ui.jumpPowerActive()) then
                     if not cm.wasJp then
                         cm.savedJp = hum.JumpPower
                         cm.savedUseJp = hum.UseJumpPower
@@ -8330,6 +8330,20 @@ local pointLabels = { "По списку", "Ближнюю" }
 -- the list of the modes as the user reads it
 local choiceLabels = { "Авто", "Universal", "YBA", "Blox Strike", "Steal an Egg", "Town", "MVS", "Item Asylum", "Rivals", "Stand Out" }
 local choiceOf = { ["Авто"] = "Auto", ["Universal"] = "Universal", ["YBA"] = "Yba", ["Blox Strike"] = "Strike", ["Steal an Egg"] = "StealEgg", ["Town"] = "Town", ["MVS"] = "Mvs", ["Item Asylum"] = "ItemAsylum", ["Rivals"] = "Rivals", ["Stand Out"] = "StandOut" }
+
+-- Для KeyPicker с SyncToggleState = true: в режиме Hold страхуем проверку GetState() каждый кадр
+-- (если окно потеряло фокус или открыт чат, Hold сразу отпускается), в Toggle / None решает сам тумблер
+local function syncKeyActive(opt)
+    if opt == nil then return true end
+    local okMode, mode = pcall(function() return opt.Mode end)
+    if not okMode or mode ~= "Hold" then return true end
+    local okKey, keyValue = pcall(function() return opt.Value end)
+    if not okKey or keyValue == nil or keyValue == "None" or tostring(keyValue) == "None" then
+        return true
+    end
+    local okState, state = pcall(function() return opt:GetState() end)
+    return okState and state == true
+end
 
 function menu.create(deps)
     local Library = deps.Library
@@ -8978,9 +8992,23 @@ function menu.create(deps)
 
     -- WalkSpeed / JumpPower (группируется в soFarm чтобы не тратить регистры menu.create)
     soFarm.charGroup = playerTab:AddLeftGroupbox("Персонаж")
-    toggle(soFarm.charGroup, "WalkSpeedEnabled", "WalkSpeed", settings.walkSpeed, "enabled")
+    toggle(soFarm.charGroup, "WalkSpeedEnabled", "WalkSpeed", settings.walkSpeed, "enabled"):AddKeyPicker("WalkSpeedKey", {
+        Default = "None",
+        Mode = "Toggle",
+        Modes = { "Toggle", "Hold" },
+        SyncToggleState = true,
+        NoUI = true,
+        Text = "WalkSpeed",
+    })
     slider(soFarm.charGroup, "WalkSpeedValue", "Скорость ходьбы", settings.walkSpeed, "value", 16, 200, " st/s")
-    toggle(soFarm.charGroup, "JumpPowerEnabled", "JumpPower", settings.jumpPower, "enabled")
+    toggle(soFarm.charGroup, "JumpPowerEnabled", "JumpPower", settings.jumpPower, "enabled"):AddKeyPicker("JumpPowerKey", {
+        Default = "None",
+        Mode = "Toggle",
+        Modes = { "Toggle", "Hold" },
+        SyncToggleState = true,
+        NoUI = true,
+        Text = "JumpPower",
+    })
     slider(soFarm.charGroup, "JumpPowerValue", "Сила прыжка", settings.jumpPower, "value", 50, 250, "")
 
     -- Fullbright: убирает ночь/туман/тени через Lighting (Town). Переехал в Visuals из Player
@@ -9182,6 +9210,14 @@ function menu.create(deps)
         return ok and state == true
     end
 
+    function ui.walkSpeedActive()
+        return syncKeyActive(Options.WalkSpeedKey)
+    end
+
+    function ui.jumpPowerActive()
+        return syncKeyActive(Options.JumpPowerKey)
+    end
+
     -- which key the aim is on and how it is used, in words: for the diagnostics
     function ui.aimKeyName()
         return tostring(Options.AimKey.Value) .. " (" .. tostring(Options.AimKey.Mode) .. ")"
@@ -9203,6 +9239,28 @@ function menu.create(deps)
         if settings.aim.autoFire then
             local needsKey = settings.aim.autoFireNeedsKey
             table.insert(out, { id = "autofire", name = translator:text("Автовыстрел"), key = needsKey and keyOf(Options.AimKey) or "ON", active = not needsKey or ui.aimHeld() })
+        end
+        if modes.has(modes.resolve(settings.modeChoice, deps.universeId), "CharMove") then
+            local wsKey = keyOf(Options.WalkSpeedKey)
+            local wsBound = wsKey ~= "None" and wsKey ~= "?"
+            if settings.walkSpeed and (settings.walkSpeed.enabled or wsBound) then
+                table.insert(out, {
+                    id = "walkspeed",
+                    name = "WalkSpeed",
+                    key = wsBound and wsKey or "ON",
+                    active = settings.walkSpeed.enabled == true and ui.walkSpeedActive(),
+                })
+            end
+            local jpKey = keyOf(Options.JumpPowerKey)
+            local jpBound = jpKey ~= "None" and jpKey ~= "?"
+            if settings.jumpPower and (settings.jumpPower.enabled or jpBound) then
+                table.insert(out, {
+                    id = "jumppower",
+                    name = "JumpPower",
+                    key = jpBound and jpKey or "ON",
+                    active = settings.jumpPower.enabled == true and ui.jumpPowerActive(),
+                })
+            end
         end
         return out
     end
