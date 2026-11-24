@@ -2952,7 +2952,7 @@ local function ensureGui()
     hkFrame.BackgroundColor3 = bg
     hkFrame.BackgroundTransparency = 0.08
     hkFrame.BorderSizePixel = 0
-    hkFrame.Size = UDim2.fromOffset(176, 0)
+    hkFrame.Size = UDim2.fromOffset(116, 0)
     hkFrame.AutomaticSize = Enum.AutomaticSize.Y
     hkFrame.Position = UDim2.new(1, -12, 0, 50)
     hkFrame.AnchorPoint = Vector2.new(1, 0)
@@ -3143,6 +3143,7 @@ function hud.setHotkeys(entries, show)
         return
     end
     local seen = {}
+    local maxRowW = 0
     for i, e in ipairs(entries) do
         seen[e.id] = true
         ensureHkRow(e.id, e.key, e.name, i)
@@ -3154,10 +3155,20 @@ function hud.setHotkeys(entries, show)
             else
                 row.keyLabel.TextColor3 = mutedCol or Color3.fromRGB(150, 150, 160)
             end
+            local okN, tbN = pcall(function() return row.nameLabel.TextBounds.X end)
+            local okK, tbK = pcall(function() return row.keyLabel.TextBounds.X end)
+            local nW = (okN and type(tbN) == "number" and tbN > 0) and tbN or (#tostring(e.name or "") * 7.5)
+            local kW = (okK and type(tbK) == "number" and tbK > 0) and tbK or (#tostring(e.key or "-") * 7.5)
+            local rowW = nW + 16 + kW
+            if rowW > maxRowW then maxRowW = rowW end
         end
     end
     for id in hkRows do
         if not seen[id] then hideRow(id) end
+    end
+    local targetW = math.ceil(math.max(106, maxRowW + 20))
+    if hkFrame.Size.X.Offset ~= targetW then
+        hkFrame.Size = UDim2.fromOffset(targetW, 0)
     end
 end
 
