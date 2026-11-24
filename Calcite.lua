@@ -724,14 +724,23 @@ function Chams:step(targets, s)
         return
     end
 
-    local Color3 = self.deps.Color3
     local fill = c.fillColor or { 255, 50, 50 }
     local outline = c.outlineColor or { 0, 0, 0 }
-    local fillColor = Color3.fromRGB(fill[1], fill[2], fill[3])
-    local outlineColor = Color3.fromRGB(outline[1], outline[2], outline[3])
     local fillT = (c.fillTransparency or 50) / 100
     local outlineT = (c.outlineTransparency or 0) / 100
     local depthMode = pickDepth(self.deps.Enum, c.throughWalls ~= false)
+    local styleKey = string.format("%d,%d,%d|%d,%d,%d|%.3f|%.3f|%s",
+        fill[1], fill[2], fill[3], outline[1], outline[2], outline[3], fillT, outlineT, tostring(depthMode))
+    local styleChanged = self._styleKey ~= styleKey
+    local fillColor, outlineColor = self._fillColor, self._outlineColor
+    if styleChanged or fillColor == nil then
+        local Color3 = self.deps.Color3
+        fillColor = Color3.fromRGB(fill[1], fill[2], fill[3])
+        outlineColor = Color3.fromRGB(outline[1], outline[2], outline[3])
+        self._styleKey = styleKey
+        self._fillColor = fillColor
+        self._outlineColor = outlineColor
+    end
 
     local wanted = {}
     for _, target in targets do
@@ -743,21 +752,25 @@ function Chams:step(targets, s)
         if s.teamCheck and target.sameTeam then continue end
 
         local h = self.cache[char]
+        local created = false
         -- character мог освободиться (респавн) — старый Highlight уже умер вместе с ним
         if h == nil or h.Parent ~= char then
             h = self.deps.Instance.new("Highlight")
             h.Adornee = char
             h.Parent = char
             self.cache[char] = h
+            created = true
         end
-        h.FillColor = fillColor
-        h.OutlineColor = outlineColor
-        h.FillTransparency = fillT
-        h.OutlineTransparency = outlineT
-        if depthMode then
-            h.DepthMode = depthMode
+        if created or styleChanged then
+            h.FillColor = fillColor
+            h.OutlineColor = outlineColor
+            h.FillTransparency = fillT
+            h.OutlineTransparency = outlineT
+            if depthMode then
+                h.DepthMode = depthMode
+            end
+            h.Enabled = true
         end
-        h.Enabled = true
         wanted[char] = true
     end
 
@@ -1188,6 +1201,23 @@ function draw.new(env)
 
     local widths = {}
     local remembered = 0
+    local colors = {}
+    local colorCount = 0
+
+    local function rgb(r, g, b)
+        local key = r * 65536 + g * 256 + b
+        local c = colors[key]
+        if c == nil then
+            if colorCount >= 512 then
+                table.clear(colors)
+                colorCount = 0
+            end
+            c = Color3.fromRGB(r, g, b)
+            colors[key] = c
+            colorCount += 1
+        end
+        return c
+    end
 
     function self.textWidth(text)
         local width = widths[text]
@@ -1208,47 +1238,47 @@ function draw.new(env)
 
     -- the outline of a rectangle, one pixel thick
     function self.rect(left, top, right, bottom, r, g, b)
-        immediate.Rectangle(Vector2.new(left, top), Vector2.new(right - left, bottom - top), Color3.fromRGB(r, g, b), 1, 0, 1)
+        if not visible then return end
+        immediate.Rectangle(Vector2.new(left, top), Vector2.new(right - left, bottom - top), rgb(r, g, b), 1, 0, 1)
     end
 
     function self.filledRect(left, top, right, bottom, r, g, b)
-        immediate.FilledRectangle(Vector2.new(left, top), Vector2.new(right - left, bottom - top), Color3.fromRGB(r, g, b), 1, 0)
+        if not visible then return end
+        immediate.FilledRectangle(Vector2.new(left, top), Vector2.new(right - left, bottom - top), rgb(r, g, b), 1, 0)
     end
 
     -- a filled circle, drawn as a square rounded all the way: the documentation gives the arguments of FilledCircle
     -- in another order than those of Circle, and one of the two is a mistake
     function self.dot(x, y, radius, r, g, b, opacity)
+        if not visible then return end
         immediate.FilledRectangle(Vector2.new(x - radius, y - radius), Vector2.new(radius * 2, radius * 2),
-            Color3.fromRGB(r, g, b), opacity or 1, radius)
+            rgb(r, g, b), opacity or 1, radius)
     end
 
     -- the outline of a circle, one pixel thick
     function self.circle(x, y, radius, r, g, b)
-        immediate.Circle(Vector2.new(x, y), radius, Color3.fromRGB(r, g, b), 1, 64, 1)
+        if not visible then return end
+        immediate.Circle(Vector2.new(x, y), radius, rgb(r, g, b), 1, 64, 1)
     end
 
     -- a line one pixel thick
     function self.line(x1, y1, x2, y2, r, g, b, opacity)
-        immediate.Line(Vector2.new(x1, y1), Vector2.new(x2, y2), Color3.fromRGB(r, g, b), opacity or 1, 1)
+        if not visible then return end
+        immediate.Line(Vector2.new(x1, y1), Vector2.new(x2, y2), rgb(r, g, b), opacity or 1, 1)
     end
 
     -- text with a black outline, readable over any background; opacity below 1 fades the outline with the text
     function self.text(x, y, r, g, b, text, opacity)
+        if not visible then return end
         opacity = opacity or 1
-        immediate.OutlinedText(Vector2.new(x, y), font, font_size, Color3.fromRGB(r, g, b), opacity, black, opacity, text, false)
+        immediate.OutlinedText(Vector2.new(x, y), font, font_size, rgb(r, g, b), opacity, black, opacity, text, false)
     end
 
     -- the same, centred on x
     function self.textCentered(x, y, r, g, b, text, opacity)
+        if not visible then return end
         opacity = opacity or 1
-        immediate.OutlinedText(Vector2.new(x, y), font, font_size, Color3.fromRGB(r, g, b), opacity, black, opacity, text, true)
-    end
-
-    for _, name in { "rect", "filledRect", "dot", "circle", "line", "text", "textCentered" } do
-        local paint = self[name]
-        self[name] = function(...)
-            if visible then paint(...) end
-        end
+        immediate.OutlinedText(Vector2.new(x, y), font, font_size, rgb(r, g, b), opacity, black, opacity, text, true)
     end
 
     function self.destroy()
@@ -2816,6 +2846,11 @@ local reloadDuration = 2.5    -- MVS револьвер: ~2.5s между выс
 local lastFpsMeasure = 0
 local fpsCount = 0
 local fpsAvg = 0
+local lastWmText = ""
+local lastWmVisible = nil
+local lastReloadVisible = nil
+local lastHkVisible = nil
+local lastHkWidth = 0
 
 -- делает frame перетаскиваемым за ЛКМ. Хранит позицию в UDim2 offset'ах
 local function makeDraggable(frame)
@@ -3006,11 +3041,13 @@ end
 local function ensureHkRow(id, keyText, nameText, order)
     initMuted()
     local row = hkRows[id]
+    local keyStr = keyText or "-"
+    local ord = order or 0
     if row == nil then
         local frame = Instance.new("Frame")
         frame.BackgroundTransparency = 1
         frame.Size = UDim2.new(1, 0, 0, 19)
-        frame.LayoutOrder = order or 0
+        frame.LayoutOrder = ord
         frame.Parent = hkFrame
         local nameLabel = Instance.new("TextLabel")
         nameLabel.Parent = frame
@@ -3021,6 +3058,7 @@ local function ensureHkRow(id, keyText, nameText, order)
         nameLabel.TextSize = 14
         nameLabel.TextColor3 = textCol
         nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+        nameLabel.Text = nameText
         local keyLabel = Instance.new("TextLabel")
         keyLabel.Parent = frame
         keyLabel.BackgroundTransparency = 1
@@ -3030,18 +3068,51 @@ local function ensureHkRow(id, keyText, nameText, order)
         keyLabel.TextSize = 14
         keyLabel.TextColor3 = mutedCol
         keyLabel.TextXAlignment = Enum.TextXAlignment.Right
-        row = { frame = frame, keyLabel = keyLabel, nameLabel = nameLabel }
+        keyLabel.Text = keyStr
+        row = {
+            frame = frame,
+            keyLabel = keyLabel,
+            nameLabel = nameLabel,
+            name = nameText,
+            key = keyStr,
+            order = ord,
+            visible = true,
+            active = nil,
+            rowW = nil,
+        }
         hkRows[id] = row
+        return row, true
     end
-    row.frame.LayoutOrder = order or 0
-    row.nameLabel.Text = nameText
-    row.keyLabel.Text = keyText or "-"
-    row.frame.Visible = true
+    local changed = false
+    if row.order ~= ord then
+        row.order = ord
+        row.frame.LayoutOrder = ord
+    end
+    if row.name ~= nameText then
+        row.name = nameText
+        row.nameLabel.Text = nameText
+        row.rowW = nil
+        changed = true
+    end
+    if row.key ~= keyStr then
+        row.key = keyStr
+        row.keyLabel.Text = keyStr
+        row.rowW = nil
+        changed = true
+    end
+    if not row.visible then
+        row.visible = true
+        row.frame.Visible = true
+    end
+    return row, changed
 end
 
 local function hideRow(id)
     local row = hkRows[id]
-    if row then row.frame.Visible = false end
+    if row and row.visible ~= false then
+        row.visible = false
+        row.frame.Visible = false
+    end
 end
 
 -- deps: players, workspace, and game, Instance, UDim, UDim2, Color3, Enum, Vector2, Font of env.lua
@@ -3068,6 +3139,8 @@ function hud.destroy()
     end
 
     gui, wmFrame, wmText, reloadFrame, reloadFill, hkFrame, hkList = nil, nil, nil, nil, nil, nil, nil
+    lastWmText, lastWmVisible, lastReloadVisible, lastHkVisible, lastHkWidth = "", nil, nil, nil, 0
+    lastFpsMeasure, fpsCount, fpsAvg = 0, 0, 0
     table.clear(hkRows)
 end
 
@@ -3084,32 +3157,54 @@ function hud.step(dt, now, showWatermark, showReload)
 
     if not showWatermark and not showReload then
         if gui ~= nil then
-            if wmFrame then wmFrame.Visible = false end
-            if reloadFrame then reloadFrame.Visible = false end
+            if wmFrame and lastWmVisible ~= false then
+                lastWmVisible = false
+                wmFrame.Visible = false
+            end
+            if reloadFrame and lastReloadVisible ~= false then
+                lastReloadVisible = false
+                reloadFrame.Visible = false
+            end
         end
         return
     end
     ensureGui()
 
-    -- FPS: усредняем за 0.5с
+    -- FPS: усредняем за 0.5с; текст и пинг обновляем ТОЛЬКО раз в 0.5с, чтобы не дёргать AutomaticSize каждый кадр
     fpsCount += 1
-    if now - lastFpsMeasure >= 0.5 then
+    local sampled = false
+    if lastFpsMeasure == 0 then
+        lastFpsMeasure = now
+        sampled = true
+    elseif now - lastFpsMeasure >= 0.5 then
         fpsAvg = fpsCount / (now - lastFpsMeasure)
         fpsCount = 0
         lastFpsMeasure = now
+        sampled = true
     end
 
-    wmFrame.Visible = showWatermark
-    if showWatermark then
+    if lastWmVisible ~= showWatermark then
+        lastWmVisible = showWatermark
+        wmFrame.Visible = showWatermark
+    end
+    if showWatermark and (sampled or lastWmText == "") then
         local ping = 0
         pcall(function() ping = math.floor(Players.LocalPlayer:GetNetworkPing() * 1000) end)
-        wmText.Text = string.format("Calcite  |  %d FPS  |  %d ms", math.floor(fpsAvg + 0.5), ping)
+        local txt = string.format("Calcite  |  %d FPS  |  %d ms", math.floor(fpsAvg + 0.5), ping)
+        if txt ~= lastWmText then
+            lastWmText = txt
+            wmText.Text = txt
+        end
     end
 
     local elapsed = now - reloadStartAt
     local show = showReload and reloadStartAt > 0 and elapsed < reloadDuration
-    reloadFrame.Visible = show == true
-    if show then
+    local showBool = show == true
+    if lastReloadVisible ~= showBool then
+        lastReloadVisible = showBool
+        reloadFrame.Visible = showBool
+    end
+    if showBool then
         local progress = math.clamp(elapsed / reloadDuration, 0, 1)
         reloadFill.Size = UDim2.new(progress, 0, 1, 0)
         -- привязка к курсору: центр бара под курсором с небольшим смещением вниз
@@ -3133,12 +3228,19 @@ function hud.setHotkeys(entries, show)
     end
 
     if not show then
-        if hkFrame then hkFrame.Visible = false end
+        if hkFrame and lastHkVisible ~= false then
+            lastHkVisible = false
+            hkFrame.Visible = false
+        end
         return
     end
     ensureGui()
-    hkFrame.Visible = entries ~= nil and #entries > 0
-    if not hkFrame.Visible then
+    local vis = entries ~= nil and #entries > 0
+    if lastHkVisible ~= vis then
+        lastHkVisible = vis
+        hkFrame.Visible = vis
+    end
+    if not vis then
         for id in hkRows do hideRow(id) end
         return
     end
@@ -3146,20 +3248,26 @@ function hud.setHotkeys(entries, show)
     local maxRowW = 0
     for i, e in ipairs(entries) do
         seen[e.id] = true
-        ensureHkRow(e.id, e.key, e.name, i)
-        local row = hkRows[e.id]
+        local row = ensureHkRow(e.id, e.key, e.name, i)
         if row then
-            row.nameLabel.TextColor3 = textCol
-            if e.active then
-                row.keyLabel.TextColor3 = accent
-            else
-                row.keyLabel.TextColor3 = mutedCol or Color3.fromRGB(150, 150, 160)
+            local act = e.active == true
+            if row.active ~= act then
+                row.active = act
+                row.keyLabel.TextColor3 = act and accent or (mutedCol or Color3.fromRGB(150, 150, 160))
             end
-            local okN, tbN = pcall(function() return row.nameLabel.TextBounds.X end)
-            local okK, tbK = pcall(function() return row.keyLabel.TextBounds.X end)
-            local nW = (okN and type(tbN) == "number" and tbN > 0) and tbN or (#tostring(e.name or "") * 7.5)
-            local kW = (okK and type(tbK) == "number" and tbK > 0) and tbK or (#tostring(e.key or "-") * 7.5)
-            local rowW = nW + 16 + kW
+            local rowW = row.rowW
+            if rowW == nil then
+                local okN, tbN = pcall(function() return row.nameLabel.TextBounds.X end)
+                local okK, tbK = pcall(function() return row.keyLabel.TextBounds.X end)
+                local gotN = okN and type(tbN) == "number" and tbN > 0
+                local gotK = okK and type(tbK) == "number" and tbK > 0
+                local nW = gotN and tbN or (#tostring(e.name or "") * 7.5)
+                local kW = gotK and tbK or (#tostring(e.key or "-") * 7.5)
+                rowW = nW + 16 + kW
+                if gotN and gotK then
+                    row.rowW = rowW
+                end
+            end
             if rowW > maxRowW then maxRowW = rowW end
         end
     end
@@ -3167,7 +3275,8 @@ function hud.setHotkeys(entries, show)
         if not seen[id] then hideRow(id) end
     end
     local targetW = math.ceil(math.max(106, maxRowW + 20))
-    if hkFrame.Size.X.Offset ~= targetW then
+    if lastHkWidth ~= targetW then
+        lastHkWidth = targetW
         hkFrame.Size = UDim2.fromOffset(targetW, 0)
     end
 end
@@ -4102,7 +4211,7 @@ local see_through = 20          -- parts nobody can see that a look passes throu
 
 local first_person_reach = 2    -- studs: a camera this close to the head of the character is the first person
 
-local slow_interval = 0.3      -- seconds between two passes over what changes rarely, as the cache of the external
+local slow_interval = 0.4      -- seconds between two passes over what changes rarely, as the cache of the external
 local settle_interval = 5       -- seconds between two looks at where every item is and what it is called
 
 -- starts the script; gives back a handle with unload(), or nil when it could not start
@@ -6370,16 +6479,19 @@ function main.start(env)
 
         handle._soBounty.runner = stand_out_bounty.new({
             readUi = function()
-                local pg = localPlayer:FindFirstChildOfClass("PlayerGui")
                 local sb = handle._soBounty
+                local t = env.clock()
                 local needRohanUi = false
                 if sb.rohan ~= nil and (sb.rohan.submitStage or 0) >= 1 then
-                    local t = env.clock()
                     if sb.rohanUiAt == nil or t - sb.rohanUiAt >= 0.4 then
                         sb.rohanUiAt = t
                         needRohanUi = true
                     end
                 end
+                if not needRohanUi and sb.uiCache ~= nil and sb.uiCacheAt ~= nil and t - sb.uiCacheAt < 0.08 then
+                    return sb.uiCache
+                end
+                local pg = localPlayer:FindFirstChildOfClass("PlayerGui")
                 local res = stand_out_bounty.readUi(pg, needRohanUi)
                 if needRohanUi then
                     sb.rohanSubmitBtn = res.rohanSubmitBtn
@@ -6391,6 +6503,8 @@ function main.start(env)
                     sb.rohanSubmitBtn = nil
                     sb.rohanOpen = false
                 end
+                sb.uiCache = res
+                sb.uiCacheAt = t
                 return res
             end,
             unlockedTier = function()
@@ -7567,11 +7681,12 @@ function main.start(env)
                 ownCharacters:refresh()
             else
                 local wantYba = status.wantsEffects(s.statusKinds) or s.stand or s.spec
+                local wantHitboxes = modes.has(mode, "Aim")
                 local townWeapon = s.townWeapon and s.townWeapon.enabled
                 local iaWeapon = s.iaWeapon and s.iaWeapon.enabled
                 local standOutInfo = s.standOut and (s.standOut.stand or s.standOut.subAbility or s.standOut.weapon)
                 for _, record in roster do
-                    players.refresh(record, wantYba)
+                    players.refresh(record, wantYba, wantHitboxes)
                     if townWeapon and record.character ~= nil then
                         local info = town.weaponInfo(record.character)
                         if info ~= nil then
@@ -7814,7 +7929,7 @@ function main.start(env)
                     end
                 end
                 if not cachedOk then
-                    local allowFallback = (now - sb.lastPromptScan >= 1.0)
+                    local allowFallback = (now - sb.lastPromptScan >= 2.5)
                     if allowFallback then
                         sb.lastPromptScan = now
                     end
@@ -8054,49 +8169,56 @@ function main.start(env)
             fullbright.step(s.fullbright.enabled == true, lighting)
         end
 
-        -- Player WalkSpeed / JumpPower: применяем каждый кадр пока включено, восстанавливаем при выключении
-        pcall(function()
+        -- Player WalkSpeed / JumpPower: применяем каждый кадр пока включено, восстанавливаем при выключении;
+        -- когда оба выключены и восстанавливать нечего — вообще не создаём pcall и не ищем Humanoid
+        do
             local cm = handle._charMove
-            local ch = localPlayer and localPlayer.Character
-            if ch ~= cm.lastChar then
-                cm.lastChar = ch
-                cm.savedWs = nil
-                cm.savedJp = nil
-                cm.savedUseJp = nil
-                cm.wasWs = false
-                cm.wasJp = false
-            end
-            local hum = ch and ch:FindFirstChildOfClass("Humanoid")
-            if hum ~= nil then
-                if s.walkSpeed ~= nil and s.walkSpeed.enabled and (ui.walkSpeedActive == nil or ui.walkSpeedActive()) then
-                    if not cm.wasWs then
-                        cm.savedWs = hum.WalkSpeed
-                        cm.wasWs = true
+            local wantWs = s.walkSpeed ~= nil and s.walkSpeed.enabled == true
+            local wantJp = s.jumpPower ~= nil and s.jumpPower.enabled == true
+            if wantWs or wantJp or cm.wasWs or cm.wasJp then
+                pcall(function()
+                    local ch = localPlayer and localPlayer.Character
+                    if ch ~= cm.lastChar then
+                        cm.lastChar = ch
+                        cm.savedWs = nil
+                        cm.savedJp = nil
+                        cm.savedUseJp = nil
+                        cm.wasWs = false
+                        cm.wasJp = false
                     end
-                    hum.WalkSpeed = s.walkSpeed.value or 32
-                elseif cm.wasWs then
-                    cm.wasWs = false
-                    if cm.savedWs ~= nil then hum.WalkSpeed = cm.savedWs end
-                    cm.savedWs = nil
-                end
+                    local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+                    if hum ~= nil then
+                        if wantWs and (ui.walkSpeedActive == nil or ui.walkSpeedActive()) then
+                            if not cm.wasWs then
+                                cm.savedWs = hum.WalkSpeed
+                                cm.wasWs = true
+                            end
+                            hum.WalkSpeed = s.walkSpeed.value or 32
+                        elseif cm.wasWs then
+                            cm.wasWs = false
+                            if cm.savedWs ~= nil then hum.WalkSpeed = cm.savedWs end
+                            cm.savedWs = nil
+                        end
 
-                if s.jumpPower ~= nil and s.jumpPower.enabled and (ui.jumpPowerActive == nil or ui.jumpPowerActive()) then
-                    if not cm.wasJp then
-                        cm.savedJp = hum.JumpPower
-                        cm.savedUseJp = hum.UseJumpPower
-                        cm.wasJp = true
+                        if wantJp and (ui.jumpPowerActive == nil or ui.jumpPowerActive()) then
+                            if not cm.wasJp then
+                                cm.savedJp = hum.JumpPower
+                                cm.savedUseJp = hum.UseJumpPower
+                                cm.wasJp = true
+                            end
+                            hum.UseJumpPower = true
+                            hum.JumpPower = s.jumpPower.value or 80
+                        elseif cm.wasJp then
+                            cm.wasJp = false
+                            if cm.savedUseJp ~= nil then hum.UseJumpPower = cm.savedUseJp end
+                            if cm.savedJp ~= nil then hum.JumpPower = cm.savedJp end
+                            cm.savedUseJp = nil
+                            cm.savedJp = nil
+                        end
                     end
-                    hum.UseJumpPower = true
-                    hum.JumpPower = s.jumpPower.value or 80
-                elseif cm.wasJp then
-                    cm.wasJp = false
-                    if cm.savedUseJp ~= nil then hum.UseJumpPower = cm.savedUseJp end
-                    if cm.savedJp ~= nil then hum.JumpPower = cm.savedJp end
-                    cm.savedUseJp = nil
-                    cm.savedJp = nil
-                end
+                end)
             end
-        end)
+        end
 
         -- NoClip (Town): Humanoid каждый тик возвращает CanCollide=true, поэтому цикл нужен каждый кадр;
         -- при выключении шаг восстанавливает коллизию у частей, которые мы трогали
@@ -8104,14 +8226,20 @@ function main.start(env)
             noclipper:step(s.noclip.enabled == true)
         end
 
-        -- HUD overlays: watermark (всегда), reload bar (MVS), hotkeys панель
+        -- HUD overlays: watermark (всегда), reload bar (MVS), hotkeys панель (обновляем не чаще 1 раза в 0.12с)
         if s.watermark ~= nil then
             local dt = 1 / 60
             hud.step(dt, now, not overlayHidden and s.watermark.enabled == true, not overlayHidden and s.reloadBar and s.reloadBar.enabled == true)
-            if not overlayHidden and s.hotkeys and s.hotkeys.enabled then
-                hud.setHotkeys(ui.hotkeys(s), true)
-            else
-                hud.setHotkeys(nil, false)
+            local hkShow = (not overlayHidden and s.hotkeys ~= nil and s.hotkeys.enabled == true)
+            local cm = handle._charMove
+            if hkShow ~= cm.hkVis or (hkShow and (cm.hkAt == nil or now - cm.hkAt >= 0.12)) then
+                cm.hkVis = hkShow
+                cm.hkAt = now
+                if hkShow then
+                    hud.setHotkeys(ui.hotkeys(s), true)
+                else
+                    hud.setHotkeys(nil, false)
+                end
             end
         end
 
@@ -10374,7 +10502,8 @@ end
 
 -- the slow pass: which body the player has right now and what is known about it
 -- wantYba asks for what only Your Bizarre Adventure has: the effects, the stand, the style and the limbs
-function players.refresh(record, wantYba)
+-- wantHitboxes (defaults true) collects body parts for Aim; skipped in modes without Aim to save FindFirstChild calls
+function players.refresh(record, wantYba, wantHitboxes)
     local player = record.player
 
     record.character = nil
@@ -10408,7 +10537,9 @@ function players.refresh(record, wantYba)
 
     -- what the aim goes for
     record.body = character
-    record.parts = hitbox.collect(character)
+    if wantHitboxes ~= false then
+        record.parts = hitbox.collect(character)
+    end
 
     -- the stock protection of Roblox: while a ForceField is in the character, nothing hurts it;
     -- games put it there on spawn and take it away after a few seconds
@@ -11883,6 +12014,9 @@ function stand_out_bounty.readUi(playerGui, scanRohan)
             return
         end
         info.selectOpen = sel.Visible == true
+        if not info.selectOpen then
+            return
+        end
 
         local ts = sel:FindFirstChild("TierSelector")
         if ts ~= nil then
@@ -13524,7 +13658,20 @@ function stand_out_bounty.findMyPrompt(workspace, userId, tx, ty, tz, allowWorld
             end
         end
 
-        scanContainer(gameFolder)
+        -- Пропускаем уже проверенные папки и служебные контейнеры без промптов (Map НЕ пропускаем: там Clean The Rock / Three Wishes!)
+        local skipGameChildren = {
+            Terrain = true, Visuals = true, VFX = true, Effects = true, Lighting = true,
+            NPCs = true, BountyWorld = true, StoryActors = true, ArmWrestlingTables = true, Players = true,
+        }
+        if gameFolder.GetChildren ~= nil then
+            for _, ch in gameFolder:GetChildren() do
+                if not skipGameChildren[ch.Name] then
+                    scanContainer(ch)
+                end
+            end
+        else
+            scanContainer(gameFolder)
+        end
         -- Также проверяем объекты вне Workspace.Game (если объект баунти заспавнен прямо в Workspace)
         if bestPrompt == nil and workspace.GetChildren ~= nil then
             for _, top in workspace:GetChildren() do
