@@ -16586,36 +16586,9 @@ function bridge.create(ctx)
                 end
             end)
 
-            -- Load ReplicatedStorage.Modules.Quests once for Angelo job helpers (via env.gameRequire!)
-            if not sq.modTried then
-                sq.modTried = true
-                local gReq = env.gameRequire
-                if type(gReq) == "function" then
-                    pcall(function()
-                        local rs = game:GetService("ReplicatedStorage")
-                        local mods = rs and rs:FindFirstChild("Modules")
-                        local qm = mods and mods:FindFirstChild("Quests")
-                        if qm ~= nil then
-                            sq.mod = gReq(qm)
-                        end
-                    end)
-                end
-            end
-            local qm = sq.mod
-            if qm ~= nil then
-                if type(qm.GetAngeloJob) == "function" then
-                    local okJ, jid = pcall(qm.GetAngeloJob, localPlayer)
-                    if okJ and type(jid) == "string" then
-                        st.angeloJobId = jid
-                    end
-                end
-                if type(qm.AngeloJobTakenToday) == "function" then
-                    local okT, taken = pcall(qm.AngeloJobTakenToday, localPlayer)
-                    if okT and taken == true then
-                        st.angeloDoneToday = true
-                    end
-                end
-            end
+            -- НЕ вызываем env.gameRequire(Modules.Quests) внутри RenderStepped:
+            -- require игрового ModuleScript понижает thread identity текущего кадра до 2 и ломает доступ к CoreGui (SetText)!
+            -- Все нужные флаги (DailyQuestState, ActiveQuest, Inventory, GardeningState) уже читаются напрямую из Data.Stats.
 
             -- Weather check
             pcall(function()
@@ -16725,17 +16698,25 @@ function bridge.create(ctx)
         closeDialogue = function()
             local gReq = env.gameRequire
             if type(gReq) ~= "function" then return end
-            pcall(function()
-                local rs = game:GetService("ReplicatedStorage")
-                local mods = rs and rs:FindFirstChild("Modules")
-                local dm = mods and mods:FindFirstChild("Dialogue")
-                if dm ~= nil then
-                    local m = gReq(dm)
-                    if type(m) == "table" and type(m.closeDialogue) == "function" then
-                        m.closeDialogue()
+            -- Запускаем в отдельном task.spawn, чтобы gameRequire не понизил identity RenderStepped-потока!
+            local run = function()
+                pcall(function()
+                    local rs = game:GetService("ReplicatedStorage")
+                    local mods = rs and rs:FindFirstChild("Modules")
+                    local dm = mods and mods:FindFirstChild("Dialogue")
+                    if dm ~= nil then
+                        local m = gReq(dm)
+                        if type(m) == "table" and type(m.closeDialogue) == "function" then
+                            m.closeDialogue()
+                        end
                     end
-                end
-            end)
+                end)
+            end
+            if env.task and env.task.spawn then
+                env.task.spawn(run)
+            else
+                run()
+            end
         end,
 
         clickDialogue = function(opt)
