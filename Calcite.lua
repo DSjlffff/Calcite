@@ -1275,6 +1275,7 @@ function env.fromGlobals()
         CFrame = CFrame,
         Color3 = Color3,
         Enum = Enum,
+        Font = Font,
         -- for the overlays of hud.lua
         Instance = Instance,
         UDim = UDim,
@@ -2785,7 +2786,7 @@ local hud = {}
 
 -- what the overlays are made of, handed over by hud.setup from env.lua: only env.lua touches the globals. Without
 -- Instance (the tests run without one) nothing is built and every step does nothing
-local game, Instance, UDim, UDim2, Color3, Enum, Vector2
+local game, Instance, UDim, UDim2, Color3, Enum, Vector2, Font
 local dragConnections = {}  -- the mouse moves followed for dragging, taken back by hud.destroy
 
 local Players = nil
@@ -2803,10 +2804,10 @@ local hkRows = {}         -- id -> { frame, keyLabel, nameLabel }
 local accent, bg, border, textCol
 local function initColors()
     if accent then return end
-    accent = Color3.fromRGB(140, 90, 230)
-    bg = Color3.fromRGB(14, 14, 18)
-    border = Color3.fromRGB(45, 45, 55)
-    textCol = Color3.fromRGB(230, 230, 235)
+    accent = Color3.fromRGB(173, 156, 245)
+    bg = Color3.fromRGB(24, 27, 35)
+    border = Color3.fromRGB(52, 57, 70)
+    textCol = Color3.fromRGB(236, 238, 245)
 end
 
 local reloadStartAt = 0
@@ -2854,6 +2855,19 @@ local function hudFont(preferred, fallback)
     return okF and valF or nil
 end
 
+local function applySemibold(label)
+    if Font ~= nil and Enum ~= nil and Enum.FontWeight ~= nil then
+        local ok, face = pcall(function()
+            return Font.new("rbxasset://fonts/families/BuilderSans.json", Enum.FontWeight.SemiBold)
+        end)
+        if ok and face ~= nil then
+            local okSet = pcall(function() label.FontFace = face end)
+            if okSet then return end
+        end
+    end
+    label.Font = hudFont("BuilderSansBold", "GothamBold")
+end
+
 local function ensureGui()
     if gui ~= nil and gui.Parent ~= nil then return end
     initColors()
@@ -2877,44 +2891,34 @@ local function ensureGui()
     wmFrame = Instance.new("Frame")
     wmFrame.Name = "Watermark"
     wmFrame.BackgroundColor3 = bg
-    wmFrame.BackgroundTransparency = 0.15
+    wmFrame.BackgroundTransparency = 0.08
     wmFrame.BorderSizePixel = 0
-    wmFrame.Size = UDim2.fromOffset(0, 26)
+    wmFrame.Size = UDim2.fromOffset(0, 30)
     wmFrame.AutomaticSize = Enum.AutomaticSize.X
     wmFrame.Position = UDim2.new(1, -12, 0, 12)
     wmFrame.AnchorPoint = Vector2.new(1, 0)
     wmFrame.Visible = false
     wmFrame.Parent = gui
     local corner = Instance.new("UICorner", wmFrame)
-    corner.CornerRadius = UDim.new(0, 6)
+    corner.CornerRadius = UDim.new(0, 4)
     local stroke = Instance.new("UIStroke", wmFrame)
     stroke.Color = border
     stroke.Thickness = 1
-    stroke.Transparency = 0.3
+    stroke.Transparency = 0.15
     local pad = Instance.new("UIPadding", wmFrame)
-    pad.PaddingLeft = UDim.new(0, 10)
-    pad.PaddingRight = UDim.new(0, 10)
+    pad.PaddingLeft = UDim.new(0, 12)
+    pad.PaddingRight = UDim.new(0, 12)
 
     wmText = Instance.new("TextLabel")
     wmText.Parent = wmFrame
     wmText.BackgroundTransparency = 1
     wmText.Size = UDim2.fromScale(1, 1)
     wmText.AutomaticSize = Enum.AutomaticSize.X
-    wmText.Font = hudFont("BuilderSansMedium", "GothamMedium")
-    wmText.TextSize = 13
+    applySemibold(wmText)
+    wmText.TextSize = 15
     wmText.TextColor3 = textCol
     wmText.TextXAlignment = Enum.TextXAlignment.Left
     wmText.Text = "Calcite"
-
-    -- акцент-полоска слева внутри watermark
-    local accentBar = Instance.new("Frame")
-    accentBar.Parent = wmFrame
-    accentBar.BackgroundColor3 = accent
-    accentBar.BorderSizePixel = 0
-    accentBar.Size = UDim2.new(0, 2, 1, -8)
-    accentBar.Position = UDim2.new(0, 0, 0, 4)
-    local accentCorner = Instance.new("UICorner", accentBar)
-    accentCorner.CornerRadius = UDim.new(1, 0)
 
     -- Reload bar — под прицелом (центр экрана + смещение вниз)
     reloadFrame = Instance.new("Frame")
@@ -2946,35 +2950,35 @@ local function ensureGui()
     hkFrame = Instance.new("Frame")
     hkFrame.Name = "Hotkeys"
     hkFrame.BackgroundColor3 = bg
-    hkFrame.BackgroundTransparency = 0.15
+    hkFrame.BackgroundTransparency = 0.08
     hkFrame.BorderSizePixel = 0
-    hkFrame.Size = UDim2.fromOffset(110, 0)
+    hkFrame.Size = UDim2.fromOffset(136, 0)
     hkFrame.AutomaticSize = Enum.AutomaticSize.Y
-    hkFrame.Position = UDim2.new(1, -12, 0, 52)
+    hkFrame.Position = UDim2.new(1, -12, 0, 50)
     hkFrame.AnchorPoint = Vector2.new(1, 0)
     hkFrame.Visible = false
     hkFrame.Parent = gui
     local hkCorner = Instance.new("UICorner", hkFrame)
-    hkCorner.CornerRadius = UDim.new(0, 6)
+    hkCorner.CornerRadius = UDim.new(0, 4)
     local hkStroke = Instance.new("UIStroke", hkFrame)
     hkStroke.Color = border
     hkStroke.Thickness = 1
-    hkStroke.Transparency = 0.3
+    hkStroke.Transparency = 0.15
     local hkPad = Instance.new("UIPadding", hkFrame)
-    hkPad.PaddingTop = UDim.new(0, 4)
-    hkPad.PaddingBottom = UDim.new(0, 4)
-    hkPad.PaddingLeft = UDim.new(0, 8)
-    hkPad.PaddingRight = UDim.new(0, 8)
+    hkPad.PaddingTop = UDim.new(0, 6)
+    hkPad.PaddingBottom = UDim.new(0, 6)
+    hkPad.PaddingLeft = UDim.new(0, 10)
+    hkPad.PaddingRight = UDim.new(0, 10)
     hkList = Instance.new("UIListLayout", hkFrame)
     hkList.FillDirection = Enum.FillDirection.Vertical
     hkList.SortOrder = Enum.SortOrder.LayoutOrder
-    hkList.Padding = UDim.new(0, 1)
+    hkList.Padding = UDim.new(0, 2)
     local hkTitle = Instance.new("TextLabel")
     hkTitle.Parent = hkFrame
     hkTitle.BackgroundTransparency = 1
-    hkTitle.Size = UDim2.new(1, 0, 0, 14)
-    hkTitle.Font = hudFont("BuilderSansMedium", "GothamMedium")
-    hkTitle.TextSize = 11
+    hkTitle.Size = UDim2.new(1, 0, 0, 16)
+    applySemibold(hkTitle)
+    hkTitle.TextSize = 13
     hkTitle.TextColor3 = textCol
     hkTitle.TextXAlignment = Enum.TextXAlignment.Left
     hkTitle.Text = "HOTKEYS"
@@ -3005,7 +3009,7 @@ local function ensureHkRow(id, keyText, nameText, order)
     if row == nil then
         local frame = Instance.new("Frame")
         frame.BackgroundTransparency = 1
-        frame.Size = UDim2.new(1, 0, 0, 15)
+        frame.Size = UDim2.new(1, 0, 0, 19)
         frame.LayoutOrder = order or 0
         frame.Parent = hkFrame
         local nameLabel = Instance.new("TextLabel")
@@ -3013,8 +3017,8 @@ local function ensureHkRow(id, keyText, nameText, order)
         nameLabel.BackgroundTransparency = 1
         nameLabel.Size = UDim2.new(1, 0, 1, 0)
         nameLabel.Position = UDim2.fromOffset(0, 0)
-        nameLabel.Font = hudFont("BuilderSans", "Gotham")
-        nameLabel.TextSize = 12
+        applySemibold(nameLabel)
+        nameLabel.TextSize = 14
         nameLabel.TextColor3 = textCol
         nameLabel.TextXAlignment = Enum.TextXAlignment.Left
         local keyLabel = Instance.new("TextLabel")
@@ -3022,8 +3026,8 @@ local function ensureHkRow(id, keyText, nameText, order)
         keyLabel.BackgroundTransparency = 1
         keyLabel.Size = UDim2.new(1, 0, 1, 0)
         keyLabel.Position = UDim2.fromOffset(0, 0)
-        keyLabel.Font = hudFont("BuilderSansMedium", "GothamMedium")
-        keyLabel.TextSize = 12
+        applySemibold(keyLabel)
+        keyLabel.TextSize = 14
         keyLabel.TextColor3 = mutedCol
         keyLabel.TextXAlignment = Enum.TextXAlignment.Right
         row = { frame = frame, keyLabel = keyLabel, nameLabel = nameLabel }
@@ -3040,12 +3044,12 @@ local function hideRow(id)
     if row then row.frame.Visible = false end
 end
 
--- deps: players, workspace, and game, Instance, UDim, UDim2, Color3, Enum, Vector2 of env.lua
+-- deps: players, workspace, and game, Instance, UDim, UDim2, Color3, Enum, Vector2, Font of env.lua
 function hud.setup(deps)
     Players = deps.players
     workspace_ = deps.workspace
     game, Instance, UDim, UDim2 = deps.game, deps.Instance, deps.UDim, deps.UDim2
-    Color3, Enum, Vector2 = deps.Color3, deps.Enum, deps.Vector2
+    Color3, Enum, Vector2, Font = deps.Color3, deps.Enum, deps.Vector2, deps.Font
 end
 
 -- takes the overlays off the screen and lets go of the mouse: on unload, so nothing stays behind the script
@@ -3099,7 +3103,7 @@ function hud.step(dt, now, showWatermark, showReload)
     if showWatermark then
         local ping = 0
         pcall(function() ping = math.floor(Players.LocalPlayer:GetNetworkPing() * 1000) end)
-        wmText.Text = string.format("  Calcite   |   %d FPS   |   %d ms", math.floor(fpsAvg + 0.5), ping)
+        wmText.Text = string.format("Calcite  |  %d FPS  |  %d ms", math.floor(fpsAvg + 0.5), ping)
     end
 
     local elapsed = now - reloadStartAt
@@ -5379,6 +5383,7 @@ function main.start(env)
         UDim2 = env.UDim2,
         Color3 = env.Color3,
         Enum = env.Enum,
+        Font = env.Font,
         Vector2 = env.Vector2,
     })
 
