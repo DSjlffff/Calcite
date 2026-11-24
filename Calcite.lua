@@ -16623,12 +16623,18 @@ function bridge.create(ctx)
             return snap and snap.dialogueOptions or nil
         end,
 
+        isDialogueOpen = function()
+            local pg = localPlayer and localPlayer:FindFirstChildOfClass("PlayerGui")
+            local dlg = pg and pg:FindFirstChild("Dialogue")
+            return dlg ~= nil and dlg.Enabled == true
+        end,
+
         clickDialogue = function(opt)
             if opt == nil then return end
+            -- В Stand Out диалоги нативно принимают цифры 1..9 без firesignal-багов потоков!
             if opt.key ~= nil then
                 sendKey(opt.key)
-            end
-            if opt.button ~= nil then
+            elseif opt.button ~= nil then
                 activateGuiBtn(opt.button, env)
             end
         end,
@@ -17519,6 +17525,7 @@ function stand_out_quests.new(deps)
         wantsBounty = false,
         lastStepAt = -99,
         lastTalkAt = -99,
+        lastClickAt = -99,
         lastEmoteAt = -99,
         lastActiveQuest = "",
         angeloDoneDay = -1,
@@ -17552,12 +17559,20 @@ function Runner:_talkToNpc(now, npcName, dlgContext, lx, ly, lz)
     if opts ~= nil and #opts > 0 then
         local chosen, tag = stand_out_quests.pickDialogueOption(opts, dlgContext)
         if chosen ~= nil then
-            if d.clickDialogue ~= nil then
-                d.clickDialogue(chosen)
+            if now - self.lastClickAt >= 0.75 then
+                self.lastClickAt = now
+                if d.clickDialogue ~= nil then
+                    d.clickDialogue(chosen)
+                end
+                self.lastStepAt = now
+                return tag or "clicked"
             end
-            self.lastStepAt = now
-            return tag or "clicked"
+            return "waiting_dlg"
         end
+    end
+    -- Если окно диалога уже открыто (печатается текст / переход) — НЕ дёргаем повторно ProximityPrompt!
+    if d.isDialogueOpen ~= nil and d.isDialogueOpen() then
+        return "waiting_dlg"
     end
 
     local nx, ny, nz, prompt = nil, nil, nil, nil
@@ -18446,6 +18461,7 @@ function stand_out_story.new(deps)
         wantsDarby = false,
         lastStepAt = -99,
         lastTalkAt = -99,
+        lastClickAt = -99,
         wiggleSign = 1,
         mapOpenedFor = "",
         huberCalledAt = 0,
@@ -18467,12 +18483,18 @@ function Runner:_handleDialogue(now)
     if opts ~= nil and #opts > 0 then
         local chosen = stand_out_story.pickDialogueOption(opts)
         if chosen ~= nil then
-            if d.clickDialogue ~= nil then
-                d.clickDialogue(chosen)
+            if now - self.lastClickAt >= 0.75 then
+                self.lastClickAt = now
+                if d.clickDialogue ~= nil then
+                    d.clickDialogue(chosen)
+                end
             end
             self.lastStepAt = now
             return true
         end
+    end
+    if d.isDialogueOpen ~= nil and d.isDialogueOpen() then
+        return true
     end
     return false
 end
