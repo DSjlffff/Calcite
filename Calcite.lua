@@ -16496,6 +16496,38 @@ function bridge.create(ctx)
         end
     end
 
+    local function clickRealMouse(btn)
+        local vim = env.virtualInputManager
+        if btn == nil or vim == nil then return false end
+        local okPos, pos, sz = pcall(function() return btn.AbsolutePosition, btn.AbsoluteSize end)
+        if not okPos or pos == nil or sz == nil or sz.X <= 0 or sz.Y <= 0 then
+            return false
+        end
+        local ix, iy = 0, 0
+        pcall(function()
+            local gs = game:GetService("GuiService")
+            if gs ~= nil and gs.GetGuiInset ~= nil then
+                local tl = gs:GetGuiInset()
+                if tl ~= nil then ix, iy = tl.X, tl.Y end
+            end
+        end)
+        local cx = math.floor(pos.X + sz.X * 0.5 + ix)
+        local cy = math.floor(pos.Y + sz.Y * 0.5 + iy)
+        pcall(function() vim:SendMouseMoveEvent(cx, cy, game) end)
+        if env.task and env.task.delay then
+            env.task.delay(0.03, function()
+                pcall(function() vim:SendMouseButtonEvent(cx, cy, 0, true, game, 0) end)
+                env.task.delay(0.05, function()
+                    pcall(function() vim:SendMouseButtonEvent(cx, cy, 0, false, game, 0) end)
+                end)
+            end)
+        else
+            pcall(function() vim:SendMouseButtonEvent(cx, cy, 0, true, game, 0) end)
+            pcall(function() vim:SendMouseButtonEvent(cx, cy, 0, false, game, 0) end)
+        end
+        return true
+    end
+
     local function fireAnyPrompt(prompt)
         if prompt == nil then return end
         local isCd = false
@@ -16554,17 +16586,20 @@ function bridge.create(ctx)
                 end
             end)
 
-            -- Load ReplicatedStorage.Modules.Quests once for Angelo job helpers
+            -- Load ReplicatedStorage.Modules.Quests once for Angelo job helpers (via env.gameRequire!)
             if not sq.modTried then
                 sq.modTried = true
-                pcall(function()
-                    local rs = game:GetService("ReplicatedStorage")
-                    local mods = rs and rs:FindFirstChild("Modules")
-                    local qm = mods and mods:FindFirstChild("Quests")
-                    if qm ~= nil then
-                        sq.mod = require(qm)
-                    end
-                end)
+                local gReq = env.gameRequire
+                if type(gReq) == "function" then
+                    pcall(function()
+                        local rs = game:GetService("ReplicatedStorage")
+                        local mods = rs and rs:FindFirstChild("Modules")
+                        local qm = mods and mods:FindFirstChild("Quests")
+                        if qm ~= nil then
+                            sq.mod = gReq(qm)
+                        end
+                    end)
+                end
             end
             local qm = sq.mod
             if qm ~= nil then
@@ -16640,15 +16675,43 @@ function bridge.create(ctx)
                 return nil, "", false
             end
             local bodyText = ""
+            local opts = {}
             pcall(function()
                 local bs = holder and holder:FindFirstChild("BodyScroll")
                 local body = bs and bs:FindFirstChild("Body")
                 if body ~= nil and type(body.Text) == "string" then
                     bodyText = body.Text
                 end
+                local choices = holder and holder:FindFirstChild("Choices")
+                local layout = choices and choices:FindFirstChild("ChoiceLayout")
+                if layout ~= nil then
+                    for _, child in layout:GetChildren() do
+                        if child.Name ~= "Template" and (child:IsA("ImageButton") or child:IsA("TextButton")) and child.Visible ~= false then
+                            local txt = ""
+                            if child:IsA("TextButton") and child.Text ~= "" then
+                                txt = child.Text
+                            else
+                                local box = child:FindFirstChild("Box") or child:FindFirstChildWhichIsA("TextLabel", true)
+                                if box ~= nil and type(box.Text) == "string" then
+                                    txt = box.Text
+                                end
+                            end
+                            local plain = string.gsub(txt, "<[^>]+>", "")
+                            if plain ~= "" then
+                                local key = string.match(plain, "^%s*(%d)%.")
+                                table.insert(opts, { button = child, text = plain, key = key })
+                            end
+                        end
+                    end
+                end
             end)
-            local snap = stand_out_bounty.readUi(pg)
-            return snap and snap.dialogueOptions or nil, bodyText, true
+            if #opts == 0 then
+                local snap = stand_out_bounty.readUi(pg)
+                if snap ~= nil and snap.dialogueOptions ~= nil then
+                    opts = snap.dialogueOptions
+                end
+            end
+            return opts, bodyText, true
         end,
 
         isDialogueOpen = function()
@@ -16660,12 +16723,14 @@ function bridge.create(ctx)
         end,
 
         closeDialogue = function()
+            local gReq = env.gameRequire
+            if type(gReq) ~= "function" then return end
             pcall(function()
                 local rs = game:GetService("ReplicatedStorage")
                 local mods = rs and rs:FindFirstChild("Modules")
                 local dm = mods and mods:FindFirstChild("Dialogue")
                 if dm ~= nil then
-                    local m = require(dm)
+                    local m = gReq(dm)
                     if type(m) == "table" and type(m.closeDialogue) == "function" then
                         m.closeDialogue()
                     end
@@ -16675,11 +16740,12 @@ function bridge.create(ctx)
 
         clickDialogue = function(opt)
             if opt == nil then return end
-            -- В Stand Out диалоги нативно принимают цифры 1..9 без firesignal-багов потоков!
+            -- В Stand Out кнопки диалога реагируют на настоящий клик мыши (VirtualInputManager) без зависаний firesignal!
+            if opt.button ~= nil and clickRealMouse(opt.button) then
+                return
+            end
             if opt.key ~= nil then
                 sendKey(opt.key)
-            elseif opt.button ~= nil then
-                activateGuiBtn(opt.button, env)
             end
         end,
 
@@ -17590,21 +17656,16 @@ function stand_out_quests.selectTarget(choice, state)
         end
     end
 
-    -- Иначе выбираем лучший доступный фарм-квест по приоритету
+    -- Иначе выбираем лучший доступный фарм-квест без езды на машинах (Angelo -> Lettuce -> Garden).
+    -- Lenny Cop Car и Meryl Test Drive доступны по ручному выбору в списке.
     if angeloReady() then
         return "Angelo"
-    end
-    if lennyReady() then
-        return "Lenny"
     end
     if lettuceReady() then
         return "Lettuce"
     end
     if gardenReady() and (not state.gardenWaiting or state.gardenHasReadyPot) then
         return "Garden"
-    end
-    if merylReady() then
-        return "MerylTestDrive"
     end
     return nil
 end
