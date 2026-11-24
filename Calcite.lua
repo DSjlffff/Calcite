@@ -5009,6 +5009,12 @@ function main.start(env)
             end)
             handle._soBounty.karaokeConn = nil
         end
+        if handle._soBounty.armConn ~= nil then
+            pcall(function()
+                handle._soBounty.armConn:Disconnect()
+            end)
+            handle._soBounty.armConn = nil
+        end
         if handle._soHowler.collector ~= nil then
             pcall(function()
                 handle._soHowler.collector:stop(true)
@@ -6639,6 +6645,34 @@ function main.start(env)
                 end
                 return nil
             end,
+            activeArmWrestling = function()
+                local sb = handle._soBounty
+                if sb.arm ~= nil then
+                    if sb.armAt ~= nil and env.clock() - sb.armAt > 45.0 then
+                        sb.arm = nil
+                        return nil
+                    end
+                    return sb.arm
+                end
+                return nil
+            end,
+            sendArmWrestling = function(cmd, a1, a2, a3)
+                local sb = handle._soBounty
+                local rem = sb.armRemote
+                if rem == nil then
+                    pcall(function()
+                        local rs = game:GetService("ReplicatedStorage")
+                        local rems = rs and rs:FindFirstChild("Remotes")
+                        rem = rems and rems:FindFirstChild("ArmWrestling")
+                        sb.armRemote = rem
+                    end)
+                end
+                if rem ~= nil then
+                    pcall(function()
+                        rem:FireServer(cmd, a1, a2, a3)
+                    end)
+                end
+            end,
             serverTime = function()
                 if workspace ~= nil and workspace.GetServerTimeNow ~= nil then
                     local okT, t = pcall(function() return workspace:GetServerTimeNow() end)
@@ -7642,6 +7676,24 @@ function main.start(env)
                     end
                 end)
             end
+            -- Подписываемся на ReplicatedStorage.Remotes.ArmWrestling.OnClientEvent сразу в Stand Out (Paco's Challenge)
+            if handle._soBounty.runner ~= nil and handle._soBounty.armConn == nil and not handle._soBounty.armTried then
+                local sb = handle._soBounty
+                sb.armTried = true
+                pcall(function()
+                    local rs = game:GetService("ReplicatedStorage")
+                    local rems = rs and rs:FindFirstChild("Remotes")
+                    local aRem = rems and rems:FindFirstChild("ArmWrestling")
+                    if aRem ~= nil then
+                        sb.armRemote = aRem
+                        sb.armConn = aRem.OnClientEvent:Connect(function(kind, data)
+                            local nowA = env.clock()
+                            sb.arm = stand_out_bounty.applyArmWrestlingEvent(sb.arm, kind, data, nowA)
+                            sb.armAt = nowA
+                        end)
+                    end
+                end)
+            end
             if s.standOutBounty ~= nil and s.standOutBounty.enabled then
                 local pNames = {}
                 for _, pl in Players:GetPlayers() do
@@ -7708,7 +7760,7 @@ function main.start(env)
                     if allowFallback then
                         sb.lastPromptScan = now
                     end
-                    sb.prompt, sb.px, sb.py, sb.pz = stand_out_bounty.findMyPrompt(workspace, localPlayer.UserId, tx, ty, tz, allowFallback, allowNpc)
+                    sb.prompt, sb.px, sb.py, sb.pz = stand_out_bounty.findMyPrompt(workspace, localPlayer.UserId, tx, ty, tz, allowFallback, allowNpc, uiSnap.trackerObjective)
                 end
             end
 
@@ -11430,11 +11482,10 @@ stand_out_bounty.open_retry = 1.2
 stand_out_bounty.begin_wait = 1.8
 stand_out_bounty.travel_retry = 2.0
 
--- Инциденты с ручными мини-играми (чай, Пако) из Modules.Bounty.IncidentRules.Names.
--- Harvest, Hey Ya!, Cheap Jewelry, D'Arby, Rohan, Usagi's Karaoke и Your Personal Helper Friend поддерживаются автопрохождением!
+-- Инциденты с ручными мини-играми (чай) из Modules.Bounty.IncidentRules.Names.
+-- Harvest, Hey Ya!, Cheap Jewelry, D'Arby, Rohan, Usagi's Karaoke, Your Personal Helper Friend и Paco's Challenge поддерживаются автопрохождением!
 local INCIDENT_NAMES = {
     ["iced tea run"] = true,
-    ["paco's challenge"] = true,
 }
 
 local Runner = {}
@@ -12138,6 +12189,8 @@ function stand_out_bounty.isNpcObjective(objectiveText)
         or string.find(low, "usagi", 1, true) ~= nil
         or string.find(low, "karaoke", 1, true) ~= nil
         or string.find(low, "sing ", 1, true) ~= nil
+        or string.find(low, "hospital nurse", 1, true) ~= nil
+        or string.find(low, "nurse", 1, true) ~= nil
 end
 
 function stand_out_bounty.isDarbyObjective(objectiveText, titleText)
@@ -12407,14 +12460,14 @@ function stand_out_bounty.pickDialogueOption(options, objLow)
         end
     end
 
-    local preferred = findMatch({ "just deal", "challenge", "draw", "sketch", "contest", "karaoke", "sing", "duet", "dragona", "let's open", "open them", "howler", "payment record", "record", "evidence" })
+    local preferred = findMatch({ "just deal", "you're on", "thank you", "challenge", "draw", "sketch", "contest", "karaoke", "sing", "duet", "dragona", "let's open", "open them", "howler", "payment record", "record", "evidence" })
         or findMatch({ "necklace", "pendant", "stones", "restored", "fixed", "rebuilt", "accept", "start", "let's", "sure", "here", "ready", "yes" })
     if preferred ~= nil then
         return preferred
     end
 
     -- Фолбэк: первый вариант, который не является отказом/побочным диалогом
-    local ignore = { "i'll be back", "give me a minute", "later", "bye", "driving practice", "fashion lessons", "never mind", "go over the rules", "not now" }
+    local ignore = { "i'll be back", "give me a minute", "later", "bye", "driving practice", "fashion lessons", "never mind", "go over the rules", "not now", "not yet" }
     for _, opt in options do
         local low = string.lower(opt.text or "")
         local skip = false
@@ -12894,6 +12947,67 @@ function stand_out_bounty.nextVerityChoice(verity, now)
     }, "Berity: " .. tostring(picked.Id)
 end
 
+-- Обрабатывает серверные пакеты ReplicatedStorage.Remotes.ArmWrestling.OnClientEvent (Start / Round / Progress / End)
+-- для PACO'S CHALLENGE (армрестлинг за столом BanditArmWrestling).
+function stand_out_bounty.applyArmWrestlingEvent(state, kind, data, nowClock)
+    if type(kind) ~= "string" then
+        return state
+    end
+    if kind == "End" or kind == "PoseEnd" or kind == "Cancel" or kind == "Leave" then
+        return nil
+    end
+    if kind == "Start" and type(data) == "table" and data.Id ~= nil then
+        return {
+            id = data.Id,
+            opponent = data.Opponent or "Paco",
+            startedAt = nowClock or 0,
+            round = 0,
+            pressure = 0,
+            pending = nil,
+        }
+    end
+    if kind == "Round" and type(data) == "table" and data.Id ~= nil
+        and type(data.Round) == "number" and type(data.Start) == "number"
+        and type(data.Duration) == "number" and type(data.Target) == "number" then
+        if state == nil or state.id ~= data.Id then
+            state = {
+                id = data.Id,
+                opponent = "Paco",
+                startedAt = nowClock or 0,
+                round = 0,
+                pressure = 0,
+                pending = nil,
+            }
+        end
+        local hitAt = data.Start + data.Duration * (data.Target / 360)
+        state.round = data.Round
+        state.pending = {
+            id = data.Id,
+            round = data.Round,
+            hitAt = hitAt,
+        }
+        return state
+    end
+    if state ~= nil and kind == "Progress" and type(data) == "table" and type(data.Pressure) == "number" then
+        state.pressure = data.Pressure
+    end
+    return state
+end
+
+-- Возвращает команду { "Input", id, round, nowServer } ровно в момент совпадения стрелки с Target (Grade=3 Perfect).
+function stand_out_bounty.stepArmWrestling(state, nowServer)
+    if type(state) ~= "table" or state.id == nil then
+        return nil, nil
+    end
+    local label = string.format("Arm Wrestling: раунд %d", state.round or 0)
+    if state.pending ~= nil and type(nowServer) == "number" and nowServer >= state.pending.hitAt then
+        local p = state.pending
+        state.pending = nil
+        return { "Input", p.id, p.round, nowServer }, label
+    end
+    return nil, label
+end
+
 -- Проверяет, остались ли ещё невыполненные ходы в головоломке (без изменения puzzle.attempted).
 function stand_out_bounty.puzzleMovesRemaining(puzzle)
     if type(puzzle) ~= "table" or puzzle.open == false then
@@ -13001,9 +13115,10 @@ function stand_out_bounty.nextPuzzleMove(puzzle)
 end
 
 -- Ищет активный ProximityPrompt баунти: сначала в Workspace.Game.BountyWorld.Party_<userId>,
--- если allowNpcFallback == true — также проверяет квестовых NPC в Workspace.Game.NPCs рядом с трекером (Meryl, Dragona),
+-- затем StoryActors (BountyIncident_* вроде PacoPickup), ArmWrestlingTables (если цель — армрестлинг),
+-- если allowNpcFallback == true — квестовых NPC в Workspace.Game.NPCs рядом с трекером (Meryl, Dragona, Paco, Hospital Nurse),
 -- а иначе при allowWorldFallback ~= false — ближайший активный промпт в радиусе 25 студов от трекера (кроме NPC).
-function stand_out_bounty.findMyPrompt(workspace, userId, tx, ty, tz, allowWorldFallback, allowNpcFallback)
+function stand_out_bounty.findMyPrompt(workspace, userId, tx, ty, tz, allowWorldFallback, allowNpcFallback, objectiveText)
     if workspace == nil or userId == nil then
         return nil, nil, nil, nil
     end
@@ -13011,6 +13126,7 @@ function stand_out_bounty.findMyPrompt(workspace, userId, tx, ty, tz, allowWorld
     if gameFolder == nil then
         return nil, nil, nil, nil
     end
+    local objLow = type(objectiveText) == "string" and string.lower(objectiveText) or ""
 
     local function promptUsable(d)
         if safeIsA(d, "ProximityPrompt") then
@@ -13035,7 +13151,10 @@ function stand_out_bounty.findMyPrompt(workspace, userId, tx, ty, tz, allowWorld
         local bestDist2 = math.huge
         for _, d in partyFolder:GetDescendants() do
             if safeIsA(d, "ProximityPrompt") or safeIsA(d, "ClickDetector") then
-                partyOwnsPrompts = true
+                -- Не считаем выключенный сюжетный UsagiPickupPrompt внутри Incident_Paco за «сцену со своими промптами»
+                if d.Name ~= "UsagiPickupPrompt" then
+                    partyOwnsPrompts = true
+                end
             end
             if promptUsable(d) then
                 local x, y, z = stand_out_bounty.promptPosition(d)
@@ -13058,22 +13177,91 @@ function stand_out_bounty.findMyPrompt(workspace, userId, tx, ty, tz, allowWorld
         end
     end
 
-    -- 1.5) Квестовые NPC (Meryl Mei Qi, Dragona в Cheap Jewelry): ищем промпт внутри Workspace.Game.NPCs рядом с трекером
+    -- 1.2) StoryActors (напр. Workspace.Game.StoryActors.Paco.HumanoidRootPart.BountyIncident_PacoPickup)
+    if tx ~= nil and ty ~= nil and tz ~= nil then
+        local storyActors = gameFolder:FindFirstChild("StoryActors")
+        if storyActors ~= nil and storyActors.GetDescendants ~= nil then
+            local bestS, bestX, bestY, bestZ = nil, nil, nil, nil
+            local bestScore = math.huge
+            for _, d in storyActors:GetDescendants() do
+                if promptUsable(d) then
+                    local x, y, z = stand_out_bounty.promptPosition(d)
+                    if x ~= nil then
+                        local dx, dy, dz = x - tx, y - ty, z - tz
+                        local d2 = dx * dx + dy * dy + dz * dz
+                        if d2 <= 25 * 25 then
+                            local isIncidentP = string.find(tostring(d.Name or ""), "BountyIncident_", 1, true) ~= nil
+                            local score = isIncidentP and d2 or (d2 + 10000)
+                            if score < bestScore then
+                                bestScore = score
+                                bestS, bestX, bestY, bestZ = d, x, y, z
+                            end
+                        end
+                    end
+                end
+            end
+            if bestS ~= nil then
+                return bestS, bestX, bestY, bestZ
+            end
+        end
+    end
+
+    -- 1.3) ArmWrestlingTables (PACO'S CHALLENGE этап 1/4: "Arm wrestle Paco at the table 1/4")
+    if tx ~= nil and ty ~= nil and tz ~= nil and string.find(objLow, "arm wrestle", 1, true) ~= nil then
+        local tables = gameFolder:FindFirstChild("ArmWrestlingTables")
+        if tables ~= nil and tables.GetDescendants ~= nil then
+            local bestT, bestX, bestY, bestZ = nil, nil, nil, nil
+            local bestScore = math.huge
+            for _, d in tables:GetDescendants() do
+                if safeIsA(d, "ProximityPrompt") and promptUsable(d) then
+                    local x, y, z = stand_out_bounty.promptPosition(d)
+                    if x ~= nil then
+                        local dx, dy, dz = x - tx, y - ty, z - tz
+                        local d2 = dx * dx + dy * dy + dz * dz
+                        if d2 <= 15 * 15 then
+                            local okO, ot = pcall(function() return string.lower(tostring(d.ObjectText or "")) end)
+                            local pacoMatch = okO and (string.find(ot, "paco", 1, true) ~= nil or string.find(ot, "challenge", 1, true) ~= nil)
+                            local score = pacoMatch and d2 or (d2 + 500)
+                            if score < bestScore then
+                                bestScore = score
+                                bestT, bestX, bestY, bestZ = d, x, y, z
+                            end
+                        end
+                    end
+                end
+            end
+            if bestT ~= nil then
+                return bestT, bestX, bestY, bestZ
+            end
+        end
+    end
+
+    -- 1.5) Квестовые NPC (Meryl Mei Qi, Dragona, Paco, Hospital Nurse): ищем промпт внутри Workspace.Game.NPCs рядом с трекером
+    -- Предпочитаем BountyIncident_* -> ProximityPrompt -> ClickDetector на одном и том же NPC
     if allowNpcFallback == true and tx ~= nil and ty ~= nil and tz ~= nil then
         local npcsFolder = gameFolder:FindFirstChild("NPCs")
         if npcsFolder ~= nil and npcsFolder.GetDescendants ~= nil then
             local bestNpc, bestX, bestY, bestZ = nil, nil, nil, nil
-            local bestDist2 = 15 * 15
+            local bestScore = math.huge
             for _, d in npcsFolder:GetDescendants() do
                 if promptUsable(d) then
                     local x, y, z = stand_out_bounty.promptPosition(d)
                     if x ~= nil then
                         local dx, dy, dz = x - tx, y - ty, z - tz
                         local dist2 = dx * dx + dy * dy + dz * dz
-                        if dist2 <= bestDist2 then
-                            bestDist2 = dist2
-                            bestNpc = d
-                            bestX, bestY, bestZ = x, y, z
+                        if dist2 <= 15 * 15 then
+                            local bonus = 0
+                            if string.find(tostring(d.Name or ""), "BountyIncident_", 1, true) ~= nil then
+                                bonus = -20
+                            elseif safeIsA(d, "ProximityPrompt") then
+                                bonus = -10
+                            end
+                            local score = dist2 + bonus
+                            if score < bestScore then
+                                bestScore = score
+                                bestNpc = d
+                                bestX, bestY, bestZ = x, y, z
+                            end
                         end
                     end
                 end
@@ -13217,11 +13405,13 @@ function Runner:update(now, opts, meX, meY, meZ)
     local puzzle = self.deps.activePuzzle ~= nil and self.deps.activePuzzle() or nil
     local rohan = self.deps.activeRohan ~= nil and self.deps.activeRohan() or nil
     local karaoke = self.deps.activeKaraoke ~= nil and self.deps.activeKaraoke() or nil
+    local arm = self.deps.activeArmWrestling ~= nil and self.deps.activeArmWrestling() or nil
     local verity = self.deps.activeVerity ~= nil and self.deps.activeVerity() or nil
     local darbySt = self.deps.darbyState ~= nil and self.deps.darbyState() or nil
     local inInspection = ui.jewelryOpen == true or ui.jewelryActionBtn ~= nil or puzzle ~= nil
     local inRohan = rohan ~= nil or ui.rohanOpen == true
     local inKaraoke = karaoke ~= nil
+    local inArm = arm ~= nil
     local inVerity = verity ~= nil
     local inDarbyGame = ui.darbyOpen == true or (darbySt ~= nil and darbySt.active == true)
     local darbyBusy = darbySt ~= nil and ((darbySt.tableCamera == true) or (darbySt.busyUntil ~= nil and now < darbySt.busyUntil))
@@ -13235,8 +13425,8 @@ function Runner:update(now, opts, meX, meY, meZ)
     -- Дополнительно сверяем с атрибутом BountyNavigationActive (CanvasGroup трекера может оставаться Visible=true),
     -- но если на трекере явно видны незавершённые шаги (например MISSING FROG 1/2), таймер ИЛИ открыто окно мини-игры
     -- (игра может прятать BountyTracker во время мини-игры!) — баунти точно активно!
-    local hasActiveBounty = ui.trackerActive or inInspection or inRohan or inKaraoke or inVerity or inDarbyGame or inDarbyStorage
-    if hasActiveBounty and not hasIncompleteSteps and not inInspection and not inRohan and not inKaraoke and not inVerity and not inDarbyGame and not inDarbyStorage and self.deps.navActive ~= nil then
+    local hasActiveBounty = ui.trackerActive or inInspection or inRohan or inKaraoke or inArm or inVerity or inDarbyGame or inDarbyStorage
+    if hasActiveBounty and not hasIncompleteSteps and not inInspection and not inRohan and not inKaraoke and not inArm and not inVerity and not inDarbyGame and not inDarbyStorage and self.deps.navActive ~= nil then
         local okNav, nav = pcall(self.deps.navActive)
         if okNav and nav == false then
             local hasClock = string.find(ui.trackerTitle or "", "%d+:%d%d") ~= nil
@@ -13256,7 +13446,7 @@ function Runner:update(now, opts, meX, meY, meZ)
 
     -- Если на персонаже уже висит инцидент с мини-игрой, а включено «Пропускать мини-игры»,
     -- идём к Petyr и перезаписываем его на боевой/поисковый баунти!
-    local replaceIncident = hasActiveBounty and not inInspection and not inRohan and not inKaraoke and not inVerity and not inDarbyGame and (opts.skipIncidents ~= false) and stand_out_bounty.isIncident(ui.trackerTitle)
+    local replaceIncident = hasActiveBounty and not inInspection and not inRohan and not inKaraoke and not inArm and not inVerity and not inDarbyGame and (opts.skipIncidents ~= false) and stand_out_bounty.isIncident(ui.trackerTitle)
 
     -- Отслеживаем завершение баунти (трекер был активен -> исчез)
     if self.wasTrackerActive and not hasActiveBounty then
@@ -13308,6 +13498,22 @@ function Runner:update(now, opts, meX, meY, meZ)
             else
                 self.statusText = title .. " | Berity..."
             end
+            return
+        end
+
+        -- 0.41) PACO'S CHALLENGE — армрестлинг: отправляем Input ровно в Start + Duration * (Target / 360) -> Grade=3 Perfect
+        if inArm then
+            self:_releasePrompt()
+            if self.deps.stopFighting ~= nil then
+                pcall(self.deps.stopFighting)
+            end
+            local nowSrv = self.deps.serverTime ~= nil and self.deps.serverTime() or now
+            local cmd, suffix = stand_out_bounty.stepArmWrestling(arm, nowSrv)
+            if cmd ~= nil and self.deps.sendArmWrestling ~= nil then
+                self.lastAction = now
+                pcall(self.deps.sendArmWrestling, cmd[1], cmd[2], cmd[3], cmd[4])
+            end
+            self.statusText = title .. " | " .. (suffix or "Arm Wrestling...")
             return
         end
 
@@ -13465,10 +13671,14 @@ function Runner:update(now, opts, meX, meY, meZ)
             return
         end
 
-        -- 0.55) Открыт диалог квестового NPC (D'Arby "1. Just deal.", Meryl Mei Qi, Dragona и др.)
+        -- 0.55) Открыт диалог квестового NPC (D'Arby "1. Just deal.", Meryl Mei Qi, Dragona, Paco, Hospital Nurse и др.)
         -- Ставим ДО StandStorage/GoFish, чтобы после нажатия CHALLENGE сразу нажимать "1. Just deal."!
+        -- Также закрываем одиночный благодарственный диалог ("1. Thank you." у медсестры после сдачи Пако),
+        -- даже если трекер уже переключился на "Return to Petyr to claim your reward"
+        local isTrailingThanks = ui.dialogueOptions ~= nil and #ui.dialogueOptions == 1
+            and string.find(string.lower(ui.dialogueOptions[1].text or ""), "thank you", 1, true) ~= nil
         if ui.dialogueOptions ~= nil and #ui.dialogueOptions > 0
-            and (stand_out_bounty.isNpcObjective(objLow) or inDarbyStorage or inDarbyGame) then
+            and (stand_out_bounty.isNpcObjective(objLow) or inDarbyStorage or inDarbyGame or isTrailingThanks) then
             self:_releasePrompt()
             if self.deps.stopFighting ~= nil then
                 pcall(self.deps.stopFighting)
