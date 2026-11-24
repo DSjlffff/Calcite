@@ -3417,6 +3417,7 @@ local pairs = {
     ["Маски"] = "Masks", ["Части святого"] = "Saint's corpse parts", ["Ивентовые"] = "Event items",
     ["Остальные предметы"] = "Other items", ["Не из каталога"] = "Not in catalog",
     ["Сюжет"] = "Story", ["Тренеры"] = "Trainers", ["Магазины"] = "Shops", ["Прочее"] = "Other",
+    ["Квест"] = "Quest", ["Все доступные"] = "All Available",
     [" ст/с"] = " st/s", [" мс"] = " ms", [" ст"] = " st",
 }
 local catalog = {}
@@ -3473,6 +3474,7 @@ local help = {
     { "Ставит ClockTime", "Постоянное дневное освещение. Выключение возвращает прежнее время.", "Keep daylight enabled. Disabling restores the original time." },
     { "Рисует крестик", "Показывает прицел по центру экрана от первого лица.", "Show a centered crosshair in first person." },
     { "Ватермарка —", "FPS и пинг, активные клавиши и игровые уведомления.", "FPS and ping, active keybinds and game notifications." },
+    { "Проходит туториал и сюжетную линию Part 9", "Проходит туториал и сюжетную линию Part 9 (P9_01..P9_47). Для баунти и прокачки уровня автоматически использует Auto Bounty и Farm Config.", "Runs the tutorial and Part 9 storyline (P9_01..P9_47). Automatically uses Auto Bounty and Farm Config for bounty and level steps." },
 }
 for _, row in help do
     local entry = { ru = row[2], en = row[3] }
@@ -4168,6 +4170,9 @@ local stand_out_pickup = require("./stand_out_pickup")
 local stand_out_mobs = require("./stand_out_mobs")
 local stand_out_bounty = require("./stand_out_bounty")
 local stand_out_howler = require("./stand_out_howler")
+local stand_out_quests = require("./stand_out_quests")
+local stand_out_story = require("./stand_out_story")
+local stand_out_quest_bridge = require("./stand_out_quest_bridge")
 local glider = require("./glider")
 local yba_npcs = require("./yba_npcs")
 local yba_waypoints = require("./yba_waypoints")
@@ -4357,6 +4362,7 @@ function main.start(env)
         _cam = { fast = false },
         _inEffect = nil,
         _soHowler = { collector = nil, remote = nil, conn = nil, tried = false },
+        _soQuest = { runner = nil, story = nil, wasQuestOn = false, wasStoryOn = false, mod = nil, modTried = false, mobCache = nil, mobCacheAt = -99 },
         _charMove = { savedWs = nil, savedJp = nil, savedUseJp = nil, wasWs = false, wasJp = false, lastChar = nil },
     }
 
@@ -5155,6 +5161,16 @@ function main.start(env)
         if handle._soHowler.collector ~= nil then
             pcall(function()
                 handle._soHowler.collector:stop(true)
+            end)
+        end
+        if handle._soQuest.runner ~= nil then
+            pcall(function()
+                handle._soQuest.runner:stop()
+            end)
+        end
+        if handle._soQuest.story ~= nil then
+            pcall(function()
+                handle._soQuest.story:stop()
             end)
         end
         if handle._soHowler.conn ~= nil then
@@ -7191,6 +7207,22 @@ function main.start(env)
                 end
             end,
         })
+        do
+            local qDeps = stand_out_quest_bridge.create({
+                game = game,
+                workspace = workspace,
+                Players = Players,
+                localPlayer = localPlayer,
+                env = env,
+                handle = handle,
+                keyMap = keyMap,
+                getMobConfig = function()
+                    return current and current.standOutMobs or s.standOutMobs
+                end,
+            })
+            handle._soQuest.runner = stand_out_quests.new(qDeps)
+            handle._soQuest.story = stand_out_story.new(qDeps)
+        end
     end
 
     -- what follows listens to Steal an Egg and looks through its plots: in any other game there is nothing of it
@@ -7904,7 +7936,9 @@ function main.start(env)
                     end
                 end)
             end
-            if s.standOutBounty ~= nil and s.standOutBounty.enabled then
+            if (s.standOutBounty ~= nil and s.standOutBounty.enabled)
+                or (handle._soQuest.runner ~= nil and handle._soQuest.runner.wantsBounty)
+                or (handle._soQuest.story ~= nil and (handle._soQuest.story.wantsBounty or handle._soQuest.story.wantsDarby)) then
                 local pNames = {}
                 for _, pl in Players:GetPlayers() do
                     pNames[pl.Name] = true
@@ -8434,9 +8468,54 @@ function main.start(env)
         end
         local itemBusy = howlerBusy or (s.standOutPickup ~= nil and s.standOutPickup.enabled
             and soPick.picker ~= nil and soPick.picker.target ~= nil)
-        -- Stand Out Auto Bounty (использует Farm Config для боя с мобами баунти; уступает Item farm на подбор)
+        -- Stand Out Auto Storyline (приоритет над Auto Quest / Auto Bounty / Mob Farming)
+        local soQuest = handle._soQuest
+        local storyOn = s.standOutStory ~= nil and s.standOutStory.enabled and localAlive and soQuest.story ~= nil
+        if storyOn then
+            soQuest.wasStoryOn = true
+            if not itemBusy then
+                local okSt, errSt = pcall(function()
+                    soQuest.story:update(now, localX, localY, localZ)
+                end)
+                if not okSt then
+                    warn("Calcite StandOutStory: " .. tostring(errSt))
+                end
+                ui.setStandOutStory(soQuest.story.progressText, soQuest.story.statusText)
+            end
+        elseif soQuest.wasStoryOn then
+            soQuest.wasStoryOn = false
+            if soQuest.story ~= nil then
+                soQuest.story:stop()
+                ui.setStandOutStory(soQuest.story.progressText, "")
+            end
+        end
+
+        -- Stand Out Auto Quest (уступает Item farm и Auto Storyline)
+        local questOn = s.standOutQuests ~= nil and s.standOutQuests.enabled and localAlive and soQuest.runner ~= nil and not storyOn
+        if questOn then
+            soQuest.wasQuestOn = true
+            if not itemBusy then
+                local okQ, errQ = pcall(function()
+                    soQuest.runner:update(now, s.standOutQuests, localX, localY, localZ)
+                end)
+                if not okQ then
+                    warn("Calcite StandOutQuest: " .. tostring(errQ))
+                end
+                ui.setStandOutQuest(soQuest.runner.completed, soQuest.runner.statusText)
+            end
+        elseif soQuest.wasQuestOn then
+            soQuest.wasQuestOn = false
+            if soQuest.runner ~= nil then
+                soQuest.runner:stop()
+                ui.setStandOutQuest(soQuest.runner.completed, "")
+            end
+        end
+
+        -- Stand Out Auto Bounty (включается вручную ИЛИ по запросу Auto Quest / Auto Storyline!)
         local soBounty = handle._soBounty
-        local bountyOn = s.standOutBounty ~= nil and s.standOutBounty.enabled and localAlive and soBounty.runner ~= nil
+        local questWantsBounty = (storyOn and soQuest.story.wantsBounty) or (questOn and soQuest.runner.wantsBounty)
+        local bountyOn = localAlive and soBounty.runner ~= nil
+            and ((s.standOutBounty ~= nil and s.standOutBounty.enabled and not storyOn and not questOn) or questWantsBounty)
         if bountyOn then
             if not soBounty.wasOn then
                 local pNames = {}
@@ -8471,8 +8550,8 @@ function main.start(env)
             end
         end
 
-        -- Stand Out Mob Farming (уступает Item farm и Auto Bounty)
-        if s.standOutMobs ~= nil and s.standOutMobs.enabled and localAlive and soMob.farmer ~= nil and not bountyOn then
+        -- Stand Out Mob Farming (уступает Item farm, Auto Storyline, Auto Quest и Auto Bounty)
+        if s.standOutMobs ~= nil and s.standOutMobs.enabled and localAlive and soMob.farmer ~= nil and not bountyOn and not questOn and not storyOn then
             if not soMob.wasOn then
                 local pNames = {}
                 for _, pl in Players:GetPlayers() do
@@ -8980,6 +9059,40 @@ function menu.create(deps)
     })
     soFarm.howlerStatus = soFarm.howlerGroup:AddLabel("Кейсы: 0/10")
 
+    soFarm.questGroup = farmTab:AddLeftGroupbox("Auto Quest")
+    toggle(soFarm.questGroup, "StandOutQuestEnabled", "Включить", settings.standOutQuests, "enabled")
+    do
+        local qLabels = {
+            "Все доступные",
+            "Angelo Daily",
+            "Lenny Cop Car (60s)",
+            "Lettuce Trader (240s)",
+            "Big Chop Garden",
+            "Meryl Test Drive",
+            "Bobby: Hamon",
+            "Usagi: Bandits",
+        }
+        local qIds = { "All", "Angelo", "Lenny", "Lettuce", "Garden", "MerylTestDrive", "Bobby", "Usagi" }
+        local qOf = {}
+        for i, lbl in qLabels do
+            qOf[lbl] = qIds[i]
+        end
+        local qDef = table.find(qIds, settings.standOutQuests.quest) or 1
+        soFarm.questGroup:AddDropdown("StandOutQuestChoice", {
+            Text = "Квест", Values = qLabels, Default = qDef,
+        })
+        Options.StandOutQuestChoice:OnChanged(function()
+            settings.standOutQuests.quest = qOf[Options.StandOutQuestChoice.Value] or "All"
+        end)
+    end
+    soFarm.questStatus = soFarm.questGroup:AddLabel("Завершено: 0")
+
+    soFarm.storyGroup = farmTab:AddRightGroupbox("Auto Storyline")
+    toggle(soFarm.storyGroup, "StandOutStoryEnabled", "Включить", settings.standOutStory, "enabled")
+    soFarm.storyGroup:AddLabel("Проходит туториал и сюжетную линию Part 9 (P9_01..P9_47). " ..
+        "Для баунти и прокачки уровня автоматически использует Auto Bounty и Farm Config.", true)
+    soFarm.storyStatus = soFarm.storyGroup:AddLabel("Сюжет: 0/58")
+
     -- aim
     local aimGroup = aimTab:AddLeftGroupbox("Наведение")
     -- the keypicker is attached to the toggle so a right-click on "Включено" opens its binding and mode (Always,
@@ -9392,13 +9505,17 @@ function menu.create(deps)
         stealTab:SetVisible(modes.has(mode, "Steal"))
         teleportTab:SetVisible(modes.has(mode, "Teleport"))
         farmTab:SetVisible(modes.has(mode, "AutoFarm") or modes.has(mode, "StandOutPickup")
-            or modes.has(mode, "StandOutMobs") or modes.has(mode, "StandOutBounty"))
+            or modes.has(mode, "StandOutMobs") or modes.has(mode, "StandOutBounty")
+            or modes.has(mode, "StandOutQuests"))
         farmGroup:SetVisible(modes.has(mode, "AutoFarm"))
         soFarm.itemGroup:SetVisible(modes.has(mode, "StandOutPickup"))
         soFarm.mobGroup:SetVisible(modes.has(mode, "StandOutMobs"))
-        soFarm.cfgGroup:SetVisible(modes.has(mode, "StandOutMobs") or modes.has(mode, "StandOutBounty"))
+        soFarm.cfgGroup:SetVisible(modes.has(mode, "StandOutMobs") or modes.has(mode, "StandOutBounty")
+            or modes.has(mode, "StandOutQuests"))
         soFarm.bountyGroup:SetVisible(modes.has(mode, "StandOutBounty"))
         soFarm.howlerGroup:SetVisible(modes.has(mode, "StandOutPickup"))
+        soFarm.questGroup:SetVisible(modes.has(mode, "StandOutQuests"))
+        soFarm.storyGroup:SetVisible(modes.has(mode, "StandOutQuests"))
         teamCheck:SetVisible(modes.has(mode, "TeamCheck"))
         throughWalls:SetVisible(modes.has(mode, "Wallbang"))
         autoStop:SetVisible(modes.has(mode, "AutoStop"))
@@ -9476,6 +9593,28 @@ function menu.create(deps)
         if text ~= soFarm.shownHowler then
             soFarm.shownHowler = text
             soFarm.howlerStatus:SetText(text)
+        end
+    end
+
+    function ui.setStandOutQuest(completed, statusText)
+        local text = string.format("Завершено: %d", completed or 0)
+        if statusText ~= nil and statusText ~= "" then
+            text = text .. " | " .. statusText
+        end
+        if text ~= soFarm.shownQuest then
+            soFarm.shownQuest = text
+            soFarm.questStatus:SetText(text)
+        end
+    end
+
+    function ui.setStandOutStory(progressText, statusText)
+        local text = "Сюжет: " .. tostring(progressText or "0/58")
+        if statusText ~= nil and statusText ~= "" then
+            text = text .. " | " .. statusText
+        end
+        if text ~= soFarm.shownStory then
+            soFarm.shownStory = text
+            soFarm.storyStatus:SetText(text)
         end
     end
 
@@ -9685,8 +9824,8 @@ local features = {
     ItemAsylum = { Players = true, Health = true, Aim = true, IaWeapon = true },
     -- Rivals: team shooter — пока основа (ESP с здоровьем + aim + team check)
     Rivals = { Players = true, Health = true, TeamCheck = true, Aim = true },
-    -- Stand Out: без команд; ESP игроков + автоподбор + фарм мобов + авто-баунти + WalkSpeed/JumpPower
-    StandOut = { Players = true, Health = true, StandOutInfo = true, StandOutPickup = true, StandOutMobs = true, StandOutBounty = true, CharMove = true },
+    -- Stand Out: без команд; ESP игроков + автоподбор + фарм мобов + авто-баунти + авто-квесты/сюжетка + WalkSpeed/JumpPower
+    StandOut = { Players = true, Health = true, StandOutInfo = true, StandOutPickup = true, StandOutMobs = true, StandOutBounty = true, StandOutQuests = true, CharMove = true },
 }
 
 -- what a mode starts with set otherwise than the settings are written: fields of the table of settings.defaults
@@ -10964,6 +11103,15 @@ function settings.defaults(mode)
             tier = "Max",         -- "Max" | "1".."8"
             skipIncidents = true, -- пропускать инциденты с ручными мини-играми
         },
+        -- Stand Out Auto Quest: фарм / повторяемые и дейлики (stand_out_quests.lua)
+        standOutQuests = {
+            enabled = false,
+            quest = "All",        -- "All" | "Angelo" | "Lenny" | "Lettuce" | "Garden" | "MerylTestDrive" | "Bobby" | "Usagi"
+        },
+        -- Stand Out Auto Storyline: туториал и сюжетка Part 9 (stand_out_story.lua)
+        standOutStory = {
+            enabled = false,
+        },
         -- Player WalkSpeed / JumpPower
         walkSpeed = {
             enabled = false,
@@ -11110,6 +11258,8 @@ function settings.inEffectInto(out, s, mode)
     local standOutPickup = copyInto(reusing and e.standOutPickup or nil, s.standOutPickup)
     local standOutMobs = copyInto(reusing and e.standOutMobs or nil, s.standOutMobs)
     local standOutBounty = copyInto(reusing and e.standOutBounty or nil, s.standOutBounty)
+    local standOutQuests = copyInto(reusing and e.standOutQuests or nil, s.standOutQuests)
+    local standOutStory = copyInto(reusing and e.standOutStory or nil, s.standOutStory)
     local walkSpeed = copyInto(reusing and e.walkSpeed or nil, s.walkSpeed)
     local jumpPower = copyInto(reusing and e.jumpPower or nil, s.jumpPower)
     local watermark = copyInto(reusing and e.watermark or nil, s.watermark)
@@ -11148,6 +11298,8 @@ function settings.inEffectInto(out, s, mode)
     e.standOutPickup = standOutPickup
     e.standOutMobs = standOutMobs
     e.standOutBounty = standOutBounty
+    e.standOutQuests = standOutQuests
+    e.standOutStory = standOutStory
     e.walkSpeed = walkSpeed
     e.jumpPower = jumpPower
     e.watermark = watermark
@@ -11268,6 +11420,10 @@ function settings.inEffectInto(out, s, mode)
     end
     if not modes.has(mode, "StandOutBounty") then
         e.standOutBounty.enabled = false
+    end
+    if not modes.has(mode, "StandOutQuests") then
+        e.standOutQuests.enabled = false
+        e.standOutStory.enabled = false
     end
     if not modes.has(mode, "CharMove") then
         e.walkSpeed.enabled = false
@@ -16229,6 +16385,2302 @@ function Picker:update(now, entries, opts, meX, meY, meZ)
 end
 
 return stand_out_pickup
+end
+
+__modules["stand_out_quest_bridge"] = function(require)
+-- Roblox runtime adapter for stand_out_quests and stand_out_story.
+-- Keeps main.lua compact and well below Luau's 200-local register limit.
+local stand_out_bounty = require("./stand_out_bounty")
+local stand_out_mobs = require("./stand_out_mobs")
+local stand_out_quests = require("./stand_out_quests")
+
+local bridge = {}
+
+local function safePos(obj)
+    if obj == nil then return nil, nil, nil end
+    local ok, p = pcall(function()
+        if obj:IsA("BasePart") then return obj.Position end
+        if obj:IsA("Model") then
+            local hrp = obj:FindFirstChild("HumanoidRootPart") or obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart", true)
+            return hrp and hrp.Position or nil
+        end
+        local bp = obj:FindFirstChildWhichIsA("BasePart", true)
+        return bp and bp.Position or nil
+    end)
+    if ok and p ~= nil then
+        return p.X, p.Y, p.Z
+    end
+    return nil, nil, nil
+end
+
+local function bestPrompt(root, preferredName)
+    if root == nil or root.GetDescendants == nil then return nil end
+    local fallbackPp, fallbackCd = nil, nil
+    for _, d in root:GetDescendants() do
+        local isPp, isCd = false, false
+        pcall(function()
+            isPp = d:IsA("ProximityPrompt")
+            isCd = not isPp and d:IsA("ClickDetector")
+        end)
+        if isPp and d.Enabled == true then
+            if preferredName ~= nil and d.Name == preferredName then
+                return d
+            end
+            if fallbackPp == nil then
+                fallbackPp = d
+            end
+        elseif isCd and fallbackCd == nil then
+            fallbackCd = d
+        end
+    end
+    return fallbackPp or fallbackCd
+end
+
+local function activateGuiBtn(btn, env)
+    if btn == nil then return end
+    local function trySig(sig)
+        if sig == nil then return false end
+        if type(env.firesignal) == "function" then
+            if pcall(env.firesignal, sig) then return true end
+        end
+        if type(env.getconnections) == "function" then
+            local ok, conns = pcall(env.getconnections, sig)
+            if ok and type(conns) == "table" and #conns > 0 then
+                for _, c in conns do
+                    if c.Fire ~= nil then pcall(function() c:Fire() end)
+                    elseif type(c.Function) == "function" then pcall(c.Function) end
+                end
+                return true
+            end
+        end
+        return false
+    end
+    if not trySig(btn.Activated) then
+        trySig(btn.MouseButton1Click)
+    end
+end
+
+function bridge.create(ctx)
+    local game = ctx.game
+    local workspace = ctx.workspace
+    local Players = ctx.Players
+    local localPlayer = ctx.localPlayer
+    local env = ctx.env
+    local handle = ctx.handle
+    local keyMap = ctx.keyMap
+
+    local function sendKey(keyStr)
+        local vim = env.virtualInputManager
+        local kcName = keyMap and keyMap[keyStr] or keyStr
+        local kc = kcName and env.Enum and env.Enum.KeyCode and env.Enum.KeyCode[kcName]
+        if vim ~= nil and kc ~= nil then
+            pcall(function() vim:SendKeyEvent(true, kc, false, game) end)
+            if env.task and env.task.delay then
+                env.task.delay(0.05, function()
+                    pcall(function() vim:SendKeyEvent(false, kc, false, game) end)
+                end)
+            else
+                pcall(function() vim:SendKeyEvent(false, kc, false, game) end)
+            end
+        end
+    end
+
+    local function fireAnyPrompt(prompt)
+        if prompt == nil then return end
+        local isCd = false
+        pcall(function() isCd = prompt:IsA("ClickDetector") end)
+        if isCd then
+            if type(env.fireclickdetector) == "function" then
+                pcall(env.fireclickdetector, prompt)
+            end
+        elseif type(env.fireproximityprompt) == "function" then
+            pcall(env.fireproximityprompt, prompt)
+        end
+    end
+
+    local function readStrVal(folder, name)
+        local v = folder and folder:FindFirstChild(name)
+        return v ~= nil and tostring(v.Value or "") or ""
+    end
+
+    local function readNumVal(folder, name)
+        local v = folder and folder:FindFirstChild(name)
+        return v ~= nil and tonumber(v.Value) or 0
+    end
+
+    return {
+        readState = function()
+            local sq = handle._soQuest
+            local data = localPlayer and localPlayer:FindFirstChild("Data")
+            local stats = data and data:FindFirstChild("Stats")
+            local st = {
+                activeQuest = readStrVal(stats, "ActiveQuest"),
+                completedRaw = readStrVal(stats, "CompletedQuests"),
+                cooldownsRaw = readStrVal(stats, "CompletedQuestsTime"),
+                dailyJson = readStrVal(stats, "DailyQuestState"),
+                inventoryJson = readStrVal(stats, "Inventory"),
+                gardenJson = readStrVal(stats, "GardeningState"),
+                objectivesRaw = readStrVal(stats, "QuestObjectives"),
+                objectivesTotalRaw = readStrVal(stats, "QuestObjectivesTotal"),
+                level = readNumVal(stats, "Level"),
+                nowUnix = os.time(),
+                todayDay = math.floor(os.time() / 86400),
+                weather = "",
+                bossAlive = false,
+                gardenHasReadyPot = false,
+            }
+
+            -- Load ReplicatedStorage.Modules.Quests once for Angelo job helpers
+            if not sq.modTried then
+                sq.modTried = true
+                pcall(function()
+                    local rs = game:GetService("ReplicatedStorage")
+                    local mods = rs and rs:FindFirstChild("Modules")
+                    local qm = mods and mods:FindFirstChild("Quests")
+                    if qm ~= nil then
+                        sq.mod = require(qm)
+                    end
+                end)
+            end
+            local qm = sq.mod
+            if qm ~= nil then
+                if type(qm.GetAngeloJob) == "function" then
+                    local okJ, jid = pcall(qm.GetAngeloJob, localPlayer)
+                    if okJ and type(jid) == "string" then
+                        st.angeloJobId = jid
+                    end
+                end
+                if type(qm.AngeloJobTakenToday) == "function" then
+                    local okT, taken = pcall(qm.AngeloJobTakenToday, localPlayer)
+                    if okT and type(taken) == "boolean" then
+                        st.angeloDoneToday = taken
+                    end
+                end
+            end
+
+            -- Weather check
+            pcall(function()
+                local w = workspace:GetAttribute("Weather")
+                if w == nil then
+                    local gf = workspace:FindFirstChild("Game")
+                    w = gf and gf:GetAttribute("Weather")
+                end
+                if w == nil then
+                    local lt = game:GetService("Lighting")
+                    w = lt and lt:GetAttribute("Weather")
+                end
+                if type(w) == "string" then
+                    st.weather = w
+                end
+            end)
+
+            -- Garden ready pots
+            local pots = stand_out_quests.parseGardenPots(st.gardenJson)
+            for _, pot in pots do
+                if pot.ready then
+                    st.gardenHasReadyPot = true
+                    break
+                end
+            end
+
+            -- Boss check (Jotaro / DIO)
+            pcall(function()
+                local gf = workspace:FindFirstChild("Game")
+                local pf = gf and gf:FindFirstChild("Players")
+                if pf ~= nil then
+                    for _, m in pf:GetChildren() do
+                        local lowN = string.lower(m.Name)
+                        if string.find(lowN, "jotaro", 1, true) ~= nil or string.find(lowN, "dio", 1, true) ~= nil then
+                            local hum = m:FindFirstChildOfClass("Humanoid")
+                            if hum ~= nil and hum.Health > 0 then
+                                st.bossAlive = true
+                                break
+                            end
+                        end
+                    end
+                end
+            end)
+
+            return st
+        end,
+
+        readDialogue = function()
+            local pg = localPlayer and localPlayer:FindFirstChildOfClass("PlayerGui")
+            if pg == nil then return nil end
+            local snap = stand_out_bounty.readUi(pg)
+            return snap and snap.dialogueOptions or nil
+        end,
+
+        clickDialogue = function(opt)
+            if opt == nil then return end
+            if opt.key ~= nil then
+                sendKey(opt.key)
+            end
+            if opt.button ~= nil then
+                activateGuiBtn(opt.button, env)
+            end
+        end,
+
+        teleportTo = function(x, y, z)
+            local ch = localPlayer and localPlayer.Character
+            local root = ch and ch:FindFirstChild("HumanoidRootPart")
+            if root ~= nil then
+                root.CFrame = env.CFrame.new(x, y, z)
+                root.AssemblyLinearVelocity = env.Vector3.new(0, 0, 0)
+            end
+        end,
+
+        firePrompt = fireAnyPrompt,
+
+        findNpc = function(name, preferredPrompt)
+            local gf = workspace:FindFirstChild("Game")
+            if gf == nil then return nil, nil, nil, nil end
+            local npcs = gf:FindFirstChild("NPCs")
+            local npc = npcs and npcs:FindFirstChild(name)
+            if npc == nil then
+                local sa = gf:FindFirstChild("StoryActors")
+                if sa ~= nil then
+                    npc = sa:FindFirstChild(name, true)
+                end
+            end
+            if npc == nil then return nil, nil, nil, nil end
+            local x, y, z = safePos(npc)
+            return x, y, z, bestPrompt(npc, preferredPrompt)
+        end,
+
+        interactNpc = function(name)
+            local gf = workspace:FindFirstChild("Game")
+            local npcs = gf and gf:FindFirstChild("NPCs")
+            local npc = npcs and npcs:FindFirstChild(name)
+            if npc ~= nil then
+                fireAnyPrompt(bestPrompt(npc))
+            end
+        end,
+
+        findZone = function(name)
+            local gf = workspace:FindFirstChild("Game")
+            if gf == nil then return nil, nil, nil end
+            local qz = gf:FindFirstChild("QuestZones")
+            local zObj = qz and qz:FindFirstChild(name)
+            if zObj == nil then
+                local map = gf:FindFirstChild("Map")
+                local nodes = map and map:FindFirstChild("DiamotchStoryNodes")
+                zObj = nodes and nodes:FindFirstChild(name)
+            end
+            return safePos(zObj)
+        end,
+
+        findInteractable = function(name)
+            local gf = workspace:FindFirstChild("Game")
+            if gf == nil then return nil, nil, nil, nil end
+            local containers = {
+                gf:FindFirstChild("QuestInteractables"),
+                gf:FindFirstChild("StoryLocations"),
+            }
+            local map = gf:FindFirstChild("Map")
+            if map ~= nil then
+                table.insert(containers, map:FindFirstChild("DiamotchStory"))
+                table.insert(containers, map:FindFirstChild("LandRegistryStory"))
+                table.insert(containers, map:FindFirstChild("RohanHouse"))
+            end
+            for _, c in containers do
+                if c ~= nil then
+                    local obj = c:FindFirstChild(name, true)
+                    if obj ~= nil then
+                        local isPp = false
+                        pcall(function() isPp = obj:IsA("ProximityPrompt") end)
+                        if isPp then
+                            local x, y, z = stand_out_bounty.promptPosition(obj)
+                            return x, y, z, obj
+                        end
+                        local x, y, z = safePos(obj)
+                        return x, y, z, bestPrompt(obj)
+                    end
+                end
+            end
+            return nil, nil, nil, nil
+        end,
+
+        findQuestPrompt = function(folderName)
+            local gf = workspace:FindFirstChild("Game")
+            if gf == nil then return nil, nil, nil, nil end
+            local sa = gf:FindFirstChild("StoryActors")
+            local folder = sa and sa:FindFirstChild(folderName)
+            if folder == nil then return nil, nil, nil, nil end
+            local pp = bestPrompt(folder)
+            if pp ~= nil then
+                local x, y, z = stand_out_bounty.promptPosition(pp)
+                return pp, x, y, z
+            end
+            return nil, nil, nil, nil
+        end,
+
+        findNearestStoryPrompt = function(rx, ry, rz, maxDist)
+            local gf = workspace:FindFirstChild("Game")
+            if gf == nil then return nil, nil, nil, nil end
+            local roots = {
+                gf:FindFirstChild("QuestInteractables"),
+                gf:FindFirstChild("StoryActors"),
+                gf:FindFirstChild("StoryLocations"),
+                gf:FindFirstChild("Huber"),
+            }
+            local map = gf:FindFirstChild("Map")
+            if map ~= nil then
+                table.insert(roots, map:FindFirstChild("DiamotchStory"))
+                table.insert(roots, map:FindFirstChild("LandRegistryStory"))
+                table.insert(roots, map:FindFirstChild("RohanHouse"))
+            end
+            local best, bx, by, bz, bestD = nil, nil, nil, nil, maxDist or 80
+            for _, root in roots do
+                if root ~= nil and root.GetDescendants ~= nil then
+                    for _, d in root:GetDescendants() do
+                        local okPp = false
+                        pcall(function() okPp = d:IsA("ProximityPrompt") and d.Enabled == true end)
+                        if okPp then
+                            local x, y, z = stand_out_bounty.promptPosition(d)
+                            if x ~= nil then
+                                local dd = math.sqrt((x - rx) ^ 2 + (y - ry) ^ 2 + (z - rz) ^ 2)
+                                if dd < bestD then
+                                    best, bx, by, bz, bestD = d, x, y, z, dd
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+            return best, bx, by, bz
+        end,
+
+        findTrailPoints = function(folderName)
+            local gf = workspace:FindFirstChild("Game")
+            local sa = gf and gf:FindFirstChild("StoryActors")
+            local folder = sa and sa:FindFirstChild(folderName)
+            if folder == nil then return nil end
+            local pts = {}
+            for _, d in folder:GetDescendants() do
+                local ok = false
+                pcall(function() ok = d:IsA("BasePart") end)
+                if ok then
+                    local p = d.Position
+                    if p ~= nil then
+                        table.insert(pts, { X = p.X, Y = p.Y, Z = p.Z })
+                    end
+                end
+            end
+            return pts
+        end,
+
+        findGardenPrompt = function(actionKind)
+            local gf = workspace:FindFirstChild("Game")
+            local garden = gf and gf:FindFirstChild("Gardening")
+            if garden == nil then return nil, nil, nil, nil end
+            for _, d in garden:GetDescendants() do
+                local okPp = false
+                pcall(function() okPp = d:IsA("ProximityPrompt") and d.Enabled == true end)
+                if okPp then
+                    local nm = string.lower(tostring(d.Name or "") .. " " .. tostring(d.ActionText or "") .. " " .. tostring(d.ObjectText or ""))
+                    local hit = (actionKind == "place" and string.find(nm, "place", 1, true) ~= nil)
+                        or (actionKind == "dirt" and string.find(nm, "dirt", 1, true) ~= nil)
+                        or (actionKind == "seed" and (string.find(nm, "plant", 1, true) ~= nil or string.find(nm, "seed", 1, true) ~= nil))
+                        or (actionKind == "harvest" and (string.find(nm, "harvest", 1, true) ~= nil or string.find(nm, "pick", 1, true) ~= nil))
+                    if hit then
+                        local x, y, z = stand_out_bounty.promptPosition(d)
+                        if x ~= nil then
+                            return d, x, y, z
+                        end
+                    end
+                end
+            end
+            return nil, nil, nil, nil
+        end,
+
+        findCopCar = function(rx, ry, rz, radius, anyVehicle)
+            local gf = workspace:FindFirstChild("Game")
+            local vf = gf and gf:FindFirstChild("Vehicles")
+            if vf == nil then return nil, nil, nil, nil, nil end
+            local bestCar, bx, by, bz, bestPrompt, bestD = nil, nil, nil, nil, nil, radius or 220
+            for _, m in vf:GetChildren() do
+                local nm = string.lower(m.Name)
+                local match = anyVehicle == true
+                    or string.find(nm, "cop", 1, true) ~= nil
+                    or string.find(nm, "police", 1, true) ~= nil
+                    or string.find(nm, "patrol", 1, true) ~= nil
+                    or string.find(nm, "cruiser", 1, true) ~= nil
+                if match then
+                    local x, y, z = safePos(m)
+                    if x ~= nil then
+                        local dd = math.sqrt((x - rx) ^ 2 + (y - ry) ^ 2 + (z - rz) ^ 2)
+                        if dd < bestD then
+                            local bp = nil
+                            for _, sub in m:GetDescendants() do
+                                local isPp = false
+                                pcall(function() isPp = sub:IsA("ProximityPrompt") and sub.Enabled == true end)
+                                if isPp and (string.lower(tostring(sub.ActionText or "")) == "drive" or bp == nil) then
+                                    bp = sub
+                                end
+                            end
+                            bestCar, bx, by, bz, bestPrompt, bestD = m, x, y, z, bp, dd
+                        end
+                    end
+                end
+            end
+            return bestCar, bx, by, bz, bestPrompt
+        end,
+
+        getSeatedVehicle = function()
+            local ch = localPlayer and localPlayer.Character
+            local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+            local seat = hum and hum.SeatPart
+            if seat == nil then return nil end
+            local cur = seat.Parent
+            while cur ~= nil and cur ~= workspace do
+                if cur.Parent ~= nil and cur.Parent.Name == "Vehicles" then
+                    return cur
+                end
+                cur = cur.Parent
+            end
+            return seat.Parent
+        end,
+
+        sitInVehicle = function(car)
+            if car == nil then return end
+            local ch = localPlayer and localPlayer.Character
+            local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+            if hum == nil then return end
+            local seat = car:FindFirstChild("DriverSeat", true) or car:FindFirstChildWhichIsA("VehicleSeat", true)
+            if seat ~= nil and seat.Sit ~= nil then
+                pcall(function() seat:Sit(hum) end)
+            end
+        end,
+
+        pivotVehicle = function(car, x, y, z)
+            if car == nil then return end
+            pcall(function()
+                for _, p in car:GetDescendants() do
+                    if p:IsA("BasePart") then
+                        p.AssemblyLinearVelocity = env.Vector3.new(0, 0, 0)
+                        p.AssemblyAngularVelocity = env.Vector3.new(0, 0, 0)
+                    end
+                end
+                if car.PivotTo ~= nil then
+                    car:PivotTo(env.CFrame.new(x, y, z))
+                end
+            end)
+        end,
+
+        exitVehicle = function()
+            local ch = localPlayer and localPlayer.Character
+            local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+            if hum ~= nil then
+                pcall(function()
+                    hum.Sit = false
+                    hum.Jump = true
+                end)
+            end
+        end,
+
+        findMobByName = function(keywords, nearX, nearY, nearZ, maxRadius)
+            local sq = handle._soQuest
+            local nowT = env.clock()
+            if sq.mobCache == nil or nowT - sq.mobCacheAt >= 0.35 then
+                local pNames = {}
+                for _, pl in Players:GetPlayers() do
+                    pNames[pl.Name] = true
+                end
+                sq.mobCache = stand_out_mobs.scan(workspace, pNames)
+                sq.mobCacheAt = nowT
+            end
+            local entries = sq.mobCache or {}
+            local best, bestD = nil, maxRadius or 1e9
+            for _, e in entries do
+                local ok = true
+                if keywords ~= nil and #keywords > 0 then
+                    ok = false
+                    local nm = string.lower(tostring(e.name or ""))
+                    for _, kw in keywords do
+                        if string.find(nm, kw, 1, true) ~= nil then
+                            ok = true
+                            break
+                        end
+                    end
+                end
+                if ok and e.model ~= nil then
+                    local x, y, z = safePos(e.model)
+                    if x ~= nil then
+                        local dd = nearX ~= nil and math.sqrt((x - nearX) ^ 2 + (y - nearY) ^ 2 + (z - nearZ) ^ 2) or 0
+                        if dd < bestD then
+                            e.x, e.y, e.z = x, y, z
+                            best, bestD = e, dd
+                        end
+                    end
+                end
+            end
+            return best
+        end,
+
+        fightMob = function(mob, now)
+            local soMob = handle._soMob
+            local cfg = ctx.getMobConfig ~= nil and ctx.getMobConfig() or nil
+            if soMob.farmer == nil or mob == nil or cfg == nil then return end
+            local ch = localPlayer and localPlayer.Character
+            local root = ch and ch:FindFirstChild("HumanoidRootPart")
+            local lx, ly, lz = 0, 0, 0
+            if root ~= nil then
+                local p = root.Position
+                lx, ly, lz = p.X, p.Y, p.Z
+            end
+            soMob.farmer:update(now, { mob }, cfg, lx, ly, lz)
+        end,
+
+        stopCombat = function()
+            if handle._soMob.farmer ~= nil then
+                pcall(function() handle._soMob.farmer:stop() end)
+            end
+        end,
+
+        playEmote = function(emoteName)
+            pcall(function()
+                local rs = game:GetService("ReplicatedStorage")
+                local rems = rs and rs:FindFirstChild("Remotes")
+                local em = rems and rems:FindFirstChild("Emotes")
+                if em ~= nil then
+                    em:FireServer(emoteName)
+                end
+            end)
+        end,
+
+        setCrouch = function(_)
+            sendKey("C")
+        end,
+
+        pressHeavy = function()
+            sendKey("R")
+        end,
+
+        openSideQuestMap = function()
+            pcall(function()
+                local pg = localPlayer:FindFirstChildOfClass("PlayerGui")
+                local phone = pg and pg:FindFirstChild("Phone")
+                if phone == nil then return end
+                local mapsBtn = phone:FindFirstChild("Maps", true)
+                local filtersBtn = phone:FindFirstChild("Filters", true)
+                local questsBtn = phone:FindFirstChild("Quests", true)
+                if mapsBtn ~= nil then activateGuiBtn(mapsBtn, env) end
+                if filtersBtn ~= nil then activateGuiBtn(filtersBtn, env) end
+                if questsBtn ~= nil then activateGuiBtn(questsBtn, env) end
+            end)
+        end,
+
+        callHuber = function()
+            pcall(function()
+                local pg = localPlayer:FindFirstChildOfClass("PlayerGui")
+                local phone = pg and pg:FindFirstChild("Phone")
+                if phone == nil then return end
+                local huberApp = phone:FindFirstChild("Huber", true)
+                if huberApp ~= nil and huberApp:IsA("GuiButton") then
+                    activateGuiBtn(huberApp, env)
+                end
+                local primary = phone:FindFirstChild("Primary", true)
+                if primary ~= nil and primary:IsA("GuiButton") then
+                    activateGuiBtn(primary, env)
+                end
+            end)
+        end,
+    }
+end
+
+return bridge
+end
+
+__modules["stand_out_quests"] = function(require)
+-- Stand Out Auto Quest: автоматическое взятие и выполнение повторяемых, ежедневных и побочных квестов.
+-- Поддерживает:
+--   • Angelo Daily (ANGELO_JOB_PARTS / STEEL / ERRAND / TWO_JOBS / BOSS_HUNT / др. — делегирует баунти в Auto Bounty)
+--   • Lenny Cop Car (LENNY_COP_CAR, кд 60с — угон полицейской машины + парковка на подъёмник + разбор)
+--   • Lettuce Trader (LETTUCE_TRADER, кд 240с, Clear погода — 7 этапов Yo-Yo Ma)
+--   • Big Chop Daily Garden (BIG_CHOP_DAILY_GARDEN — посадка/сбор горшка; в режиме All не блокирует ожидание роста)
+--   • Meryl Test Drive (MERYL_TEST_DRIVE — тест-драйв машины Meryl после P9_47)
+--   • Bobby Hamon Chain (CAESAR_HAMON_BUBBLES -> VAMPIRE -> WATER -> HUMU)
+--   • Usagi: Bandit Problem (BUKAY_BANDIT_PROBLEM — 5 бандитов по трекерам)
+-- Чистая логика поверх deps, проверяется tests/stand_out_quests_test.lua.
+local stand_out_quests = {}
+
+stand_out_quests.step_delay = 0.28
+stand_out_quests.talk_retry = 1.15
+stand_out_quests.emote_interval = 1.25
+
+stand_out_quests.choices = {
+    "All",
+    "Angelo",
+    "Lenny",
+    "Lettuce",
+    "Garden",
+    "MerylTestDrive",
+    "Bobby",
+    "Usagi",
+}
+
+stand_out_quests.npc_positions = {
+    ["Angelo"] = { X = 167.4, Y = 17.9, Z = 1251.6 },
+    ["Lenny"] = { X = -518.3, Y = 20.7, Z = 1249.7 },
+    ["Lettuce Trader"] = { X = -293.4, Y = 19.6, Z = 1492.6 },
+    ["Big Chop"] = { X = -1759.7, Y = 30.3, Z = 805.6 },
+    ["Meryl Mei Qi"] = { X = -1312.4, Y = 20.0, Z = 840.0 },
+    ["Bobby"] = { X = -289.0, Y = 18.1, Z = 571.2 },
+    ["Usagi"] = { X = -1146.9, Y = 19.7, Z = 1117.6 },
+}
+
+stand_out_quests.lenny_parking_spots = {
+    { X = -473.1, Y = 16.3, Z = 1534.4 },
+    { X = -458.4, Y = 16.3, Z = 1534.4 },
+    { X = -442.6, Y = 16.3, Z = 1534.4 },
+    { X = -428.0, Y = 16.3, Z = 1534.4 },
+}
+
+-- Центр "other lift" у Lenny's Mechanic (стойки X=-563.5 и X=-578.3, Z=1280.0)
+stand_out_quests.lenny_other_lift = { X = -570.9, Y = 19.5, Z = 1280.0 }
+stand_out_quests.meryl_parking = { X = -1311.0, Y = 18.0, Z = 904.0 }
+stand_out_quests.water_drop_pos = { X = -260.0, Y = 10.0, Z = 2600.0 }
+stand_out_quests.bobby_humu_pos = { X = -1077.4, Y = 25.1, Z = 2511.4 }
+
+stand_out_quests.bandit_trackers = {
+    { X = -27.7, Y = 19.0, Z = 894.2 },
+    { X = -1716.2, Y = 27.6, Z = 719.4 },
+    { X = -1271.0, Y = 17.4, Z = 1283.5 },
+    { X = -1450.0, Y = 17.7, Z = 1380.0 },
+    { X = -433.7, Y = 80.7, Z = 720.1 },
+}
+
+local BAD_WEATHER = {
+    rain = true,
+    fog = true,
+    thunderstorm = true,
+    lahainanoon = true,
+}
+
+local ANGELO_JOBS = {
+    ANGELO_JOB_PARTS = { item = "Arrow Part", count = 2, auto = true },
+    ANGELO_JOB_STEEL = { item = "Steel", count = 3, auto = true },
+    ANGELO_JOB_ERRAND = { bounties = 1, auto = true },
+    ANGELO_JOB_TWO_JOBS = { bounties = 2, auto = true },
+    ANGELO_JOB_BOSS_HUNT = { boss = true, auto = true },
+    ANGELO_JOB_BUSY_WEEK = { bounties = 3, eliminations = 3, auto = false },
+    ANGELO_JOB_PAYBACK = { eliminations = 2, auto = false },
+    ANGELO_JOB_BIG_BUSINESS = { bounties = 3, eliminations = 10, raid = 1, auto = false },
+    ANGELO_JOB_HEAVY_LIFTING = { boss = true, raid = 1, auto = false },
+}
+
+local BOBBY_CHAIN = {
+    "CAESAR_HAMON_BUBBLES",
+    "CAESAR_HAMON_VAMPIRE",
+    "CAESAR_HAMON_WATER",
+    "CAESAR_HAMON_HUMU",
+}
+
+local function trim(s)
+    if type(s) ~= "string" then
+        return ""
+    end
+    return string.match(s, "^%s*(.-)%s*$") or ""
+end
+
+local function low(s)
+    return string.lower(tostring(s or ""))
+end
+
+local function hasSub(haystack, needle)
+    return string.find(haystack, needle, 1, true) ~= nil
+end
+
+local function dist3(ax, ay, az, bx, by, bz)
+    local dx, dy, dz = ax - bx, ay - by, az - bz
+    return math.sqrt(dx * dx + dy * dy + dz * dz)
+end
+
+-- Парсит comma-separated CompletedQuests в set { [id] = true }
+function stand_out_quests.parseCompletedSet(raw)
+    local set = {}
+    if type(raw) ~= "string" or raw == "" then
+        return set
+    end
+    for tok in string.gmatch(raw, "[^,]+") do
+        local id = trim(tok)
+        if id ~= "" then
+            set[id] = true
+        end
+    end
+    return set
+end
+
+-- Парсит CompletedQuestsTime ("LETTUCE_TRADER.1795092333,LENNY_COP_CAR.1795550000") -> { [id] = unixTs }
+function stand_out_quests.parseCooldowns(raw)
+    local out = {}
+    if type(raw) ~= "string" or raw == "" then
+        return out
+    end
+    for tok in string.gmatch(raw, "[^,]+") do
+        local id, ts = string.match(trim(tok), "^([^%.]+)%.(%d+)")
+        if id ~= nil and ts ~= nil then
+            out[id] = tonumber(ts) or 0
+        end
+    end
+    return out
+end
+
+-- Возвращает оставшийся кулдаун в секундах (0 если квест готов к повтору)
+function stand_out_quests.cooldownLeft(cooldowns, questId, cdSeconds, nowUnix)
+    if type(cooldowns) ~= "table" or cdSeconds == nil or cdSeconds <= 0 then
+        return 0
+    end
+    local last = cooldowns[questId]
+    if type(last) ~= "number" or last <= 0 then
+        return 0
+    end
+    local rem = (last + cdSeconds) - (nowUnix or 0)
+    return rem > 0 and rem or 0
+end
+
+-- Извлекает пары key -> number из простого JSON-объекта вида {"Caesar_BlowBubble":50}
+local function parseNumMap(jsonStr)
+    local map = {}
+    if type(jsonStr) ~= "string" or jsonStr == "" then
+        return map
+    end
+    for k, v in string.gmatch(jsonStr, '"([^"]+)"%s*:%s*(%-?%d+%.?%d*)') do
+        map[k] = tonumber(v) or 0
+    end
+    return map
+end
+
+-- Парсит QuestObjectives & QuestObjectivesTotal -> { [objId] = { cur = n, total = m } }
+function stand_out_quests.parseObjectives(curJson, totalJson)
+    local curMap = parseNumMap(curJson)
+    local totMap = parseNumMap(totalJson)
+    local out = {}
+    for k, total in totMap do
+        out[k] = { cur = curMap[k] or 0, total = total }
+    end
+    for k, cur in curMap do
+        if out[k] == nil then
+            out[k] = { cur = cur, total = 1 }
+        end
+    end
+    return out
+end
+
+-- Считает суммарное количество предмета itemName в JSON-строке Stats.Inventory
+function stand_out_quests.countInventoryItem(invJson, itemName)
+    if type(invJson) ~= "string" or invJson == "" or type(itemName) ~= "string" or itemName == "" then
+        return 0
+    end
+    local total = 0
+    for block in string.gmatch(invJson, "%b{}") do
+        local name = string.match(block, '"Name"%s*:%s*"([^"]+)"')
+        if name == itemName then
+            local amt = tonumber(string.match(block, '"Amount"%s*:%s*(%d+)'))
+            total += (amt or 1)
+        end
+    end
+    return total
+end
+
+-- Проверяет, завершён ли дейлик сегодня по JSON DailyQuestState
+function stand_out_quests.isDailyDoneToday(dailyJson, questId, todayDay)
+    if type(dailyJson) ~= "string" or dailyJson == "" or type(questId) ~= "string" then
+        return false
+    end
+    local pat = '"' .. string.gsub(questId, "([%%%^%$%(%)%.%[%]%*%+%-%?])", "%%%1") .. '"%s*:%s*(%b{})'
+    local block = string.match(dailyJson, pat)
+    if block == nil then
+        return false
+    end
+    local compDay = tonumber(string.match(block, '"CompletedDay"%s*:%s*(%d+)'))
+    if compDay == nil then
+        return false
+    end
+    if type(todayDay) == "number" and todayDay > 0 then
+        return compDay >= todayDay
+    end
+    return true
+end
+
+-- Парсит горшки из Stats.GardeningState JSON
+function stand_out_quests.parseGardenPots(gardenJson)
+    local pots = {}
+    if type(gardenJson) ~= "string" or gardenJson == "" then
+        return pots
+    end
+    local potsArr = string.match(gardenJson, '"Pots"%s*:%s*(%b[])')
+    if potsArr == nil then
+        return pots
+    end
+    for block in string.gmatch(potsArr, "%b{}") do
+        local id = string.match(block, '"Id"%s*:%s*"([^"]+)"')
+        if id ~= nil then
+            local elapsed = tonumber(string.match(block, '"Elapsed"%s*:%s*(%d+%.?%d*)')) or 0
+            local duration = tonumber(string.match(block, '"Duration"%s*:%s*(%d+%.?%d*)')) or 0
+            local hasDirt = string.find(block, '"HasDirt"%s*:%s*true') ~= nil
+            local seed = string.match(block, '"Seed"%s*:%s*"([^"]+)"')
+            table.insert(pots, {
+                id = id,
+                elapsed = elapsed,
+                duration = duration,
+                hasDirt = hasDirt,
+                seed = seed,
+                ready = seed ~= nil and duration > 0 and elapsed >= duration,
+            })
+        end
+    end
+    return pots
+end
+
+function stand_out_quests.isWeatherClear(weatherName)
+    if type(weatherName) ~= "string" or weatherName == "" then
+        return true
+    end
+    return BAD_WEATHER[low(trim(weatherName))] ~= true
+end
+
+function stand_out_quests.isAngeloJob(questId)
+    return type(questId) == "string" and ANGELO_JOBS[questId] ~= nil
+end
+
+function stand_out_quests.angeloJobSpec(questId)
+    return ANGELO_JOBS[questId]
+end
+
+-- Выбирает нужный вариант ответа в PlayerGui.Dialogue по контексту квеста.
+-- Возвращает (option, tag), где tag может быть "done_today", "retry_park", "cooldown", "accepted", "turned_in", "dismiss".
+function stand_out_quests.pickDialogueOption(options, context)
+    if type(options) ~= "table" or #options == 0 then
+        return nil, nil
+    end
+
+    local function findMatch(patterns)
+        for _, pat in patterns do
+            for _, opt in options do
+                local t = low(opt.text or "")
+                if hasSub(t, pat) then
+                    return opt
+                end
+            end
+        end
+        return nil
+    end
+
+    if context == "angelo_accept" then
+        local take = findMatch({ "i'll take the job", "take the job" })
+        if take ~= nil then return take, "accepted" end
+        local done = findMatch({ "leave him be" })
+        if done ~= nil then return done, "done_today" end
+        local back = findMatch({ "i'll get back to it", "not today", "..." })
+        if back ~= nil then return back, "dismiss" end
+    elseif context == "angelo_turnin" then
+        local done = findMatch({ "leave him be" })
+        if done ~= nil then return done, "done_today" end
+        -- В Angelo Active опция 1 (fn) — сдача ("Hand over..." / "Turn in..."), а опция 2 — "I'll get back to it."
+        for _, opt in options do
+            local t = low(opt.text or "")
+            if not hasSub(t, "get back to it") and not hasSub(t, "not today")
+                and not hasSub(t, "leave him be") and trim(t) ~= "..." and trim(t) ~= "1. ..." then
+                return opt, "turned_in"
+            end
+        end
+        return options[#options], "dismiss"
+    elseif context == "lenny_accept" then
+        local wait = findMatch({ "cool down", "okay." })
+        local take = findMatch({ "i'll get you one", "got any work", "on it." })
+        if take ~= nil then return take, "accepted" end
+        if wait ~= nil then return wait, "cooldown" end
+        local busy = findMatch({ "i'm on it" })
+        if busy ~= nil then return busy, "dismiss" end
+    elseif context == "lenny_respawn" then
+        local hit = findMatch({ "i need another cop car", "got any work", "i'll get you one", "on it." })
+        if hit ~= nil then return hit, "accepted" end
+    elseif context == "lenny_scrap" then
+        local none = findMatch({ "got it." })
+        local hit = findMatch({ "strip it.", "strip it for parts", "i've got a car on the other lift" })
+        if hit ~= nil then return hit, "turned_in" end
+        if none ~= nil then return none, "retry_park" end
+        local ok = findMatch({ "okay.", "fair enough", "fine.", "never mind" })
+        if ok ~= nil then return ok, "dismiss" end
+    elseif context == "lettuce_accept" then
+        local hit = findMatch({ "can i help", "leave it to me" })
+        if hit ~= nil then return hit, "accepted" end
+        local rest = findMatch({ "see you later", "alright", "fine.", "i'm on it" })
+        if rest ~= nil then return rest, "cooldown" end
+    elseif context == "lettuce_finish" then
+        local hit = findMatch({ "wash that key", "hold on", "where?!", "..." })
+        if hit ~= nil then return hit, "turned_in" end
+    elseif context == "bigchop_accept" then
+        local hit = findMatch({ "daily gardening quest", "see you later", "thanks" })
+        if hit ~= nil then return hit, "accepted" end
+    elseif context == "meryl_testdrive_accept" then
+        local hit = findMatch({ "take it for a test drive", "test drive", "practice driving" })
+        if hit ~= nil then return hit, "accepted" end
+        local done = findMatch({ "got it.", "understood." })
+        if done ~= nil then return done, "done_today" end
+    elseif context == "meryl_testdrive_return" then
+        local hit = findMatch({ "i'm returning the car", "returning the car", "test drive" })
+        if hit ~= nil then return hit, "turned_in" end
+        local resp = findMatch({ "i need my test-drive car" })
+        if resp ~= nil then return resp, "accepted" end
+    elseif context == "bobby_talk" then
+        local hit = findMatch({ "let's go", "i'm on it", "got it", "keep practicing" })
+        if hit ~= nil then return hit, "accepted" end
+    elseif context == "usagi_accept" then
+        local hit = findMatch({ "i'll take care of it", "i'm on it", "see you around" })
+        if hit ~= nil then return hit, "accepted" end
+    end
+
+    -- Fallback: безопасно нажимаем первую не-отказную опцию, если она единственная
+    if #options == 1 then
+        return options[1], "dismiss"
+    end
+    return nil, nil
+end
+
+-- Определяет какой квест из поддерживаемых должен выполняться следующим в зависимости от выбора пользователя и состояния.
+function stand_out_quests.selectTarget(choice, state)
+    choice = choice or "All"
+    local active = state.activeQuest or ""
+    local level = state.level or 0
+    local completed = state.completed or {}
+    local cooldowns = state.cooldowns or {}
+    local nowUnix = state.nowUnix or 0
+    local todayDay = state.todayDay or 0
+
+    local function angeloReady()
+        if state.angeloDoneToday then
+            return false, nil
+        end
+        local jobId = state.angeloJobId
+        if jobId == nil or jobId == "" then
+            return true, nil -- поговорим с Angelo, чтобы узнать/взять
+        end
+        local spec = ANGELO_JOBS[jobId]
+        if spec == nil or not spec.auto then
+            return false, nil
+        end
+        if spec.item ~= nil then
+            local have = stand_out_quests.countInventoryItem(state.inventoryJson, spec.item)
+            if have < (spec.count or 1) then
+                return false, nil
+            end
+        end
+        if spec.boss and not state.bossAlive then
+            return false, nil
+        end
+        return true, jobId
+    end
+
+    local function lennyReady()
+        if level < 10 then return false end
+        return stand_out_quests.cooldownLeft(cooldowns, "LENNY_COP_CAR", 60, nowUnix) <= 0
+    end
+
+    local function lettuceReady()
+        if level < 15 then return false end
+        if not stand_out_quests.isWeatherClear(state.weather) then return false end
+        return stand_out_quests.cooldownLeft(cooldowns, "LETTUCE_TRADER", 240, nowUnix) <= 0
+    end
+
+    local function gardenReady()
+        if level < 15 then return false end
+        if stand_out_quests.isDailyDoneToday(state.dailyJson, "BIG_CHOP_DAILY_GARDEN", todayDay) then
+            return false
+        end
+        return true
+    end
+
+    local function merylReady()
+        if not completed["P9_47_ESCAPE_THE_MEGAYACHT"] then return false end
+        if stand_out_quests.isDailyDoneToday(state.dailyJson, "MERYL_TEST_DRIVE", todayDay) then
+            return false
+        end
+        return true
+    end
+
+    local function nextBobbyQuest()
+        if level < 20 then return nil end
+        for _, qid in BOBBY_CHAIN do
+            if not completed[qid] then
+                return qid
+            end
+        end
+        return nil
+    end
+
+    if choice == "Angelo" then
+        return "Angelo"
+    elseif choice == "Lenny" then
+        return "Lenny"
+    elseif choice == "Lettuce" then
+        return "Lettuce"
+    elseif choice == "Garden" then
+        return "Garden"
+    elseif choice == "MerylTestDrive" then
+        return "MerylTestDrive"
+    elseif choice == "Bobby" then
+        return nextBobbyQuest() ~= nil and "Bobby" or nil
+    elseif choice == "Usagi" then
+        return (not completed["BUKAY_BANDIT_PROBLEM"] and level >= 20) and "Usagi" or nil
+    end
+
+    -- Режим "All": сначала доделываем уже активный поддерживаемый квест (кроме ожидающего роста горшка)
+    if stand_out_quests.isAngeloJob(active) then
+        local spec = ANGELO_JOBS[active]
+        if spec ~= nil and spec.auto then
+            if spec.item == nil or stand_out_quests.countInventoryItem(state.inventoryJson, spec.item) >= (spec.count or 1) then
+                if not spec.boss or state.bossAlive then
+                    return "Angelo"
+                end
+            end
+        end
+    elseif active == "LENNY_COP_CAR" then
+        return "Lenny"
+    elseif active == "LETTUCE_TRADER" then
+        return "Lettuce"
+    elseif active == "MERYL_TEST_DRIVE" then
+        return "MerylTestDrive"
+    elseif active == "BIG_CHOP_DAILY_GARDEN" then
+        -- Если горшок ещё не посажен или уже созрел — делаем его, а пока растёт — уступаем Lenny/Angelo!
+        local objs = state.objectives or {}
+        local seedObj = objs["GardenDaily_Seed"]
+        local needPlant = seedObj == nil or (seedObj.cur or 0) < (seedObj.total or 1)
+        if needPlant or state.gardenHasReadyPot then
+            return "Garden"
+        end
+    elseif active == "CAESAR_HAMON_BUBBLES" or active == "CAESAR_HAMON_VAMPIRE"
+        or active == "CAESAR_HAMON_WATER" or active == "CAESAR_HAMON_HUMU" then
+        return "Bobby"
+    elseif active == "BUKAY_BANDIT_PROBLEM" then
+        return "Usagi"
+    end
+
+    -- Иначе выбираем лучший доступный фарм-квест по приоритету
+    if angeloReady() then
+        return "Angelo"
+    end
+    if lennyReady() then
+        return "Lenny"
+    end
+    if lettuceReady() then
+        return "Lettuce"
+    end
+    if gardenReady() and (not state.gardenWaiting or state.gardenHasReadyPot) then
+        return "Garden"
+    end
+    if merylReady() then
+        return "MerylTestDrive"
+    end
+    return nil
+end
+
+-- === State Machine Runner ===
+local Runner = {}
+Runner.__index = Runner
+
+function stand_out_quests.new(deps)
+    return setmetatable({
+        deps = deps or {},
+        completed = 0,
+        statusText = "",
+        wantsBounty = false,
+        lastStepAt = -99,
+        lastTalkAt = -99,
+        lastEmoteAt = -99,
+        lastActiveQuest = "",
+        angeloDoneDay = -1,
+        merylDoneDay = -1,
+        lennyParked = false,
+        lennyWaitCarAt = 0,
+        merylCarEntered = false,
+        bobbyCarriedAt = 0,
+        banditIdx = 1,
+        trailIdx = 1,
+        gardenWaiting = false,
+        crouching = false,
+    }, Runner)
+end
+
+function Runner:stop()
+    self.wantsBounty = false
+    self.statusText = ""
+    if self.crouching and self.deps.setCrouch ~= nil then
+        self.crouching = false
+        self.deps.setCrouch(false)
+    end
+    if self.deps.stopCombat ~= nil then
+        self.deps.stopCombat()
+    end
+end
+
+function Runner:_talkToNpc(now, npcName, dlgContext, lx, ly, lz)
+    local d = self.deps
+    local opts = d.readDialogue ~= nil and d.readDialogue() or nil
+    if opts ~= nil and #opts > 0 then
+        local chosen, tag = stand_out_quests.pickDialogueOption(opts, dlgContext)
+        if chosen ~= nil then
+            if d.clickDialogue ~= nil then
+                d.clickDialogue(chosen)
+            end
+            self.lastStepAt = now
+            return tag or "clicked"
+        end
+    end
+
+    local nx, ny, nz, prompt = nil, nil, nil, nil
+    if d.findNpc ~= nil then
+        nx, ny, nz, prompt = d.findNpc(npcName)
+    end
+    if nx == nil then
+        local fb = stand_out_quests.npc_positions[npcName]
+        if fb ~= nil then
+            nx, ny, nz = fb.X, fb.Y, fb.Z
+        end
+    end
+    if nx == nil then
+        self.statusText = "NPC не найден: " .. tostring(npcName)
+        return "missing"
+    end
+
+    if lx == nil or dist3(lx, ly, lz, nx, ny, nz) > 9 then
+        if d.teleportTo ~= nil then
+            d.teleportTo(nx, ny + 1.5, nz + 3)
+        end
+        self.lastStepAt = now
+        return "moving"
+    end
+
+    if now - self.lastTalkAt >= stand_out_quests.talk_retry then
+        self.lastTalkAt = now
+        if prompt ~= nil and d.firePrompt ~= nil then
+            d.firePrompt(prompt)
+        elseif d.interactNpc ~= nil then
+            d.interactNpc(npcName)
+        end
+    end
+    return "talking"
+end
+
+function Runner:_stepAngelo(now, state, lx, ly, lz)
+    local active = state.activeQuest or ""
+    local jobId = stand_out_quests.isAngeloJob(active) and active or state.angeloJobId
+    local spec = jobId and ANGELO_JOBS[jobId] or nil
+
+    if not stand_out_quests.isAngeloJob(active) then
+        if state.angeloDoneToday or self.angeloDoneDay == (state.todayDay or 0) then
+            self.statusText = "Angelo: выполнено сегодня"
+            return
+        end
+        self.statusText = "Angelo: берём дейлик"
+        local tag = self:_talkToNpc(now, "Angelo", "angelo_accept", lx, ly, lz)
+        if tag == "done_today" then
+            self.angeloDoneDay = state.todayDay or 0
+        end
+        return
+    end
+
+    -- Активен квест Angelo
+    if spec ~= nil and spec.item ~= nil then
+        local have = stand_out_quests.countInventoryItem(state.inventoryJson, spec.item)
+        if have >= (spec.count or 1) then
+            self.statusText = "Angelo: сдаём " .. spec.item
+            local tag = self:_talkToNpc(now, "Angelo", "angelo_turnin", lx, ly, lz)
+            if tag == "done_today" then
+                self.angeloDoneDay = state.todayDay or 0
+            end
+        else
+            self.statusText = string.format("Angelo: нужно %s (%d/%d)", spec.item, have, spec.count or 1)
+        end
+        return
+    end
+
+    local objs = state.objectives or {}
+    local bObj = objs["Complete Bounty"]
+    if bObj ~= nil and (bObj.cur or 0) < (bObj.total or 1) then
+        self.wantsBounty = true
+        self.statusText = string.format("Angelo: Баунти %d/%d", bObj.cur or 0, bObj.total or 1)
+        return
+    end
+
+    local bossObj = objs["Defeat Stand Boss"]
+    if bossObj ~= nil and (bossObj.cur or 0) < (bossObj.total or 1) then
+        local boss = self.deps.findMobByName ~= nil and self.deps.findMobByName({ "jotaro", "dio" }) or nil
+        if boss ~= nil then
+            self.statusText = "Angelo: бой с " .. tostring(boss.name or "Boss")
+            if self.deps.fightMob ~= nil then
+                self.deps.fightMob(boss, now)
+            end
+        else
+            self.statusText = "Angelo: ждём спавн Jotaro/DIO"
+        end
+        return
+    end
+
+    local elimObj = objs["Complete Elimination"]
+    local raidObj = objs["Complete Train Raid"]
+    if (elimObj ~= nil and (elimObj.cur or 0) < (elimObj.total or 1))
+        or (raidObj ~= nil and (raidObj.cur or 0) < (raidObj.total or 1)) then
+        self.statusText = "Angelo: нужен Raid / Elimination"
+        return
+    end
+
+    -- Все цели готовы -> сдаём Angelo
+    self.statusText = "Angelo: сдаём квест"
+    local tag = self:_talkToNpc(now, "Angelo", "angelo_turnin", lx, ly, lz)
+    if tag == "done_today" then
+        self.angeloDoneDay = state.todayDay or 0
+    end
+end
+
+function Runner:_stepLenny(now, state, lx, ly, lz)
+    local d = self.deps
+    local active = state.activeQuest or ""
+    if active ~= "LENNY_COP_CAR" then
+        self.lennyParked = false
+        self.lennyWaitCarAt = 0
+        local rem = stand_out_quests.cooldownLeft(state.cooldowns, "LENNY_COP_CAR", 60, state.nowUnix)
+        if rem > 0 then
+            self.statusText = string.format("Lenny: кд %dс", math.ceil(rem))
+            return
+        end
+        self.statusText = "Lenny: берём Cop Car"
+        self:_talkToNpc(now, "Lenny", "lenny_accept", lx, ly, lz)
+        return
+    end
+
+    local lift = stand_out_quests.lenny_other_lift
+    local seated = d.getSeatedVehicle ~= nil and d.getSeatedVehicle() or nil
+
+    -- Если сидим в машине -> сразу переносим её на второй подъёмник Ленни и выходим
+    if seated ~= nil then
+        self.statusText = "Lenny: ставим авто на подъёмник"
+        if d.pivotVehicle ~= nil then
+            d.pivotVehicle(seated, lift.X, lift.Y, lift.Z)
+        end
+        if d.exitVehicle ~= nil then
+            d.exitVehicle()
+        end
+        self.lennyParked = true
+        self.lastStepAt = now + 0.35
+        return
+    end
+
+    -- Если машина уже стоит на подъёмнике -> сдаём Ленни
+    local objs = state.objectives or {}
+    local takeObj = objs["CopCar_Take"]
+    local took = self.lennyParked or (takeObj ~= nil and (takeObj.cur or 0) >= (takeObj.total or 1))
+    if took then
+        -- Проверим, действительно ли cop car на подъёмнике
+        local car = d.findCopCar ~= nil and d.findCopCar(lift.X, lift.Y, lift.Z, 28) or nil
+        if car ~= nil or self.lennyParked then
+            self.statusText = "Lenny: сдаём Cop Car на разбор"
+            local tag = self:_talkToNpc(now, "Lenny", "lenny_scrap", lx, ly, lz)
+            if tag == "retry_park" then
+                self.lennyParked = false
+                if car ~= nil and d.pivotVehicle ~= nil then
+                    d.pivotVehicle(car, lift.X, lift.Y - 0.5, lift.Z)
+                end
+            end
+            return
+        end
+    end
+
+    -- Ищем полицейскую машину на парковке участка
+    local car, cx, cy, cz, boardPrompt = nil, nil, nil, nil, nil
+    if d.findCopCar ~= nil then
+        car, cx, cy, cz, boardPrompt = d.findCopCar(-450, 16.3, 1534.4, 220)
+    end
+    if car ~= nil and cx ~= nil then
+        self.lennyWaitCarAt = 0
+        self.statusText = "Lenny: садимся в Cop Car"
+        if lx == nil or dist3(lx, ly, lz, cx, cy, cz) > 10 then
+            if d.teleportTo ~= nil then
+                d.teleportTo(cx, cy + 2.5, cz + 3)
+            end
+            return
+        end
+        if boardPrompt ~= nil and d.firePrompt ~= nil then
+            d.firePrompt(boardPrompt)
+        elseif d.sitInVehicle ~= nil then
+            d.sitInVehicle(car)
+        end
+        return
+    end
+
+    -- Нет машины -> телепортируемся на парковку (чтобы прогрузилась) или просим у Ленни новую
+    local p1 = stand_out_quests.lenny_parking_spots[1]
+    if lx == nil or dist3(lx, ly, lz, p1.X, p1.Y, p1.Z) > 60 then
+        self.statusText = "Lenny: летим к участку"
+        if d.teleportTo ~= nil then
+            d.teleportTo(p1.X, p1.Y + 3, p1.Z)
+        end
+        self.lennyWaitCarAt = now
+        return
+    end
+    if self.lennyWaitCarAt == 0 then
+        self.lennyWaitCarAt = now
+    end
+    if now - self.lennyWaitCarAt >= 3.5 then
+        self.statusText = "Lenny: запрашиваем новое авто"
+        self:_talkToNpc(now, "Lenny", "lenny_respawn", lx, ly, lz)
+        self.lennyWaitCarAt = now
+    else
+        self.statusText = "Lenny: ищем Cop Car..."
+    end
+end
+
+function Runner:_stepLettuce(now, state, lx, ly, lz)
+    local d = self.deps
+    local active = state.activeQuest or ""
+    if active ~= "LETTUCE_TRADER" then
+        if self.crouching and d.setCrouch ~= nil then
+            self.crouching = false
+            d.setCrouch(false)
+        end
+        if not stand_out_quests.isWeatherClear(state.weather) then
+            self.statusText = "Lettuce: нужна ясная погода"
+            return
+        end
+        local rem = stand_out_quests.cooldownLeft(state.cooldowns, "LETTUCE_TRADER", 240, state.nowUnix)
+        if rem > 0 then
+            self.statusText = string.format("Lettuce: кд %dс", math.ceil(rem))
+            return
+        end
+        self.statusText = "Lettuce: берём квест"
+        self:_talkToNpc(now, "Lettuce Trader", "lettuce_accept", lx, ly, lz)
+        return
+    end
+
+    local objs = state.objectives or {}
+    local function done(id)
+        local o = objs[id]
+        return o ~= nil and (o.cur or 0) >= (o.total or 1)
+    end
+
+    -- 1) Clues / Note / Bush / Key: ищем активный ProximityPrompt внутри StoryActors.LettuceTrader
+    if not done("Lettuce_Clues") or (done("Lettuce_Thugs") and not done("Lettuce_Note"))
+        or (done("Lettuce_Note") and not done("Lettuce_Bush"))
+        or (done("Lettuce_YoYoMa") and not done("Lettuce_Key")) then
+        if self.crouching and d.setCrouch ~= nil then
+            self.crouching = false
+            d.setCrouch(false)
+        end
+        local prompt, px, py, pz = nil, nil, nil, nil
+        if d.findQuestPrompt ~= nil then
+            prompt, px, py, pz = d.findQuestPrompt("LettuceTrader")
+        end
+        if prompt ~= nil and px ~= nil then
+            self.statusText = "Lettuce: интеракция (" .. tostring(prompt.ObjectText or prompt.Name or "obj") .. ")"
+            if lx == nil or dist3(lx, ly, lz, px, py, pz) > 8 then
+                if d.teleportTo ~= nil then d.teleportTo(px, py + 1.5, pz + 2.5) end
+            elseif d.firePrompt ~= nil then
+                d.firePrompt(prompt)
+            end
+            return
+        end
+        local npcPos = stand_out_quests.npc_positions["Lettuce Trader"]
+        if lx == nil or dist3(lx, ly, lz, npcPos.X, npcPos.Y, npcPos.Z) > 35 then
+            if d.teleportTo ~= nil then d.teleportTo(npcPos.X, npcPos.Y + 2, npcPos.Z + 4) end
+        end
+        self.statusText = "Lettuce: ищем объект квеста..."
+        return
+    end
+
+    -- 2) Trail (crouch & follow drool trail)
+    if not done("Lettuce_Trail") then
+        if not self.crouching and d.setCrouch ~= nil then
+            self.crouching = true
+            d.setCrouch(true)
+        end
+        local pts = d.findTrailPoints ~= nil and d.findTrailPoints("LettuceTrader") or nil
+        if pts ~= nil and #pts > 0 then
+            if self.trailIdx > #pts then self.trailIdx = 1 end
+            local pt = pts[self.trailIdx]
+            self.statusText = string.format("Lettuce: след %d/%d", self.trailIdx, #pts)
+            if d.teleportTo ~= nil then
+                d.teleportTo(pt.X, pt.Y + 1.5, pt.Z)
+            end
+            self.trailIdx += 1
+        else
+            self.statusText = "Lettuce: идём по следу (присядь)"
+        end
+        return
+    end
+
+    if self.crouching and d.setCrouch ~= nil then
+        self.crouching = false
+        d.setCrouch(false)
+    end
+
+    -- 3) Thugs
+    if not done("Lettuce_Thugs") then
+        local mob = d.findMobByName ~= nil and d.findMobByName({ "thug", "bandit", "lettuce" }, -293.4, 19.6, 1492.6, 260) or nil
+        if mob ~= nil then
+            self.statusText = "Lettuce: бьём " .. tostring(mob.name or "Thug")
+            if d.fightMob ~= nil then d.fightMob(mob, now) end
+        else
+            local npcPos = stand_out_quests.npc_positions["Lettuce Trader"]
+            if lx == nil or dist3(lx, ly, lz, npcPos.X, npcPos.Y, npcPos.Z) > 30 then
+                if d.teleportTo ~= nil then d.teleportTo(npcPos.X, npcPos.Y + 2, npcPos.Z + 4) end
+            end
+            self.statusText = "Lettuce: ждём Thugs"
+        end
+        return
+    end
+
+    -- 6) Yo-Yo Ma
+    if not done("Lettuce_YoYoMa") then
+        local mob = d.findMobByName ~= nil and d.findMobByName({ "yo-yo", "yoyo", "ma" }) or nil
+        if mob ~= nil then
+            self.statusText = "Lettuce: бьём Yo-Yo Ma"
+            if d.fightMob ~= nil then d.fightMob(mob, now) end
+        else
+            self.statusText = "Lettuce: ищем Yo-Yo Ma..."
+        end
+        return
+    end
+
+    -- 7) Сдача
+    self.statusText = "Lettuce: сдаём Wendell"
+    self:_talkToNpc(now, "Lettuce Trader", "lettuce_finish", lx, ly, lz)
+end
+
+function Runner:_stepGarden(now, state, lx, ly, lz)
+    local d = self.deps
+    local active = state.activeQuest or ""
+    if active ~= "BIG_CHOP_DAILY_GARDEN" then
+        if stand_out_quests.isDailyDoneToday(state.dailyJson, "BIG_CHOP_DAILY_GARDEN", state.todayDay) then
+            self.statusText = "Garden: дейлик выполнен"
+            return
+        end
+        self.statusText = "Garden: берём у Big Chop"
+        self:_talkToNpc(now, "Big Chop", "bigchop_accept", lx, ly, lz)
+        return
+    end
+
+    local objs = state.objectives or {}
+    local function done(id)
+        local o = objs[id]
+        return o ~= nil and (o.cur or 0) >= (o.total or 1)
+    end
+
+    local prompt, px, py, pz, actionKind = nil, nil, nil, nil, nil
+    if not done("GardenDaily_Place") then
+        actionKind = "place"
+    elseif not done("GardenDaily_Dirt") then
+        actionKind = "dirt"
+    elseif not done("GardenDaily_Seed") then
+        actionKind = "seed"
+    else
+        actionKind = "harvest"
+    end
+
+    if actionKind == "harvest" and not state.gardenHasReadyPot then
+        self.gardenWaiting = true
+        self.statusText = "Garden: ждём созревания..."
+        return
+    end
+
+    self.gardenWaiting = false
+    if d.findGardenPrompt ~= nil then
+        prompt, px, py, pz = d.findGardenPrompt(actionKind)
+    end
+    if prompt ~= nil and px ~= nil then
+        self.statusText = "Garden: " .. actionKind
+        if lx == nil or dist3(lx, ly, lz, px, py, pz) > 8 then
+            if d.teleportTo ~= nil then d.teleportTo(px, py + 2, pz + 3) end
+        elseif d.firePrompt ~= nil then
+            d.firePrompt(prompt)
+        end
+    else
+        local bc = stand_out_quests.npc_positions["Big Chop"]
+        if lx == nil or dist3(lx, ly, lz, bc.X, bc.Y, bc.Z) > 60 then
+            if d.teleportTo ~= nil then d.teleportTo(bc.X, bc.Y + 2, bc.Z + 5) end
+        end
+        self.statusText = "Garden: ищем горшок (" .. actionKind .. ")"
+    end
+end
+
+function Runner:_stepMerylTestDrive(now, state, lx, ly, lz)
+    local d = self.deps
+    local active = state.activeQuest or ""
+    if active ~= "MERYL_TEST_DRIVE" then
+        self.merylCarEntered = false
+        if stand_out_quests.isDailyDoneToday(state.dailyJson, "MERYL_TEST_DRIVE", state.todayDay)
+            or self.merylDoneDay == (state.todayDay or 0) then
+            self.statusText = "Test Drive: выполнено сегодня"
+            return
+        end
+        self.statusText = "Test Drive: берём у Meryl"
+        local tag = self:_talkToNpc(now, "Meryl Mei Qi", "meryl_testdrive_accept", lx, ly, lz)
+        if tag == "done_today" then
+            self.merylDoneDay = state.todayDay or 0
+        end
+        return
+    end
+
+    local objs = state.objectives or {}
+    local destObj = objs["TestDrive_Destroy"]
+    local destDone = destObj ~= nil and (destObj.cur or 0) >= (destObj.total or 50)
+    local park = stand_out_quests.meryl_parking
+    local seated = d.getSeatedVehicle ~= nil and d.getSeatedVehicle() or nil
+
+    if destDone then
+        if seated ~= nil then
+            self.statusText = "Test Drive: возвращаем авто"
+            if d.pivotVehicle ~= nil then d.pivotVehicle(seated, park.X, park.Y, park.Z) end
+            if d.exitVehicle ~= nil then d.exitVehicle() end
+            return
+        end
+        self.statusText = "Test Drive: сдаём Meryl"
+        self:_talkToNpc(now, "Meryl Mei Qi", "meryl_testdrive_return", lx, ly, lz)
+        return
+    end
+
+    if seated ~= nil then
+        self.merylCarEntered = true
+        self.statusText = string.format("Test Drive: разрушения %d/%d",
+            destObj and destObj.cur or 0, destObj and destObj.total or 50)
+        -- Сдвигаем машину на ближайшего врага / разрушаемый объект
+        local mob = d.findMobByName ~= nil and d.findMobByName(nil, lx, ly, lz, 300) or nil
+        if mob ~= nil and d.pivotVehicle ~= nil then
+            d.pivotVehicle(seated, mob.x, mob.y + 1, mob.z)
+        end
+        return
+    end
+
+    local car, cx, cy, cz, boardPrompt = nil, nil, nil, nil, nil
+    if d.findCopCar ~= nil then
+        car, cx, cy, cz, boardPrompt = d.findCopCar(park.X, park.Y, park.Z, 120, true)
+    end
+    if car ~= nil and cx ~= nil then
+        self.statusText = "Test Drive: садимся в авто"
+        if lx == nil or dist3(lx, ly, lz, cx, cy, cz) > 10 then
+            if d.teleportTo ~= nil then d.teleportTo(cx, cy + 2.5, cz + 3) end
+        elseif boardPrompt ~= nil and d.firePrompt ~= nil then
+            d.firePrompt(boardPrompt)
+        elseif d.sitInVehicle ~= nil then
+            d.sitInVehicle(car)
+        end
+    else
+        self.statusText = "Test Drive: ждём авто у Meryl"
+        if lx == nil or dist3(lx, ly, lz, park.X, park.Y, park.Z) > 35 then
+            if d.teleportTo ~= nil then d.teleportTo(park.X, park.Y + 2, park.Z) end
+        end
+    end
+end
+
+function Runner:_stepBobby(now, state, lx, ly, lz)
+    local d = self.deps
+    local active = state.activeQuest or ""
+    local objs = state.objectives or {}
+
+    if active == "CAESAR_HAMON_BUBBLES" then
+        local o = objs["Caesar_BlowBubble"]
+        local cur, tot = o and o.cur or 0, o and o.total or 50
+        self.statusText = string.format("Bobby: пузыри %d/%d", cur, tot)
+        if now - self.lastEmoteAt >= stand_out_quests.emote_interval then
+            self.lastEmoteAt = now
+            if d.playEmote ~= nil then
+                d.playEmote("BlowBubble")
+            end
+        end
+        return
+    elseif active == "CAESAR_HAMON_VAMPIRE" then
+        local o = objs["Complete Bounty"]
+        if o == nil or (o.cur or 0) < (o.total or 1) then
+            self.wantsBounty = true
+            self.statusText = "Bobby: делаем 1 баунти"
+            return
+        end
+        self.statusText = "Bobby: сдаём Bounty Work"
+        self:_talkToNpc(now, "Bobby", "bobby_talk", lx, ly, lz)
+        return
+    elseif active == "CAESAR_HAMON_WATER" then
+        if self.bobbyCarriedAt == 0 then
+            self.statusText = "Bobby: берём на руки"
+            local tag = self:_talkToNpc(now, "Bobby", "bobby_talk", lx, ly, lz)
+            if tag == "accepted" then
+                self.bobbyCarriedAt = now
+            end
+        elseif now - self.bobbyCarriedAt >= 0.8 then
+            self.statusText = "Bobby: кидаем в воду"
+            local w = stand_out_quests.water_drop_pos
+            if d.teleportTo ~= nil then
+                d.teleportTo(w.X, w.Y, w.Z)
+            end
+            if now - self.bobbyCarriedAt >= 3.5 then
+                self.bobbyCarriedAt = 0
+            end
+        end
+        return
+    elseif active == "CAESAR_HAMON_HUMU" then
+        local h = stand_out_quests.bobby_humu_pos
+        local mob = d.findMobByName ~= nil and d.findMobByName({ "humu" }, h.X, h.Y, h.Z, 180) or nil
+        if mob ~= nil then
+            self.statusText = "Bobby: бой с Training Humu"
+            if d.fightMob ~= nil then d.fightMob(mob, now) end
+        else
+            self.statusText = "Bobby: летим к Training Humu"
+            if lx == nil or dist3(lx, ly, lz, h.X, h.Y, h.Z) > 25 then
+                if d.teleportTo ~= nil then d.teleportTo(h.X, h.Y + 3, h.Z) end
+            end
+        end
+        return
+    end
+
+    self.bobbyCarriedAt = 0
+    self.statusText = "Bobby: берём следующий квест"
+    self:_talkToNpc(now, "Bobby", "bobby_talk", lx, ly, lz)
+end
+
+function Runner:_stepUsagi(now, state, lx, ly, lz)
+    local d = self.deps
+    if state.activeQuest ~= "BUKAY_BANDIT_PROBLEM" then
+        self.statusText = "Usagi: берём Bandit Problem"
+        self:_talkToNpc(now, "Usagi", "usagi_accept", lx, ly, lz)
+        return
+    end
+
+    local objs = state.objectives or {}
+    local o = objs["Defeat Bandit"]
+    local cur, tot = o and o.cur or 0, o and o.total or 5
+    local mob = d.findMobByName ~= nil and d.findMobByName({ "bandit" }) or nil
+    if mob ~= nil then
+        self.statusText = string.format("Usagi: Bandit %d/%d", cur, tot)
+        if d.fightMob ~= nil then d.fightMob(mob, now) end
+        return
+    end
+
+    -- Обходим 5 точек спавна бандитов из Quests.Quests.BUKAY_BANDIT_PROBLEM.Trackers
+    local trackers = stand_out_quests.bandit_trackers
+    if self.banditIdx > #trackers then self.banditIdx = 1 end
+    local t = trackers[self.banditIdx]
+    self.statusText = string.format("Usagi: ищем бандита (%d/5)", self.banditIdx)
+    if d.teleportTo ~= nil then
+        d.teleportTo(t.X, t.Y + 3, t.Z)
+    end
+    self.banditIdx += 1
+end
+
+function Runner:update(now, cfg, lx, ly, lz)
+    self.wantsBounty = false
+    if now - self.lastStepAt < stand_out_quests.step_delay then
+        return
+    end
+    self.lastStepAt = now
+
+    local d = self.deps
+    local state = d.readState ~= nil and d.readState() or {}
+    state.completed = state.completed or stand_out_quests.parseCompletedSet(state.completedRaw)
+    state.cooldowns = state.cooldowns or stand_out_quests.parseCooldowns(state.cooldownsRaw)
+    state.objectives = state.objectives or stand_out_quests.parseObjectives(state.objectivesRaw, state.objectivesTotalRaw)
+    state.gardenWaiting = self.gardenWaiting
+    if state.angeloDoneToday == nil and self.angeloDoneDay == (state.todayDay or 0) then
+        state.angeloDoneToday = true
+    end
+
+    local active = state.activeQuest or ""
+    if self.lastActiveQuest ~= "" and active ~= self.lastActiveQuest then
+        -- Предыдущий квест завершился!
+        self.completed += 1
+        self.lennyParked = false
+        self.bobbyCarriedAt = 0
+        self.trailIdx = 1
+    end
+    self.lastActiveQuest = active
+
+    local target = stand_out_quests.selectTarget(cfg and cfg.quest or "All", state)
+    if target == nil then
+        self.statusText = "Все квесты на кд / выполнены"
+        return
+    end
+
+    if target == "Angelo" then
+        self:_stepAngelo(now, state, lx, ly, lz)
+    elseif target == "Lenny" then
+        self:_stepLenny(now, state, lx, ly, lz)
+    elseif target == "Lettuce" then
+        self:_stepLettuce(now, state, lx, ly, lz)
+    elseif target == "Garden" then
+        self:_stepGarden(now, state, lx, ly, lz)
+    elseif target == "MerylTestDrive" then
+        self:_stepMerylTestDrive(now, state, lx, ly, lz)
+    elseif target == "Bobby" then
+        self:_stepBobby(now, state, lx, ly, lz)
+    elseif target == "Usagi" then
+        self:_stepUsagi(now, state, lx, ly, lz)
+    end
+end
+
+return stand_out_quests
+end
+
+__modules["stand_out_story"] = function(require)
+-- Stand Out Auto Storyline: автоматическое прохождение туториала и всей сюжетной линии Part 9 (P9_01..P9_47).
+-- Данные всех 54+ шагов, NPC, QuestZones, QuestInteractables, DiamotchStoryNodes и DialogueInfo сняты через
+-- tools/standout_probe_quests2.lua и standout_probe_quests3.lua.
+-- Чистая логика поверх deps, проверяется tests/stand_out_story_test.lua.
+local stand_out_quests = require("./stand_out_quests")
+
+local stand_out_story = {}
+
+stand_out_story.step_delay = 0.28
+stand_out_story.talk_retry = 1.1
+
+-- Полная цепочка (туториал + Part 9 Story Chain)
+stand_out_story.chain = {
+    "DEFEAT AGENT",
+    "TUTORIAL_MEET_JODIO",
+    "TUTORIAL_FIND_ARROW",
+    "P9_01_MEET_MERYL",
+    "P9_01B_TAKE_HUBER",
+    "P9_02_LOCATE_ROHAN_HOUSE",
+    "P9_02B_LOCATE_HIDDEN_VAULT",
+    "P9_03_STEAL_FROM_ROHAN_VAULT",
+    "P9_04_ESCAPE_ROHAN_HOUSE",
+    "P9_04B_FIND_WAY_OUT",
+    "P9_05_FIGHT_JUNGLE_CATS",
+    "P9_06_ROB_DIAMOTCH",
+    "P9_07_TALK_DIAMOTCH_EMPLOYEE",
+    "P9_08_SIT_DIAMOTCH_BACK_ROOM",
+    "P9_09_DIAMOTCH_CAMERA_ACCUSATION",
+    "P9_10_DEFEAT_DIAMOTCH_GUARDS",
+    "P9_11_FIND_DIAMOTCH_WATCH",
+    "P9_12_DIAMOTCH_MISTAKEN",
+    "P9_13_RETURN_TO_JODIO",
+    "P9_14_OPEN_JODIO_FOOD_BAG",
+    "P9_15_CHARMING_MAN_BOSS",
+    "P9_16_RETURN_TO_IKO_IKO",
+    "P9_17_GIVE_MERYL_STOLEN_ITEMS",
+    "P9_22A_JODIO_GOOD_STUFF",
+    "P9_22C_DELIVER_JODIO_CROP",
+    "P9_18_GO_TO_LAND_REGISTRY",
+    "P9_19_TALK_LAND_REGISTRY_CLERK",
+    "P9_19A_DEFEAT_LAND_REGISTRY_GUARDS",
+    "P9_20_COPY_LAND_DEEDS",
+    "P9_21_EXIT_LAND_REGISTRY",
+    "P9_22_TALK_TO_JODIO_AFTER_DEEDS",
+    "P9_23_TALK_JODIO_HOSPITAL",
+    "P9_23A_PICK_UP_USAGI",
+    "P9_24_GO_TO_HOSPITAL",
+    "P9_26_USE_WHITE_TABLET",
+    "P9_27_FIND_MRI_ROOM",
+    "P9_28_SCAN_USAGI",
+    "P9_29_EXTRACT_BAGS_GROOVE",
+    "P9_30_GLORY_DAYS_AMBUSH",
+    "P9_31_SECURE_YOKOHAMA_DOCUMENTS",
+    "P9_32_RETURN_TO_IKO_IKO",
+    "P9_33A_DARBY_WAGER",
+    "P9_33_COMPLETE_BOUNTIES",
+    "P9_33B_COMPLETE_ELIMINATION",
+    "P9_34_REACH_LEVEL_25",
+    "P9_35_IKO_IKO_DEBT_BRIEFING",
+    "P9_36_BOARD_HOWLER_YACHT",
+    "P9_37_HOWLER_INTERROGATION",
+    "P9_38_DECODE_MERYL_WARNING",
+    "P9_39_SEARCH_MERYLS_OFFICE",
+    "P9_40_REACH_THE_HIDDEN_ROOM",
+    "P9_41_STOP_NINGBO",
+    "P9_42_ESCAPE_IKO_IKO",
+    "P9_43_RETURN_TO_THE_NEGOTIATION",
+    "P9_44_TRACK_WEST_END_GIRL",
+    "P9_45_DEFEAT_KEY_WEST",
+    "P9_46_SECURE_HOWLER_SIGNATURE",
+    "P9_47_ESCAPE_THE_MEGAYACHT",
+}
+
+local CHAIN_INDEX = {}
+for i, id in stand_out_story.chain do
+    CHAIN_INDEX[id] = i
+end
+
+-- Описания каждого шага сюжетки: kind, npc, zone, interactable, mobs, pos (fallback)
+stand_out_story.steps = {
+    ["DEFEAT AGENT"] = { kind = "combat", zone = "TutorialCop", mobs = { "agent", "cop", "police" }, pos = { X = -332.8, Y = 26.7, Z = 2242.0 }, label = "Бой с копом" },
+    ["TUTORIAL_MEET_JODIO"] = { kind = "dialogue", npc = "TutorialJodio", pos = { X = -377.7, Y = 19.6, Z = 2227.2 }, label = "Поговорить с Jodio" },
+    ["TUTORIAL_FIND_ARROW"] = { kind = "interact", interactable = "TutorialArrowSand", pos = { X = -319.9, Y = 20.1, Z = 2273.9 }, label = "Найти стрелу в песке" },
+
+    ["P9_01_MEET_MERYL"] = { kind = "dialogue", npc = "Meryl Mei Qi", pos = { X = -1312.4, Y = 20.0, Z = 840.0 }, label = "01: Meryl Mei Qi" },
+    ["P9_01B_TAKE_HUBER"] = { kind = "huber", pos = { X = 128.3, Y = 19.0, Z = 1500.0 }, label = "01B: Поездка HUBER" },
+    ["P9_02_LOCATE_ROHAN_HOUSE"] = { kind = "reach", pos = { X = -212.4, Y = 23.0, Z = 1968.4 }, label = "02: Вилла Рохана" },
+    ["P9_02B_LOCATE_HIDDEN_VAULT"] = { kind = "reach", pos = { X = 2243.5, Y = 34.3, Z = 1489.1 }, label = "02B: Найти сейф" },
+    ["P9_03_STEAL_FROM_ROHAN_VAULT"] = { kind = "interact", interactable = "Vault", pos = { X = 2181.7, Y = 27.5, Z = 1502.8 }, label = "03: Открыть сейф" },
+    ["P9_04_ESCAPE_ROHAN_HOUSE"] = { kind = "reach", pos = { X = 15.0, Y = 23.0, Z = 1968.4 }, label = "04: Побег с виллы" },
+    ["P9_04B_FIND_WAY_OUT"] = { kind = "reach", pos = { X = -463.4, Y = 21.1, Z = 1844.4 }, label = "04B: Выйти с территории" },
+    ["P9_05_FIGHT_JUNGLE_CATS"] = { kind = "combat", mobs = { "wild cat", "cat size", "cat" }, pos = { X = -463.4, Y = 21.1, Z = 1844.4 }, label = "05: Wild Cat Size" },
+
+    ["P9_06_ROB_DIAMOTCH"] = { kind = "dialogue", npc = "Jodio", promptName = "DiamotchStoryPrompt", pos = { X = -1146.9, Y = 19.6, Z = 1126.9 }, label = "06: Jodio (Diamotch)" },
+    ["P9_07_TALK_DIAMOTCH_EMPLOYEE"] = { kind = "dialogue", npc = "Diamotch Clerk", promptName = "DiamotchStoryPrompt", pos = { X = -869.8, Y = 20.1, Z = 866.8 }, label = "07: Diamotch Clerk" },
+    ["P9_08_SIT_DIAMOTCH_BACK_ROOM"] = { kind = "interact", interactable = "DiamotchCouchSeat1", pos = { X = -821.9, Y = 19.1, Z = 782.1 }, label = "08: Сесть в Diamotch" },
+    ["P9_09_DIAMOTCH_CAMERA_ACCUSATION"] = { kind = "dialogue", npc = "Diamotch Guard", pos = { X = -841.0, Y = 20.8, Z = 789.5 }, label = "09: Охранник Diamotch" },
+    ["P9_10_DEFEAT_DIAMOTCH_GUARDS"] = { kind = "combat", mobs = { "diamotch guard", "guard", "security" }, pos = { X = -841.0, Y = 20.8, Z = 795.0 }, label = "10: Бой с охраной" },
+    ["P9_11_FIND_DIAMOTCH_WATCH"] = { kind = "interact", interactable = "DiamotchFloorWatchVisual", pos = { X = -873.4, Y = 17.1, Z = 809.2 }, label = "11: Подобрать часы" },
+    ["P9_12_DIAMOTCH_MISTAKEN"] = { kind = "dialogue", npc = "Diamotch Clerk", promptName = "DiamotchStoryPrompt", pos = { X = -869.8, Y = 20.1, Z = 866.8 }, label = "12: Извинение клерка" },
+    ["P9_13_RETURN_TO_JODIO"] = { kind = "dialogue", npc = "Jodio", promptName = "DiamotchStoryPrompt", pos = { X = -1146.9, Y = 19.6, Z = 1126.9 }, label = "13: Вернуться к Jodio" },
+    ["P9_14_OPEN_JODIO_FOOD_BAG"] = { kind = "interact", interactable = "JodioFoodBagVisual", pos = { X = -1125.3, Y = 19.9, Z = 1132.4 }, label = "14: Пакет с едой" },
+    ["P9_15_CHARMING_MAN_BOSS"] = { kind = "combat", mobs = { "charming man", "charming" }, pos = { X = -1143.5, Y = 19.5, Z = 1136.7 }, label = "15: Босс Charming Man" },
+    ["P9_16_RETURN_TO_IKO_IKO"] = { kind = "reach", zone = "IkoIko", pos = { X = -1312.5, Y = 19.8, Z = 873.6 }, label = "16: Вернуться в IKO IKO" },
+    ["P9_17_GIVE_MERYL_STOLEN_ITEMS"] = { kind = "dialogue", npc = "Meryl Mei Qi", pos = { X = -1312.4, Y = 20.0, Z = 840.0 }, label = "17: Отдать вещи Meryl" },
+
+    ["P9_22A_JODIO_GOOD_STUFF"] = { kind = "garden", pos = { X = -1759.7, Y = 30.3, Z = 805.6 }, label = "22A: Вырастить урожай Jodio" },
+    ["P9_22B_ANSWER_JODIO_TEXT"] = { kind = "dialogue", npc = "Jodio", pos = { X = -1146.9, Y = 19.6, Z = 1126.9 }, label = "22B: Ответить Jodio" },
+    ["P9_22C_DELIVER_JODIO_CROP"] = { kind = "dialogue", npc = "Jodio", pos = { X = -1146.9, Y = 19.6, Z = 1126.9 }, label = "22C: Сдать урожай Jodio" },
+
+    ["P9_18_GO_TO_LAND_REGISTRY"] = { kind = "reach", zone = "LandRegistry", pos = { X = -809.1, Y = 22.1, Z = 1164.2 }, label = "18: Land Registry" },
+    ["P9_19_TALK_LAND_REGISTRY_CLERK"] = { kind = "dialogue", npc = "Land Registry Clerk", promptName = "LandRegistryStoryPrompt", pos = { X = -831.8, Y = 20.2, Z = 1171.6 }, label = "19: Registry Clerk" },
+    ["P9_19A_DEFEAT_LAND_REGISTRY_GUARDS"] = { kind = "combat", mobs = { "land registry guard", "guard", "security" }, pos = { X = -876.0, Y = 21.9, Z = 1108.1 }, label = "19A: Охрана Registry" },
+    ["P9_20_COPY_LAND_DEEDS"] = { kind = "interact", interactable = "LandDeedsPrompt", pos = { X = -898.5, Y = 21.9, Z = 1127.6 }, label = "20: Копировать Land Deeds" },
+    ["P9_21_EXIT_LAND_REGISTRY"] = { kind = "reach", zone = "LandRegistryExit", pos = { X = -796.9, Y = 22.1, Z = 1176.0 }, label = "21: Выйти из Registry" },
+    ["P9_22_TALK_TO_JODIO_AFTER_DEEDS"] = { kind = "dialogue", npc = "Jodio", promptName = "LandRegistryStoryPrompt", pos = { X = -1146.9, Y = 19.6, Z = 1126.9 }, label = "22: Отчёт Jodio" },
+
+    ["P9_23_TALK_JODIO_HOSPITAL"] = { kind = "dialogue", npc = "Jodio", promptName = "HospitalStoryPrompt", pos = { X = -1146.9, Y = 19.6, Z = 1126.9 }, label = "23: План больницы" },
+    ["P9_23A_PICK_UP_USAGI"] = { kind = "interact", npc = "Usagi", pos = { X = -1146.9, Y = 19.7, Z = 1117.6 }, label = "23A: Поднять Usagi" },
+    ["P9_24_GO_TO_HOSPITAL"] = { kind = "reach", zone = "Hospital", pos = { X = -1374.9, Y = 23.5, Z = 1798.6 }, label = "24: В больницу" },
+    ["P9_26_USE_WHITE_TABLET"] = { kind = "interact", interactable = "WhiteTablet", pos = { X = -1405.8, Y = 20.8, Z = 1914.2 }, label = "26: Планшет White" },
+    ["P9_27_FIND_MRI_ROOM"] = { kind = "reach", zone = "HospitalMRI", pos = { X = -1510.4, Y = 23.3, Z = 1896.2 }, label = "27: Комната МРТ" },
+    ["P9_28_SCAN_USAGI"] = { kind = "interact", interactable = "HospitalMRIConsole", pos = { X = -1515.7, Y = 22.9, Z = 1886.9 }, label = "28: МРТ скан Usagi" },
+    ["P9_29_EXTRACT_BAGS_GROOVE"] = { kind = "minigame", interactable = "MRIUsagi", pos = { X = -1510.1, Y = 20.9, Z = 1893.4 }, label = "29: Bags' Groove (мини-игра)" },
+    ["P9_30_GLORY_DAYS_AMBUSH"] = { kind = "combat", mobs = { "bobby jean", "bobby" }, pos = { X = -1392.5, Y = 20.8, Z = 1794.8 }, label = "30: Босс Bobby Jean" },
+    ["P9_31_SECURE_YOKOHAMA_DOCUMENTS"] = { kind = "interact", interactable = "Documents", pos = { X = -1432.5, Y = 19.3, Z = 1860.5 }, label = "31: Документы Yokohama" },
+    ["P9_32_RETURN_TO_IKO_IKO"] = { kind = "dialogue", npc = "Meryl Mei Qi", zone = "IkoIko", pos = { X = -1312.4, Y = 20.0, Z = 840.0 }, label = "32: Показать доки Meryl" },
+
+    ["P9_33A_DARBY_WAGER"] = { kind = "darby", npc = "Darby", pos = { X = -1026.1, Y = 19.6, Z = 2256.7 }, label = "33A: D'Arby Go Fish" },
+    ["P9_33_COMPLETE_BOUNTIES"] = { kind = "bounty", pos = { X = -220.6, Y = 21.1, Z = 1688.3 }, label = "33: 5 Side Activities" },
+    ["P9_33B_COMPLETE_ELIMINATION"] = { kind = "elimination", label = "33B: 1 Elimination (Phone)" },
+    ["P9_34_REACH_LEVEL_25"] = { kind = "level", targetLevel = 25, label = "34: Прокачка до Lv 25" },
+
+    ["P9_35_IKO_IKO_DEBT_BRIEFING"] = { kind = "dialogue", npc = "Meryl Mei Qi", pos = { X = -1312.4, Y = 20.0, Z = 840.0 }, label = "35: Брифинг долга" },
+    ["P9_36_BOARD_HOWLER_YACHT"] = { kind = "howler_yacht", npc = "Jodio", pos = { X = -1133.1, Y = 20.4, Z = 2567.1 }, label = "36: Посадка на яхту" },
+    ["P9_37_HOWLER_INTERROGATION"] = { kind = "dialogue", npc = "Howler", pos = { X = -2586.6, Y = 13.2, Z = 3351.0 }, label = "37: Допрос Howler" },
+    ["P9_38_DECODE_MERYL_WARNING"] = { kind = "dialogue", npc = "Jodio", pos = { X = -2586.6, Y = 13.2, Z = 3351.0 }, label = "38: Расшифровка Meryl" },
+    ["P9_39_SEARCH_MERYLS_OFFICE"] = { kind = "interact", npc = "Usagi", pos = { X = -1312.4, Y = 20.0, Z = 840.0 }, label = "39: Обыск офиса Meryl" },
+    ["P9_40_REACH_THE_HIDDEN_ROOM"] = { kind = "dialogue", npc = "Meryl Mei Qi", zone = "IkoIko", pos = { X = -1312.4, Y = 20.0, Z = 840.0 }, label = "40: Тайная комната" },
+    ["P9_41_STOP_NINGBO"] = { kind = "combat", npc = "Paco", mobs = { "ningbo", "laem", "chabang" }, pos = { X = -1312.4, Y = 20.0, Z = 840.0 }, label = "41: Босс Ningbo" },
+    ["P9_42_ESCAPE_IKO_IKO"] = { kind = "dialogue", npc = "Meryl Mei Qi", pos = { X = -1312.4, Y = 20.0, Z = 840.0 }, label = "42: Обратно на яхту" },
+    ["P9_43_RETURN_TO_THE_NEGOTIATION"] = { kind = "dialogue", npc = "Howler", pos = { X = -2799.2, Y = 45.2, Z = 3641.0 }, label = "43: Переговоры Howler" },
+    ["P9_44_TRACK_WEST_END_GIRL"] = { kind = "reach", pos = { X = -2774.8, Y = 112.2, Z = 3621.7 }, label = "44: Найти Key West" },
+    ["P9_45_DEFEAT_KEY_WEST"] = { kind = "combat", mobs = { "key west", "west" }, pos = { X = -2829.8, Y = 112.0, Z = 3669.8 }, label = "45: Босс Key West" },
+    ["P9_46_SECURE_HOWLER_SIGNATURE"] = { kind = "reach", pos = { X = -2817.8, Y = 112.0, Z = 3649.1 }, label = "46: Верхняя палуба" },
+    ["P9_47_ESCAPE_THE_MEGAYACHT"] = { kind = "interact", pos = { X = -2817.8, Y = 112.0, Z = 3649.1 }, label = "47: Побег с мегаяхты" },
+}
+
+-- Паттерны подтверждения сюжетного диалога (в порядке приоритета)
+local STORY_ACCEPT_PATTERNS = {
+    "continue the operation",
+    "begin the encounter",
+    "finish this draft",
+    "follow howler",
+    "open the staff records",
+    "hand over the diamond",
+    "show meryl the documents",
+    "the deeds were touched",
+    "get to the hospital",
+    "check the bag",
+    "we're leaving",
+    "show me.",
+    "i'll test it",
+    "i'll wait",
+    "here, take what i've got",
+    "i'm in.",
+    "i'll take a look",
+    "i'll keep that in mind",
+    "what happened here",
+    "you rest here",
+    "continue.",
+    "okay.",
+    "got it.",
+    "understood.",
+    "on it.",
+    "i'll head to the registry",
+    "i'll take care of it",
+    "i'll meet the crew",
+    "we'll finish the job",
+    "i'll finish the filing",
+    "i'll secure it",
+    "i'll stay close",
+}
+
+-- Паттерны, которых сюжетный авто-диалог должен ИЗБЕГАТЬ (отказы и побочные ветки Meryl!)
+local STORY_AVOID_PATTERNS = {
+    "not now",
+    "not yet",
+    "maybe later",
+    "i'll come back",
+    "never mind",
+    "test drive",
+    "practice driving",
+    "fashion",
+    "accessory",
+    "lesson",
+    "bye",
+    "leave.",
+    "still working on it",
+    "how do i grow",
+    "where do i start",
+    "i need a minute",
+}
+
+local function low(s)
+    return string.lower(tostring(s or ""))
+end
+
+local function hasSub(haystack, needle)
+    return string.find(haystack, needle, 1, true) ~= nil
+end
+
+local function dist3(ax, ay, az, bx, by, bz)
+    local dx, dy, dz = ax - bx, ay - by, az - bz
+    return math.sqrt(dx * dx + dy * dy + dz * dz)
+end
+
+function stand_out_story.isStoryQuest(questId)
+    return type(questId) == "string" and (CHAIN_INDEX[questId] ~= nil or stand_out_story.steps[questId] ~= nil)
+end
+
+-- Возвращает индекс текущего шага (1..#chain) или nil если вся сюжетка пройдена.
+function stand_out_story.nextQuest(activeQuest, completedSet)
+    if stand_out_story.isStoryQuest(activeQuest) then
+        return activeQuest, CHAIN_INDEX[activeQuest] or 0
+    end
+    completedSet = completedSet or {}
+    for i, id in stand_out_story.chain do
+        if not completedSet[id] then
+            return id, i
+        end
+    end
+    return nil, #stand_out_story.chain
+end
+
+-- Возвращает прогресс вида (doneCount, totalCount)
+function stand_out_story.progress(completedSet)
+    completedSet = completedSet or {}
+    local done = 0
+    local total = #stand_out_story.chain
+    for _, id in stand_out_story.chain do
+        if completedSet[id] then
+            done += 1
+        end
+    end
+    return done, total
+end
+
+-- Выбирает правильную сюжетную реплику в PlayerGui.Dialogue (избегая TestDrive/Fashion/отказов).
+function stand_out_story.pickDialogueOption(options)
+    if type(options) ~= "table" or #options == 0 then
+        return nil
+    end
+
+    local function isAvoided(textLow)
+        for _, bad in STORY_AVOID_PATTERNS do
+            if hasSub(textLow, bad) then
+                return true
+            end
+        end
+        return false
+    end
+
+    for _, pat in STORY_ACCEPT_PATTERNS do
+        for _, opt in options do
+            local t = low(opt.text or "")
+            if hasSub(t, pat) and not isAvoided(t) then
+                return opt
+            end
+        end
+    end
+
+    -- Fallback: первая не-отказная опция
+    for _, opt in options do
+        local t = low(opt.text or "")
+        if t ~= "" and not isAvoided(t) then
+            return opt
+        end
+    end
+    if #options == 1 then
+        return options[1]
+    end
+    return nil
+end
+
+-- === Storyline Runner ===
+local Runner = {}
+Runner.__index = Runner
+
+function stand_out_story.new(deps)
+    return setmetatable({
+        deps = deps or {},
+        statusText = "",
+        currentQuest = "",
+        progressText = "",
+        wantsBounty = false,
+        wantsDarby = false,
+        lastStepAt = -99,
+        lastTalkAt = -99,
+        wiggleSign = 1,
+        mapOpenedFor = "",
+        huberCalledAt = 0,
+    }, Runner)
+end
+
+function Runner:stop()
+    self.wantsBounty = false
+    self.wantsDarby = false
+    self.statusText = ""
+    if self.deps.stopCombat ~= nil then
+        self.deps.stopCombat()
+    end
+end
+
+function Runner:_handleDialogue(now)
+    local d = self.deps
+    local opts = d.readDialogue ~= nil and d.readDialogue() or nil
+    if opts ~= nil and #opts > 0 then
+        local chosen = stand_out_story.pickDialogueOption(opts)
+        if chosen ~= nil then
+            if d.clickDialogue ~= nil then
+                d.clickDialogue(chosen)
+            end
+            self.lastStepAt = now
+            return true
+        end
+    end
+    return false
+end
+
+function Runner:_resolvePos(step)
+    local d = self.deps
+    if step.zone ~= nil and d.findZone ~= nil then
+        local zx, zy, zz = d.findZone(step.zone)
+        if zx ~= nil then return zx, zy, zz, nil end
+    end
+    if step.interactable ~= nil and d.findInteractable ~= nil then
+        local ix, iy, iz, prompt = d.findInteractable(step.interactable)
+        if ix ~= nil then return ix, iy, iz, prompt end
+    end
+    if step.npc ~= nil and d.findNpc ~= nil then
+        local nx, ny, nz, prompt = d.findNpc(step.npc, step.promptName)
+        if nx ~= nil then return nx, ny, nz, prompt end
+    end
+    if step.pos ~= nil then
+        return step.pos.X, step.pos.Y, step.pos.Z, nil
+    end
+    return nil, nil, nil, nil
+end
+
+function Runner:update(now, lx, ly, lz)
+    self.wantsBounty = false
+    self.wantsDarby = false
+    if now - self.lastStepAt < stand_out_story.step_delay then
+        return
+    end
+    self.lastStepAt = now
+
+    local d = self.deps
+    local state = d.readState ~= nil and d.readState() or {}
+    local completed = state.completed or stand_out_quests.parseCompletedSet(state.completedRaw)
+    local objectives = state.objectives or stand_out_quests.parseObjectives(state.objectivesRaw, state.objectivesTotalRaw)
+    local doneCount, totalCount = stand_out_story.progress(completed)
+    self.progressText = string.format("%d/%d", doneCount, totalCount)
+
+    local qid = stand_out_story.nextQuest(state.activeQuest or "", completed)
+    if qid == nil then
+        self.currentQuest = ""
+        self.statusText = "Сюжетка Part 9 пройдена (" .. self.progressText .. ")"
+        return
+    end
+    self.currentQuest = qid
+
+    -- Всегда сначала прокликиваем открытый сюжетный диалог (ускоряет переходы и катсцены!)
+    if self:_handleDialogue(now) then
+        local st = stand_out_story.steps[qid]
+        self.statusText = (st and st.label or qid) .. " (диалог)"
+        return
+    end
+
+    local step = stand_out_story.steps[qid]
+    if step == nil then
+        self.statusText = "Неизвестный шаг: " .. qid
+        return
+    end
+    local label = step.label or qid
+
+    -- 1) Bounty / Level grind steps -> делегируем Auto Bounty!
+    if step.kind == "bounty" then
+        local mapObj = objectives["Open_SideQuestMap"]
+        if mapObj ~= nil and (mapObj.cur or 0) < (mapObj.total or 1) and self.mapOpenedFor ~= qid then
+            self.mapOpenedFor = qid
+            self.statusText = label .. " (Map > Quests)"
+            if d.openSideQuestMap ~= nil then
+                d.openSideQuestMap()
+            end
+            return
+        end
+        self.wantsBounty = true
+        local sa = objectives["Complete Side Activity"]
+        self.statusText = string.format("%s (%d/%d)", label, sa and sa.cur or 0, sa and sa.total or 5)
+        return
+    elseif step.kind == "level" then
+        local lv = state.level or 0
+        if lv < (step.targetLevel or 25) then
+            self.wantsBounty = true
+            self.statusText = string.format("%s (Lv %d/%d)", label, lv, step.targetLevel or 25)
+            return
+        end
+        self.statusText = label .. " (готово)"
+        return
+    elseif step.kind == "darby" then
+        self.wantsDarby = true
+        self.statusText = label
+        -- Подойдём к D'Arby и начнём диалог, если игра Go Fish ещё не открыта
+        local tx, ty, tz, prompt = self:_resolvePos(step)
+        if tx ~= nil and (lx == nil or dist3(lx, ly, lz, tx, ty, tz) > 12) then
+            if d.teleportTo ~= nil then d.teleportTo(tx, ty + 1.5, tz + 3) end
+        elseif prompt ~= nil and now - self.lastTalkAt >= stand_out_story.talk_retry then
+            self.lastTalkAt = now
+            if d.firePrompt ~= nil then d.firePrompt(prompt) end
+        end
+        return
+    elseif step.kind == "elimination" then
+        self.statusText = label .. " (ручной контракт)"
+        return
+    elseif step.kind == "huber" then
+        self.statusText = label
+        if now - self.huberCalledAt >= 4.0 then
+            self.huberCalledAt = now
+            if d.callHuber ~= nil then
+                d.callHuber("Rohan")
+            end
+        end
+        local tx, ty, tz = self:_resolvePos(step)
+        local nearPrompt, px, py, pz = nil, nil, nil, nil
+        if d.findNearestStoryPrompt ~= nil then
+            nearPrompt, px, py, pz = d.findNearestStoryPrompt(lx or 0, ly or 0, lz or 0, 120)
+        end
+        if nearPrompt ~= nil and px ~= nil then
+            if lx == nil or dist3(lx, ly, lz, px, py, pz) > 9 then
+                if d.teleportTo ~= nil then d.teleportTo(px, py + 2, pz + 2) end
+            elseif d.firePrompt ~= nil then
+                d.firePrompt(nearPrompt)
+            end
+        elseif tx ~= nil and (lx == nil or dist3(lx, ly, lz, tx, ty, tz) > 30) then
+            if d.teleportTo ~= nil then d.teleportTo(tx, ty + 2, tz) end
+        end
+        return
+    elseif step.kind == "garden" then
+        local prompt, px, py, pz = nil, nil, nil, nil
+        if d.findGardenPrompt ~= nil then
+            for _, act in { "harvest", "seed", "dirt", "place" } do
+                prompt, px, py, pz = d.findGardenPrompt(act)
+                if prompt ~= nil then
+                    self.statusText = label .. " (" .. act .. ")"
+                    break
+                end
+            end
+        end
+        if prompt ~= nil and px ~= nil then
+            if lx == nil or dist3(lx, ly, lz, px, py, pz) > 8 then
+                if d.teleportTo ~= nil then d.teleportTo(px, py + 2, pz + 3) end
+            elseif d.firePrompt ~= nil then
+                d.firePrompt(prompt)
+            end
+        else
+            self.statusText = label .. " (ждём рост)"
+        end
+        return
+    elseif step.kind == "combat" then
+        local tx, ty, tz = self:_resolvePos(step)
+        local mob = d.findMobByName ~= nil and d.findMobByName(step.mobs, tx, ty, tz, 260) or nil
+        if mob ~= nil then
+            self.statusText = label .. ": " .. tostring(mob.name or "враг")
+            if d.fightMob ~= nil then
+                d.fightMob(mob, now)
+            end
+            return
+        end
+        -- Если бой ещё не начался, возможно нужен стартовый диалог (например Paco в P9_41)
+        if step.npc ~= nil and d.findNpc ~= nil then
+            local nx, ny, nz, prompt = d.findNpc(step.npc, step.promptName)
+            if nx ~= nil then
+                if lx == nil or dist3(lx, ly, lz, nx, ny, nz) > 9 then
+                    if d.teleportTo ~= nil then d.teleportTo(nx, ny + 1.5, nz + 3) end
+                elseif prompt ~= nil and now - self.lastTalkAt >= stand_out_story.talk_retry then
+                    self.lastTalkAt = now
+                    if d.firePrompt ~= nil then d.firePrompt(prompt) end
+                end
+                self.statusText = label .. " (старт)"
+                return
+            end
+        end
+        if tx ~= nil and (lx == nil or dist3(lx, ly, lz, tx, ty, tz) > 20) then
+            if d.teleportTo ~= nil then d.teleportTo(tx, ty + 2.5, tz) end
+        end
+        self.statusText = label .. " (ждём врага)"
+        return
+    elseif step.kind == "reach" then
+        local tx, ty, tz = self:_resolvePos(step)
+        self.statusText = label
+        if tx ~= nil then
+            -- Небольшое смещение (wiggle) триггерит Touched-зоны, если мы уже внутри
+            local ox = self.wiggleSign * 1.5
+            self.wiggleSign = -self.wiggleSign
+            if d.teleportTo ~= nil then
+                d.teleportTo(tx + ox, ty + 1.5, tz)
+            end
+        end
+        return
+    elseif step.kind == "interact" or step.kind == "minigame" or step.kind == "howler_yacht" then
+        local tx, ty, tz, prompt = self:_resolvePos(step)
+        if prompt == nil and tx ~= nil and d.findNearestStoryPrompt ~= nil then
+            local np, px, py, pz = d.findNearestStoryPrompt(tx, ty, tz, 60)
+            if np ~= nil then
+                prompt, tx, ty, tz = np, px, py, pz
+            end
+        end
+        self.statusText = label
+        if tx ~= nil and (lx == nil or dist3(lx, ly, lz, tx, ty, tz) > 8) then
+            if d.teleportTo ~= nil then
+                d.teleportTo(tx, ty + 1.5, tz + 2.5)
+            end
+            return
+        end
+        if prompt ~= nil and now - self.lastTalkAt >= stand_out_story.talk_retry then
+            self.lastTalkAt = now
+            if d.firePrompt ~= nil then
+                d.firePrompt(prompt)
+            end
+        elseif step.kind == "howler_yacht" then
+            -- Для P9_36 Howler_Crates можно ударить M2 (R) если рядом есть ящики
+            local cratesObj = objectives["Howler_Crates"]
+            if cratesObj ~= nil and (cratesObj.cur or 0) < (cratesObj.total or 5) and d.pressHeavy ~= nil then
+                d.pressHeavy()
+            end
+        end
+        return
+    end
+
+    -- По умолчанию: dialogue шаг (говорим с NPC, если нужно — сначала телепортируемся)
+    local tx, ty, tz, prompt = self:_resolvePos(step)
+    self.statusText = label
+    if tx ~= nil and (lx == nil or dist3(lx, ly, lz, tx, ty, tz) > 9) then
+        if d.teleportTo ~= nil then
+            d.teleportTo(tx, ty + 1.5, tz + 3)
+        end
+        return
+    end
+    if now - self.lastTalkAt >= stand_out_story.talk_retry then
+        self.lastTalkAt = now
+        if prompt ~= nil and d.firePrompt ~= nil then
+            d.firePrompt(prompt)
+        elseif step.npc ~= nil and d.interactNpc ~= nil then
+            d.interactNpc(step.npc)
+        end
+    end
+end
+
+return stand_out_story
 end
 
 __modules["status"] = function(require)
