@@ -17446,13 +17446,32 @@ function controls.mount(Library, env, Window)
         local okF, valF = pcall(function() return f[fallback] end)
         return okF and valF or nil
     end
-    local fontRegular = pickFont("BuilderSans", "Gotham")
-    local fontMedium = pickFont("BuilderSansMedium", "GothamMedium") or fontRegular
+    local fontRegular = pickFont("BuilderSansMedium", "GothamMedium") or pickFont("BuilderSans", "Gotham")
+    local fontMedium = pickFont("BuilderSansBold", "GothamBold") or fontRegular
+    local semiBoldFace, boldFace = nil, nil
+    if env.Font ~= nil and Enum ~= nil and Enum.FontWeight ~= nil then
+        local okS, fS = pcall(function()
+            return env.Font.new("rbxasset://fonts/families/BuilderSans.json", Enum.FontWeight.SemiBold)
+        end)
+        if okS and fS ~= nil then semiBoldFace = fS end
+        local okB, fB = pcall(function()
+            return env.Font.new("rbxasset://fonts/families/BuilderSans.json", Enum.FontWeight.Bold)
+        end)
+        if okB and fB ~= nil then boldFace = fB end
+    end
     local function typography(object, size, medium)
         if object.Name == "__IconFont" then return end
         object.TextScaled = false
         object.TextSize = size
-        object.Font = if medium then fontMedium else fontRegular
+        local face = if medium then (boldFace or semiBoldFace) else semiBoldFace
+        if face ~= nil then
+            pcall(function() object.FontFace = face end)
+            if medium then
+                pcall(function() object:SetAttribute("CalciteBoldHeader", true) end)
+            end
+        else
+            object.Font = if medium then fontMedium else fontRegular
+        end
         if medium and Library.Registry[object] then Library.Registry[object].FontFace = nil end
     end
     local function height(object, value)
@@ -17836,6 +17855,20 @@ local function pickFont(fontEnum, preferred, fallback)
     return okF and valF or nil
 end
 
+local function makeBuilderFace(env, weightName)
+    local FontCtor = env and env.Font
+    local EnumObj = env and env.Enum
+    if FontCtor ~= nil and EnumObj ~= nil and EnumObj.FontWeight ~= nil then
+        local ok, face = pcall(function()
+            return FontCtor.new("rbxasset://fonts/families/BuilderSans.json", EnumObj.FontWeight[weightName])
+        end)
+        if ok and face ~= nil then
+            return face
+        end
+    end
+    return nil
+end
+
 function style.configure(deps)
     local Library, env = deps.Library, deps.env
     local info = {
@@ -17889,7 +17922,19 @@ function style.mount(deps, Window)
 
     local UDim2, UDim, Enum = env.UDim2, env.UDim, env.Enum
     local Vector2, Color3 = env.Vector2, deps.Color3
-    local uiFont = pickFont(Enum and Enum.Font, "BuilderSans", "Gotham")
+    local uiFont = pickFont(Enum and Enum.Font, "BuilderSansMedium", "GothamMedium") or pickFont(Enum and Enum.Font, "BuilderSans", "Gotham")
+    local semiBoldFace = makeBuilderFace(env, "SemiBold")
+    local function applySemiBold(obj)
+        if obj == nil or obj.Name == "__IconFont" then return end
+        if semiBoldFace ~= nil then
+            pcall(function() obj.FontFace = semiBoldFace end)
+        elseif uiFont ~= nil then
+            pcall(function() obj.Font = uiFont end)
+        end
+    end
+    if semiBoldFace ~= nil and Library.Scheme then
+        Library.Scheme.Font = semiBoldFace
+    end
     local function new(class, props, parent, colors)
         local object = env.Instance.new(class)
         for key, value in props do object[key] = value end
@@ -17904,11 +17949,13 @@ function style.mount(deps, Window)
         return new("UICorner", { CornerRadius = UDim.new(0, radius) }, parent)
     end
     local function text(parent, value, x, y, width, size, muted)
-        return new("TextLabel", {
+        local lbl = new("TextLabel", {
             BackgroundTransparency = 1, Position = UDim2.fromOffset(x, y), Size = UDim2.new(1, -width, 0, size + 6),
             Font = uiFont, Text = value, TextSize = size, TextTransparency = muted and 0.35 or 0,
             TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 6,
         }, parent, { TextColor3 = "FontColor" })
+        applySemiBold(lbl)
+        return lbl
     end
 
     local main = Window.MainFrame
@@ -17960,7 +18007,10 @@ function style.mount(deps, Window)
     text(profile, "Free", 56, 27, 64, 14, true)
 
     for _, entry in Library.TabButtons do
-        if entry.Label then entry.Label.TextSize = 18 end
+        if entry.Label then
+            entry.Label.TextSize = 18
+            applySemiBold(entry.Label)
+        end
     end
     for _, tab in Library.Tabs do
         if tab.Sides then
@@ -18029,6 +18079,7 @@ function style.mount(deps, Window)
             AnchorPoint = Vector2.new(1, 1), Position = UDim2.fromScale(1, 1), Size = UDim2.fromOffset(80, 30),
             ClearTextOnFocus = false, Font = uiFont, TextSize = 16, Text = "", ZIndex = bar.ZIndex + 3,
         }, holder, { BackgroundColor3 = "MainColor", TextColor3 = "FontColor" })
+        applySemiBold(input)
         round(input, 5)
         new("UIStroke", { Thickness = 1 }, input, { Color = "OutlineColor" })
         local function display()
@@ -18049,6 +18100,17 @@ function style.mount(deps, Window)
         display()
     end
     controls.mount(Library,env,Window)
+    -- Проходим по всем текстовым элементам окна (включая заголовок, футер, табы, уведомления),
+    -- чтобы везде стоял ровный BuilderSans SemiBold без пропущенных Regular-лейблов (не трогая иконки __IconFont)
+    if semiBoldFace ~= nil then
+        for _, obj in main:GetDescendants() do
+            if (obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox")) and obj.Name ~= "__IconFont" then
+                if not obj:GetAttribute("CalciteBoldHeader") then
+                    pcall(function() obj.FontFace = semiBoldFace end)
+                end
+            end
+        end
+    end
     self:setAccent(preferences.accent)
     self:setScale(preferences.scale)
     local camera = env.workspace and env.workspace.CurrentCamera
