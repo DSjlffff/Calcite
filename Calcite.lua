@@ -16526,6 +16526,7 @@ function bridge.create(ctx)
             local stats = data and data:FindFirstChild("Stats")
             local st = {
                 activeQuest = readStrVal(stats, "ActiveQuest"),
+                trackerTitle = "",
                 inactiveRaw = readStrVal(stats, "InactiveQuests"),
                 completedRaw = readStrVal(stats, "CompletedQuests"),
                 cooldownsRaw = readStrVal(stats, "CompletedQuestsTime"),
@@ -16541,6 +16542,17 @@ function bridge.create(ctx)
                 bossAlive = false,
                 gardenHasReadyPot = false,
             }
+
+            -- Читаем заголовок живого QuestTracker UI (например "Catalytic Converter")
+            pcall(function()
+                local pg = localPlayer and localPlayer:FindFirstChildOfClass("PlayerGui")
+                local qg = pg and pg:FindFirstChild("Quests")
+                local qt = qg and qg:FindFirstChild("QuestTracker")
+                local titleLbl = qt and qt.Visible == true and qt:FindFirstChild("Title")
+                if titleLbl ~= nil and type(titleLbl.Text) == "string" then
+                    st.trackerTitle = titleLbl.Text
+                end
+            end)
 
             -- Load ReplicatedStorage.Modules.Quests once for Angelo job helpers
             if not sq.modTried then
@@ -16564,8 +16576,8 @@ function bridge.create(ctx)
                 end
                 if type(qm.AngeloJobTakenToday) == "function" then
                     local okT, taken = pcall(qm.AngeloJobTakenToday, localPlayer)
-                    if okT and type(taken) == "boolean" then
-                        st.angeloDoneToday = taken
+                    if okT and taken == true then
+                        st.angeloDoneToday = true
                     end
                 end
             end
@@ -17390,13 +17402,74 @@ function stand_out_quests.pickDialogueOption(options, context)
     return nil, nil
 end
 
+-- Карта заголовков QuestTracker.Title -> Quest ID (фолбэк, если ActiveQuest содержит несколько квестов или формат с запятой)
+local TRACKER_TITLE_TO_ID = {
+    ["catalytic converter"] = "LENNY_COP_CAR",
+    ["yo-yo, what the hell, ma?!"] = "LETTUCE_TRADER",
+    ["big chop's daily garden"] = "BIG_CHOP_DAILY_GARDEN",
+    ["crash course"] = "MERYL_TEST_DRIVE",
+    ["bandit problem"] = "BUKAY_BANDIT_PROBLEM",
+    ["bobby: bubble practice"] = "CAESAR_HAMON_BUBBLES",
+    ["bobby: bounty work"] = "CAESAR_HAMON_VAMPIRE",
+    ["bobby: into the water"] = "CAESAR_HAMON_WATER",
+    ["bobby: final trial"] = "CAESAR_HAMON_HUMU",
+    ["angelo's errand"] = "ANGELO_JOB_ERRAND",
+    ["spare parts"] = "ANGELO_JOB_PARTS",
+    ["two jobs"] = "ANGELO_JOB_TWO_JOBS",
+    ["payback"] = "ANGELO_JOB_PAYBACK",
+    ["metal work"] = "ANGELO_JOB_STEEL",
+    ["busy week"] = "ANGELO_JOB_BUSY_WEEK",
+    ["boss hunt"] = "ANGELO_JOB_BOSS_HUNT",
+    ["big business"] = "ANGELO_JOB_BIG_BUSINESS",
+    ["heavy lifting"] = "ANGELO_JOB_HEAVY_LIFTING",
+}
+
+function stand_out_quests.questIdFromTitle(title)
+    if type(title) ~= "string" or title == "" then
+        return nil
+    end
+    return TRACKER_TITLE_TO_ID[string.lower(trim(title))]
+end
+
+-- Проверяет по DailyQuestState, выполнен ли сегодня ХОТЬ ОДИН квест ANGELO_JOB_*
+function stand_out_quests.isAnyAngeloDoneToday(dailyJson, todayDay)
+    if type(dailyJson) ~= "string" or dailyJson == "" then
+        return false
+    end
+    for qid in ANGELO_JOBS do
+        if stand_out_quests.isDailyDoneToday(dailyJson, qid, todayDay) then
+            return true
+        end
+    end
+    return false
+end
+
 local function hasQuest(state, questId)
-    return state.activeQuest == questId
+    if state.activeQuest == questId then
+        return true
+    end
+    if state.activeSet ~= nil and state.activeSet[questId] == true then
+        return true
+    end
+    if state.trackerQuestId == questId then
+        return true
+    end
+    return false
 end
 
 local function findHeldAngelo(state)
     if stand_out_quests.isAngeloJob(state.activeQuest) then
         return state.activeQuest
+    end
+    if state.activeSet ~= nil then
+        for id in state.activeSet do
+            if stand_out_quests.isAngeloJob(id) then
+                return id
+            end
+        end
+    end
+    if stand_out_quests.isAngeloJob(state.trackerQuestId) then
+        return state.trackerQuestId
     end
     return nil
 end
@@ -17411,7 +17484,7 @@ function stand_out_quests.selectTarget(choice, state)
     local todayDay = state.todayDay or 0
 
     local function angeloReady()
-        if state.angeloDoneToday then
+        if state.angeloDoneToday or stand_out_quests.isAnyAngeloDoneToday(state.dailyJson, todayDay) then
             return false, nil
         end
         local jobId = state.angeloJobId
@@ -18173,11 +18246,14 @@ function Runner:update(now, cfg, lx, ly, lz)
     local d = self.deps
     local state = d.readState ~= nil and d.readState() or {}
     state.completed = state.completed or stand_out_quests.parseCompletedSet(state.completedRaw)
+    state.activeSet = state.activeSet or stand_out_quests.parseCompletedSet(state.activeQuest)
+    state.trackerQuestId = state.trackerQuestId or stand_out_quests.questIdFromTitle(state.trackerTitle)
     state.inactive = state.inactive or stand_out_quests.parseCompletedSet(state.inactiveRaw)
     state.cooldowns = state.cooldowns or stand_out_quests.parseCooldowns(state.cooldownsRaw)
     state.objectives = state.objectives or stand_out_quests.parseObjectives(state.objectivesRaw, state.objectivesTotalRaw)
     state.gardenWaiting = self.gardenWaiting
-    if state.angeloDoneToday == nil and self.angeloDoneDay == (state.todayDay or 0) then
+    if self.angeloDoneDay == (state.todayDay or 0)
+        or stand_out_quests.isAnyAngeloDoneToday(state.dailyJson, state.todayDay) then
         state.angeloDoneToday = true
     end
 
