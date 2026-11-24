@@ -7594,23 +7594,24 @@ function main.start(env)
                 local uiSnap = stand_out_bounty.readUi(localPlayer:FindFirstChildOfClass("PlayerGui"))
                 sb.mobs = stand_out_bounty.scanMyMobs(workspace, localPlayer.UserId, pNames, localPlayer.Name, tx, ty, tz, uiSnap.trackerObjective)
                 local allowNpc = stand_out_bounty.isNpcObjective(uiSnap.trackerObjective)
-                -- Быстрый скан нашей папки BountyWorld.Party_<UserId> (0.25 с) для мгновенного перехода Catch1->Catch2->Stash->Reward;
+                local objChanged = sb.lastObjective ~= uiSnap.trackerObjective
+                sb.lastObjective = uiSnap.trackerObjective
+                -- Быстрый скан нашей папки BountyWorld.Party_<UserId> (0.25 с) для мгновенного перехода Catch1->Catch2->Box3->Assembly;
                 -- тяжёлый фолбэк по Workspace.Game — не чаще раза в 1.0 с
                 local cachedOk = false
-                if sb.prompt ~= nil and sb.prompt.Parent ~= nil then
+                if not objChanged and sb.prompt ~= nil and sb.prompt.Parent ~= nil then
                     local isCd = false
                     pcall(function() isCd = sb.prompt:IsA("ClickDetector") end)
-                    if isCd then
-                        cachedOk = true
-                    elseif sb.prompt.Enabled == true then
+                    -- ClickDetector (NPC вроде Dragona) не кэшируем надолго, чтобы включившийся промпт в Party_<UserId> сразу побеждал
+                    if not isCd and sb.prompt.Enabled == true then
                         cachedOk = true
                         local okA, avail = pcall(function() return sb.prompt:GetAttribute("StoryPromptAvailable") end)
                         if okA and avail == false then cachedOk = false end
                     end
-                    -- Если трекер переехал далеко (например, с Meryl на Dragona) и это статичный промпт — сбрасываем кэш
+                    -- Если трекер переехал даже на 3 студа (напр. Box2 -> Box3 на том же столе, ~4.3 ст!) — сразу пересканируем
                     if cachedOk and tx ~= nil and sb.px ~= nil and not stand_out_bounty.isMovingPrompt(sb.prompt) then
                         local ddx, ddy, ddz = sb.px - tx, sb.py - ty, sb.pz - tz
-                        if ddx * ddx + ddy * ddy + ddz * ddz > 400 then
+                        if ddx * ddx + ddy * ddy + ddz * ddz > 9 then
                             cachedOk = false
                         end
                     end
@@ -11929,7 +11930,12 @@ function stand_out_bounty.isNpcObjective(objectiveText)
     end
     local low = string.lower(objectiveText)
     if string.find(low, "claim your reward", 1, true) ~= nil
-        or string.find(low, "return to petyr", 1, true) ~= nil then
+        or string.find(low, "return to petyr", 1, true) ~= nil
+        or string.find(low, "inspect ", 1, true) ~= nil
+        or string.find(low, "reassemble", 1, true) ~= nil
+        or string.find(low, "rebuild", 1, true) ~= nil
+        or string.find(low, "recover ", 1, true) ~= nil
+        or string.find(low, "workbench", 1, true) ~= nil then
         return false
     end
     return string.find(low, "ask ", 1, true) ~= nil
@@ -12775,11 +12781,14 @@ function stand_out_bounty.findMyPrompt(workspace, userId, tx, ty, tz, allowWorld
         return false
     end
 
-    -- 1) Приоритет: наша папка BountyWorld.Party_<userId> (быстрый обход)
+    -- 1) Приоритет: наша папка BountyWorld.Party_<userId> (быстрый обход; если включено несколько промптов —
+    -- берём БЛИЖАЙШИЙ к VisibleBountyTrackerPosition, чтобы не путать Container1/Container2/Container3!)
     local bw = gameFolder:FindFirstChild("BountyWorld")
     local partyFolder = bw and bw:FindFirstChild("Party_" .. tostring(userId))
     local partyOwnsPrompts = false
     if partyFolder ~= nil and partyFolder.GetDescendants ~= nil then
+        local bestP, bestX, bestY, bestZ = nil, nil, nil, nil
+        local bestDist2 = math.huge
         for _, d in partyFolder:GetDescendants() do
             if safeIsA(d, "ProximityPrompt") or safeIsA(d, "ClickDetector") then
                 partyOwnsPrompts = true
@@ -12787,9 +12796,21 @@ function stand_out_bounty.findMyPrompt(workspace, userId, tx, ty, tz, allowWorld
             if promptUsable(d) then
                 local x, y, z = stand_out_bounty.promptPosition(d)
                 if x ~= nil then
-                    return d, x, y, z
+                    if tx ~= nil and ty ~= nil and tz ~= nil then
+                        local dx, dy, dz = x - tx, y - ty, z - tz
+                        local d2 = dx * dx + dy * dy + dz * dz
+                        if d2 < bestDist2 then
+                            bestDist2 = d2
+                            bestP, bestX, bestY, bestZ = d, x, y, z
+                        end
+                    else
+                        return d, x, y, z
+                    end
                 end
             end
+        end
+        if bestP ~= nil then
+            return bestP, bestX, bestY, bestZ
         end
     end
 
