@@ -1461,6 +1461,25 @@ local limbs = {
 local Esp = {}
 Esp.__index = Esp
 
+-- Pre-cached formatted distance ("0 st".."2000 st") and health percent ("0%".."100%") strings: zero string.format per frame
+local distLabels = {}
+local pctLabels = {}
+for p = 0, 100 do
+    pctLabels[p] = tostring(p) .. "%"
+end
+local function formatDist(dist)
+    local n = math.floor(dist + 0.5)
+    if n >= 0 and n <= 2000 then
+        local cached = distLabels[n]
+        if cached == nil then
+            cached = tostring(n) .. " st"
+            distLabels[n] = cached
+        end
+        return cached
+    end
+    return string.format("%.0f st", dist)
+end
+
 function esp_players.new()
     -- by the key of the record, so that a track lives through a respawn
     return setmetatable({ tracks = {} }, Esp)
@@ -1598,7 +1617,8 @@ function Esp:draw(targets, s, screenW, screenH, project, d, now)
 
             if percentShown > 0 then
                 -- left of the bar, level with the top of its filled part, kept within the height of the box
-                local label = health_fade.percent(fraction) .. "%"
+                local pct = health_fade.percent(fraction)
+                local label = pctLabels[pct] or (pct .. "%")
                 local lowest = math.max(top, bottom - lineHeight)
                 local y = math.clamp(filledTop - lineHeight * 0.5, top, lowest)
                 d.text(math.floor(barLeft - 4 - d.textWidth(label)), math.floor(y), healthR, healthG, healthB, label, percentShown)
@@ -1650,7 +1670,7 @@ function Esp:draw(targets, s, screenW, screenH, project, d, now)
         local below = bottom + 2
 
         if s.distance and target.haveDistance then
-            d.textCentered(centerX, below, labelR, labelG, labelB, string.format("%.0f st", target.distance))
+            d.textCentered(centerX, below, labelR, labelG, labelB, formatDist(target.distance))
             below += lineHeight
         end
 
@@ -4331,9 +4351,11 @@ function main.start(env)
     local shooter = nil             -- the auto fire, see trigger.lua
     -- pre-allocated so feature state (_soPick / _soMob / _soBounty) stays under Luau's 200-local limit in main.start
     local handle = {
-        _soPick = { picker = nil, entries = {}, wasOn = false },
-        _soMob = { farmer = nil, noclip = nil, entries = {}, wasOn = false },
+        _soPick = { picker = nil, entries = {}, wasOn = false, lastScan = -99 },
+        _soMob = { farmer = nil, noclip = nil, entries = {}, wasOn = false, lastScan = -99 },
         _soBounty = { runner = nil, mobs = {}, prompt = nil, px = nil, py = nil, pz = nil, lastPromptScan = -99, wasOn = false, mod = nil, modTried = false },
+        _cam = { fast = false },
+        _inEffect = nil,
         _soHowler = { collector = nil, remote = nil, conn = nil, tried = false },
         _charMove = { savedWs = nil, savedJp = nil, savedUseJp = nil, wasWs = false, wasJp = false, lastChar = nil },
     }
@@ -5316,6 +5338,18 @@ function main.start(env)
     ui = result
 
     local function project(x, y, z)
+        local c = handle._cam
+        if c.fast then
+            local dx, dy, dz = x - c.x, y - c.y, z - c.z
+            local depth = -(c.r02 * dx + c.r12 * dy + c.r22 * dz)
+            if depth <= 0 then
+                return 0, 0, false
+            end
+            local lx = c.r00 * dx + c.r10 * dy + c.r20 * dz
+            local ly = c.r01 * dx + c.r11 * dy + c.r21 * dz
+            local invD = c.focal / depth
+            return c.halfW + lx * invD, c.halfH - ly * invD, true
+        end
         local point = camera:WorldToViewportPoint(env.Vector3.new(x, y, z))
         return point.X, point.Y, point.Z > 0
     end
@@ -7646,7 +7680,8 @@ function main.start(env)
 
         -- what the mode does not have is off here, whatever its switch says
         local mode = modes.resolve(settings.modeChoice, universeId)
-        local s = settingsModule.inEffect(settings, mode)
+        local s = settingsModule.inEffectInto(handle._inEffect, settings, mode)
+        handle._inEffect = s
         local overlayHidden = settings.interface.hideOverlay and ui.menuOpen()
         d.setVisible(not overlayHidden)
         current = s
@@ -7722,10 +7757,12 @@ function main.start(env)
                 end
             end
 
-            if s.standOutPickup ~= nil and s.standOutPickup.enabled then
+            if s.standOutPickup ~= nil and s.standOutPickup.enabled and now - handle._soPick.lastScan >= 1.0 then
+                handle._soPick.lastScan = now
                 handle._soPick.entries = stand_out_pickup.scan(workspace, s.standOutPickup)
             end
-            if s.standOutMobs ~= nil and s.standOutMobs.enabled then
+            if s.standOutMobs ~= nil and s.standOutMobs.enabled and now - handle._soMob.lastScan >= 0.8 then
+                handle._soMob.lastScan = now
                 local pNames = {}
                 for _, pl in Players:GetPlayers() do
                     pNames[pl.Name] = true
@@ -7954,6 +7991,20 @@ function main.start(env)
 
         local viewport = camera.ViewportSize
         local screenW, screenH = viewport.X, viewport.Y
+        do
+            local c = handle._cam
+            local cf = camera.CFrame
+            local fov = camera.FieldOfView
+            if cf ~= nil and cf.GetComponents ~= nil and type(fov) == "number" and fov > 0 and screenH > 0 then
+                c.x, c.y, c.z, c.r00, c.r01, c.r02, c.r10, c.r11, c.r12, c.r20, c.r21, c.r22 = cf:GetComponents()
+                c.halfW = screenW * 0.5
+                c.halfH = screenH * 0.5
+                c.focal = c.halfH / math.tan(math.rad(fov) * 0.5)
+                c.fast = true
+            else
+                c.fast = false
+            end
+        end
 
         -- where the user is; unknown while the character is not spawned
         local haveLocal, localX, localY, localZ = false, 0, 0, 0
@@ -8009,7 +8060,7 @@ function main.start(env)
             end
         end
 
-        if s.enabled then
+        if s.enabled and not overlayHidden then
             esp:draw(targets, s, screenW, screenH, project, d, now)
         end
 
@@ -11007,160 +11058,194 @@ function settings.defaults(mode)
     return s
 end
 
+-- copies shallow fields of src into dst (reusing dst to avoid per-frame table.clone churn)
+local function copyInto(dst, src)
+    if src == nil then
+        return nil
+    end
+    if dst == nil then
+        return table.clone(src)
+    end
+    for k, v in src do
+        dst[k] = v
+    end
+    return dst
+end
+
 -- the settings as they are in effect in a mode: what the mode does not have is off, whatever its switch says,
--- since a feature whose controls are hidden must not keep working out of sight
-function settings.inEffect(s, mode)
-    local e = table.clone(s)
-    e.items = table.clone(s.items)
-    e.aim = table.clone(s.aim)
-    e.bhop = table.clone(s.bhop)
+-- since a feature whose controls are hidden must not keep working out of sight.
+-- Reuses `out` when provided so the render loop allocates zero tables per frame.
+function settings.inEffectInto(out, s, mode)
+    local e = out
+    local reusing = e ~= nil
+    if not reusing then
+        e = table.clone(s)
+    end
+    local items = copyInto(reusing and e.items or nil, s.items)
+    local aim = copyInto(reusing and e.aim or nil, s.aim)
+    local bhop = copyInto(reusing and e.bhop or nil, s.bhop)
+    local farm = copyInto(reusing and e.farm or nil, s.farm)
+    local steal = copyInto(reusing and e.steal or nil, s.steal)
+    local statusKinds = s.statusKinds
+    if not modes.has(mode, "Statuses") or not modes.has(mode, "TimeErase") then
+        statusKinds = copyInto(reusing and e._statusKinds or nil, s.statusKinds)
+        for id in statusKinds do
+            if (id == "timeErase" and not modes.has(mode, "TimeErase")) or (id ~= "timeErase" and not modes.has(mode, "Statuses")) then
+                statusKinds[id] = false
+            end
+        end
+    end
+    local fullbright = copyInto(reusing and e.fullbright or nil, s.fullbright)
+    local fly = copyInto(reusing and e.fly or nil, s.fly)
+    local noclip = copyInto(reusing and e.noclip or nil, s.noclip)
+    local chams = copyInto(reusing and e.chams or nil, s.chams)
+    local crosshair = copyInto(reusing and e.crosshair or nil, s.crosshair)
+    local nospread = copyInto(reusing and e.nospread or nil, s.nospread)
+    local silentaim = copyInto(reusing and e.silentaim or nil, s.silentaim)
+    local townSilent = copyInto(reusing and e.townSilent or nil, s.townSilent)
+    local townWeapon = copyInto(reusing and e.townWeapon or nil, s.townWeapon)
+    local mvsSilent = copyInto(reusing and e.mvsSilent or nil, s.mvsSilent)
+    local iaWeapon = copyInto(reusing and e.iaWeapon or nil, s.iaWeapon)
+    local standOut = copyInto(reusing and e.standOut or nil, s.standOut)
+    local standOutPickup = copyInto(reusing and e.standOutPickup or nil, s.standOutPickup)
+    local standOutMobs = copyInto(reusing and e.standOutMobs or nil, s.standOutMobs)
+    local standOutBounty = copyInto(reusing and e.standOutBounty or nil, s.standOutBounty)
+    local walkSpeed = copyInto(reusing and e.walkSpeed or nil, s.walkSpeed)
+    local jumpPower = copyInto(reusing and e.jumpPower or nil, s.jumpPower)
+    local watermark = copyInto(reusing and e.watermark or nil, s.watermark)
+    local reloadBar = copyInto(reusing and e.reloadBar or nil, s.reloadBar)
+    local hotkeys = copyInto(reusing and e.hotkeys or nil, s.hotkeys)
+    local mouseAimBuf = reusing and e._mouseAim or nil
+    local mobsSkillsBuf = reusing and e._mobsSkills or nil
+
+    if reusing then
+        for k, v in s do
+            e[k] = v
+        end
+    end
+
+    e.items = items
+    e.aim = aim
+    e.bhop = bhop
+    e.farm = farm
+    e.steal = steal
+    e.statusKinds = statusKinds
+    if reusing and statusKinds ~= s.statusKinds then
+        e._statusKinds = statusKinds
+    end
+    e.fullbright = fullbright
+    e.fly = fly
+    e.noclip = noclip
+    e.chams = chams
+    e.crosshair = crosshair
+    e.nospread = nospread
+    e.silentaim = silentaim
+    e.townSilent = townSilent
+    e.townWeapon = townWeapon
+    e.mvsSilent = mvsSilent
+    e.iaWeapon = iaWeapon
+    e.standOut = standOut
+    e.standOutPickup = standOutPickup
+    e.standOutMobs = standOutMobs
+    e.standOutBounty = standOutBounty
+    e.walkSpeed = walkSpeed
+    e.jumpPower = jumpPower
+    e.watermark = watermark
+    e.reloadBar = reloadBar
+    e.hotkeys = hotkeys
 
     if not modes.has(mode, "Players") then
         e.enabled = false
+        e.chams.enabled = false
     end
-
     if not modes.has(mode, "Items") then
         e.items.enabled = false
     end
-
-    e.farm = table.clone(s.farm)
     if not modes.has(mode, "AutoFarm") then
         e.farm.enabled = false
     end
-
-    e.steal = table.clone(s.steal)
     if not modes.has(mode, "Steal") then
         e.steal.enabled = false
     end
-
-    -- the effects and the limbs where the mode knows them, Time Erase where the mode has it
-    if not modes.has(mode, "Statuses") or not modes.has(mode, "TimeErase") then
-        local kinds = table.clone(s.statusKinds)
-        for id in kinds do
-            if (id == "timeErase" and not modes.has(mode, "TimeErase")) or (id ~= "timeErase" and not modes.has(mode, "Statuses")) then
-                kinds[id] = false
-            end
-        end
-        e.statusKinds = kinds
-    end
-
     if not modes.has(mode, "Kit") then
         e.stand = false
         e.spec = false
     end
-
     if not modes.has(mode, "TeamCheck") then
         e.teamCheck = false
     end
-
     if not modes.has(mode, "Health") then
         e.healthBar = false
     end
-
     if not modes.has(mode, "Ping") then
         e.ping = false
     end
-
     if not modes.has(mode, "Weapon") then
         e.weapon = false
     end
-
     if not modes.has(mode, "LastSeen") then
         e.lastSeen = false
     end
-
     if not modes.has(mode, "Sounds") then
         e.sounds = false
     end
-
     if not modes.has(mode, "AutoStop") then
         e.aim.autoStop = "Off"
     end
-
     if not modes.has(mode, "Wallbang") then
         e.wallbang = false
         e.aim.autoFireThroughWalls = false
     end
-
     if not modes.has(mode, "Spectators") then
         e.spectators = false
     end
-
     if not modes.has(mode, "Clouds") then
         e.clouds = false
     end
-
     if not modes.has(mode, "Grenades") then
         e.grenades = false
         e.grenadePreview = false
     end
-
     if not modes.has(mode, "Aim") then
         e.aim.enabled = false
         e.aim.autoFire = false
     end
-
     if not modes.has(mode, "Bhop") then
         e.bhop.enabled = false
     end
-
-    e.fullbright = table.clone(s.fullbright)
     if not modes.has(mode, "Fullbright") then
         e.fullbright.enabled = false
     end
-
-    e.fly = table.clone(s.fly)
     if not modes.has(mode, "Fly") then
         e.fly.enabled = false
     end
-
-    e.noclip = table.clone(s.noclip)
     if not modes.has(mode, "NoClip") then
         e.noclip.enabled = false
     end
-
-    e.chams = table.clone(s.chams)
-    if not modes.has(mode, "Players") then
-        e.chams.enabled = false
-    end
-
-    e.crosshair = table.clone(s.crosshair)
     if not modes.has(mode, "Crosshair") then
         e.crosshair.enabled = false
     end
-
-    e.nospread = table.clone(s.nospread)
-    e.silentaim = table.clone(s.silentaim)
     if not modes.has(mode, "ShotHook") then
         e.nospread.enabled = false
         e.silentaim.enabled = false
     end
-
-    e.townSilent = table.clone(s.townSilent)
-    e.townWeapon = table.clone(s.townWeapon)
     if not modes.has(mode, "TownGun") then
         e.townSilent.enabled = false
         e.townWeapon.enabled = false
     end
-    -- если включён townWeapon ESP — поднимаем общий флаг чтобы esp_players отрисовал weapon-строку
     if e.townWeapon.enabled then
         e.weapon = true
     end
-
-    e.mvsSilent = table.clone(s.mvsSilent)
     if not modes.has(mode, "MvsGun") then
         e.mvsSilent.enabled = false
+        e.reloadBar.enabled = false
     end
-
-    e.iaWeapon = table.clone(s.iaWeapon)
     if not modes.has(mode, "IaWeapon") then
         e.iaWeapon.enabled = false
     end
     if e.iaWeapon.enabled then
         e.weapon = true
     end
-
-    e.standOut = table.clone(s.standOut)
     if not modes.has(mode, "StandOutInfo") then
         e.standOut.stand = false
         e.standOut.subAbility = false
@@ -11169,27 +11254,21 @@ function settings.inEffect(s, mode)
     if e.standOut.stand or e.standOut.subAbility or e.standOut.weapon then
         e.weapon = true
     end
-
-    e.standOutPickup = table.clone(s.standOutPickup)
     if not modes.has(mode, "StandOutPickup") then
         e.standOutPickup.enabled = false
     end
-
-    e.standOutMobs = table.clone(s.standOutMobs)
     if s.standOutMobs and s.standOutMobs.skills then
-        e.standOutMobs.skills = table.clone(s.standOutMobs.skills)
+        e.standOutMobs.skills = copyInto(mobsSkillsBuf, s.standOutMobs.skills)
+        if reusing then
+            e._mobsSkills = e.standOutMobs.skills
+        end
     end
     if not modes.has(mode, "StandOutMobs") then
         e.standOutMobs.enabled = false
     end
-
-    e.standOutBounty = table.clone(s.standOutBounty)
     if not modes.has(mode, "StandOutBounty") then
         e.standOutBounty.enabled = false
     end
-
-    e.walkSpeed = table.clone(s.walkSpeed)
-    e.jumpPower = table.clone(s.jumpPower)
     if not modes.has(mode, "CharMove") then
         e.walkSpeed.enabled = false
         e.jumpPower.enabled = false
@@ -11198,41 +11277,29 @@ function settings.inEffect(s, mode)
     -- whether any Silent Aim (Town/MVS/Strike) is on
     e.aim.silent = e.townSilent.enabled or e.mvsSilent.enabled or e.silentaim.enabled
 
-    -- MVS: всегда проверять видимость (не стрелять через стены). Скорость наводки неактуальна — силент
-    -- стреляет мгновенно, обычная наводка (если юзер её включит) должна тоже лочиться без лерпа.
-    -- fullScreen тоже всегда — иначе цель за radius'ом круга не ловится и autofire молчит
     if mode == "Mvs" then
         e.aim.visibleOnly = true
         e.aim.speed = 1e6
         e.aim.fullScreen = true
     end
-
-    -- Town при включённом Silent Aim: fullScreen, чтобы pickWorld ловил любую видимую цель на экране
-    -- (как rage в CS), не только в кругу aim. visibleOnly оставляем пользовательский:
-    -- ON — только видимые, OFF — wallbang через стены (сервер не проверяет видимость)
     if mode == "Town" and e.townSilent.enabled then
         e.aim.fullScreen = true
     end
 
-    -- the aim by the mouse: the zones and the point the user picked, and it moves the mouse whether a silent aim is
-    -- on or not (switching the aim off is how the user leaves the mouse alone). It is the table of the aim itself
-    -- while no silent aim is on; with one, what follows changes the aim for the silent aims and the auto fire only
     e.mouseAim = e.aim
     if e.aim.silent then
-        e.mouseAim = table.clone(e.aim)
+        e.mouseAim = copyInto(mouseAimBuf, e.aim)
         e.mouseAim.silent = false
-        -- Silent/rage уважает пользовательский выбор hitbox-зон. Если юзер выключил голову и грудь,
-        -- rage бьёт только в живот/руки/ноги. nearestPoint тоже оставляем как юзер выбрал
-    end
-
-    e.watermark = table.clone(s.watermark)
-    e.reloadBar = table.clone(s.reloadBar)
-    e.hotkeys = table.clone(s.hotkeys)
-    if not modes.has(mode, "MvsGun") then
-        e.reloadBar.enabled = false
+        if reusing then
+            e._mouseAim = e.mouseAim
+        end
     end
 
     return e
+end
+
+function settings.inEffect(s, mode)
+    return settings.inEffectInto(nil, s, mode)
 end
 
 return settings
