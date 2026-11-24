@@ -16618,15 +16618,47 @@ function bridge.create(ctx)
 
         readDialogue = function()
             local pg = localPlayer and localPlayer:FindFirstChildOfClass("PlayerGui")
-            if pg == nil then return nil end
+            if pg == nil then return nil, "", false end
+            local dlg = pg:FindFirstChild("Dialogue")
+            if dlg == nil or dlg.Enabled ~= true then
+                return nil, "", false
+            end
+            local holder = dlg:FindFirstChild("Holder")
+            if holder ~= nil and holder.Visible == false then
+                return nil, "", false
+            end
+            local bodyText = ""
+            pcall(function()
+                local bs = holder and holder:FindFirstChild("BodyScroll")
+                local body = bs and bs:FindFirstChild("Body")
+                if body ~= nil and type(body.Text) == "string" then
+                    bodyText = body.Text
+                end
+            end)
             local snap = stand_out_bounty.readUi(pg)
-            return snap and snap.dialogueOptions or nil
+            return snap and snap.dialogueOptions or nil, bodyText, true
         end,
 
         isDialogueOpen = function()
             local pg = localPlayer and localPlayer:FindFirstChildOfClass("PlayerGui")
             local dlg = pg and pg:FindFirstChild("Dialogue")
-            return dlg ~= nil and dlg.Enabled == true
+            if dlg == nil or dlg.Enabled ~= true then return false end
+            local holder = dlg:FindFirstChild("Holder")
+            return holder == nil or holder.Visible ~= false
+        end,
+
+        closeDialogue = function()
+            pcall(function()
+                local rs = game:GetService("ReplicatedStorage")
+                local mods = rs and rs:FindFirstChild("Modules")
+                local dm = mods and mods:FindFirstChild("Dialogue")
+                if dm ~= nil then
+                    local m = require(dm)
+                    if type(m) == "table" and type(m.closeDialogue) == "function" then
+                        m.closeDialogue()
+                    end
+                end
+            end)
         end,
 
         clickDialogue = function(opt)
@@ -17526,6 +17558,8 @@ function stand_out_quests.new(deps)
         lastStepAt = -99,
         lastTalkAt = -99,
         lastClickAt = -99,
+        dlgBody = "",
+        dlgBodyChangedAt = 0,
         lastEmoteAt = -99,
         lastActiveQuest = "",
         angeloDoneDay = -1,
@@ -17555,25 +17589,55 @@ end
 
 function Runner:_talkToNpc(now, npcName, dlgContext, lx, ly, lz)
     local d = self.deps
-    local opts = d.readDialogue ~= nil and d.readDialogue() or nil
-    if opts ~= nil and #opts > 0 then
-        local chosen, tag = stand_out_quests.pickDialogueOption(opts, dlgContext)
-        if chosen ~= nil then
-            if now - self.lastClickAt >= 0.75 then
-                self.lastClickAt = now
-                if d.clickDialogue ~= nil then
-                    d.clickDialogue(chosen)
-                end
-                self.lastStepAt = now
-                return tag or "clicked"
-            end
-            return "waiting_dlg"
-        end
+    local opts, bodyText, isOpen = nil, nil, false
+    if d.readDialogue ~= nil then
+        opts, bodyText, isOpen = d.readDialogue()
     end
-    -- Если окно диалога уже открыто (печатается текст / переход) — НЕ дёргаем повторно ProximityPrompt!
-    if d.isDialogueOpen ~= nil and d.isDialogueOpen() then
+    if isOpen == nil then
+        isOpen = (opts ~= nil and #opts > 0) or (d.isDialogueOpen ~= nil and d.isDialogueOpen())
+    end
+    if isOpen then
+        -- Если передан bodyText (живой клиент), ждём пока typewriter закончит печатать (0.45с без изменений),
+        -- иначе нажатие цифры посреди печати ломает переход в пустой диалог!
+        if bodyText ~= nil then
+            if bodyText ~= self.dlgBody then
+                self.dlgBody = bodyText
+                self.dlgBodyChangedAt = now
+                return "typing"
+            end
+            if bodyText == "" then
+                if self.dlgBodyChangedAt == 0 then
+                    self.dlgBodyChangedAt = now
+                elseif now - self.dlgBodyChangedAt >= 2.5 and d.closeDialogue ~= nil then
+                    d.closeDialogue()
+                    self.dlgBodyChangedAt = now
+                end
+                return "waiting_dlg"
+            end
+            if now - self.dlgBodyChangedAt < 0.45 then
+                return "typing"
+            end
+        end
+        if opts ~= nil and #opts > 0 then
+            local chosen, tag = stand_out_quests.pickDialogueOption(opts, dlgContext)
+            if chosen ~= nil then
+                if now - self.lastClickAt >= 1.0 then
+                    self.lastClickAt = now
+                    self.dlgBody = ""
+                    self.dlgBodyChangedAt = now
+                    if d.clickDialogue ~= nil then
+                        d.clickDialogue(chosen)
+                    end
+                    self.lastStepAt = now
+                    return tag or "clicked"
+                end
+                return "waiting_dlg"
+            end
+        end
         return "waiting_dlg"
     end
+    self.dlgBody = ""
+    self.dlgBodyChangedAt = 0
 
     local nx, ny, nz, prompt = nil, nil, nil, nil
     if d.findNpc ~= nil then
@@ -17600,6 +17664,8 @@ function Runner:_talkToNpc(now, npcName, dlgContext, lx, ly, lz)
 
     if now - self.lastTalkAt >= stand_out_quests.talk_retry then
         self.lastTalkAt = now
+        self.lastClickAt = now
+        self.dlgBodyChangedAt = now
         if prompt ~= nil and d.firePrompt ~= nil then
             d.firePrompt(prompt)
         elseif d.interactNpc ~= nil then
@@ -18462,6 +18528,8 @@ function stand_out_story.new(deps)
         lastStepAt = -99,
         lastTalkAt = -99,
         lastClickAt = -99,
+        dlgBody = "",
+        dlgBodyChangedAt = 0,
         wiggleSign = 1,
         mapOpenedFor = "",
         huberCalledAt = 0,
@@ -18479,12 +18547,44 @@ end
 
 function Runner:_handleDialogue(now)
     local d = self.deps
-    local opts = d.readDialogue ~= nil and d.readDialogue() or nil
+    local opts, bodyText, isOpen = nil, nil, false
+    if d.readDialogue ~= nil then
+        opts, bodyText, isOpen = d.readDialogue()
+    end
+    if isOpen == nil then
+        isOpen = (opts ~= nil and #opts > 0) or (d.isDialogueOpen ~= nil and d.isDialogueOpen())
+    end
+    if not isOpen then
+        self.dlgBody = ""
+        self.dlgBodyChangedAt = 0
+        return false
+    end
+    if bodyText ~= nil then
+        if bodyText ~= self.dlgBody then
+            self.dlgBody = bodyText
+            self.dlgBodyChangedAt = now
+            return true
+        end
+        if bodyText == "" then
+            if self.dlgBodyChangedAt == 0 then
+                self.dlgBodyChangedAt = now
+            elseif now - self.dlgBodyChangedAt >= 2.5 and d.closeDialogue ~= nil then
+                d.closeDialogue()
+                self.dlgBodyChangedAt = now
+            end
+            return true
+        end
+        if now - self.dlgBodyChangedAt < 0.45 then
+            return true
+        end
+    end
     if opts ~= nil and #opts > 0 then
         local chosen = stand_out_story.pickDialogueOption(opts)
         if chosen ~= nil then
-            if now - self.lastClickAt >= 0.75 then
+            if now - self.lastClickAt >= 1.0 then
                 self.lastClickAt = now
+                self.dlgBody = ""
+                self.dlgBodyChangedAt = now
                 if d.clickDialogue ~= nil then
                     d.clickDialogue(chosen)
                 end
@@ -18493,10 +18593,7 @@ function Runner:_handleDialogue(now)
             return true
         end
     end
-    if d.isDialogueOpen ~= nil and d.isDialogueOpen() then
-        return true
-    end
-    return false
+    return true
 end
 
 function Runner:_resolvePos(step)
