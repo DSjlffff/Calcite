@@ -17496,12 +17496,23 @@ function controls.mount(Library, env, Window)
         Library:GiveSignal(holder:GetPropertyChangedSignal("Size"):Connect(update))
     end
 
+    local function centerPickers(label)
+        if label == nil then return end
+        local layout = label:FindFirstChildOfClass("UIListLayout")
+        if layout ~= nil and Enum ~= nil and Enum.VerticalAlignment ~= nil then
+            layout.VerticalAlignment = Enum.VerticalAlignment.Center
+        end
+    end
+
     for _, toggle in Library.Toggles do
         local holder = toggle.Holder
         if not holder then continue end
         local label = caption(holder)
         height(holder,32)
-        if label then label.TextWrapped = true end
+        if label then
+            label.TextWrapped = true
+            centerPickers(label)
+        end
         local switch = holder:FindFirstChildOfClass("Frame")
         if switch then
             switch.Size = UDim2.fromOffset(38,22)
@@ -17573,6 +17584,7 @@ function controls.mount(Library, env, Window)
             for _, element in group.Elements do
                 if element.Type == "Label" and element.TextLabel then
                     typography(element.TextLabel,14)
+                    centerPickers(element.TextLabel)
                     if element.DoesWrap then element:Display() else height(element.TextLabel,22) end
                 end
             end
