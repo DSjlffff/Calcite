@@ -17100,7 +17100,8 @@ stand_out_quests.lenny_parking_spots = {
 }
 
 -- Центр "other lift" у Lenny's Mechanic (стойки X=-563.5 и X=-578.3, Z=1280.0)
-stand_out_quests.lenny_other_lift = { X = -570.9, Y = 19.5, Z = 1280.0 }
+stand_out_quests.lenny_other_lift = { X = -570.9, Y = 18.2, Z = 1280.0 }
+stand_out_quests.lenny_lift_hold = 1.0
 stand_out_quests.meryl_parking = { X = -1311.0, Y = 18.0, Z = 904.0 }
 stand_out_quests.water_drop_pos = { X = -260.0, Y = 10.0, Z = 2600.0 }
 stand_out_quests.bobby_humu_pos = { X = -1077.4, Y = 25.1, Z = 2511.4 }
@@ -17628,6 +17629,7 @@ function stand_out_quests.new(deps)
         angeloDoneDay = -1,
         merylDoneDay = -1,
         lennyParked = false,
+        lennySeatAt = 0,
         lennyWaitCarAt = 0,
         merylCarEntered = false,
         bobbyCarriedAt = 0,
@@ -17813,6 +17815,7 @@ function Runner:_stepLenny(now, state, lx, ly, lz)
     local d = self.deps
     if not hasQuest(state, "LENNY_COP_CAR") then
         self.lennyParked = false
+        self.lennySeatAt = 0
         self.lennyWaitCarAt = 0
         local rem = stand_out_quests.cooldownLeft(state.cooldowns, "LENNY_COP_CAR", 60, state.nowUnix)
         if rem > 0 then
@@ -17827,44 +17830,47 @@ function Runner:_stepLenny(now, state, lx, ly, lz)
     local lift = stand_out_quests.lenny_other_lift
     local seated = d.getSeatedVehicle ~= nil and d.getSeatedVehicle() or nil
 
-    -- Если сидим в машине -> сразу переносим её на второй подъёмник Ленни и выходим
+    -- Если сидим в машине -> держим её на втором подъёмнике Ленни ~1.0с, чтобы сервер принял позицию (NetworkOwnership),
+    -- и только потом выходим!
     if seated ~= nil then
-        self.statusText = "Lenny: ставим авто на подъёмник"
+        if self.lennySeatAt == 0 then
+            self.lennySeatAt = now
+        end
         if d.pivotVehicle ~= nil then
             d.pivotVehicle(seated, lift.X, lift.Y, lift.Z)
+        end
+        if now - self.lennySeatAt < stand_out_quests.lenny_lift_hold then
+            self.statusText = "Lenny: ставим авто на подъёмник..."
+            return
         end
         if d.exitVehicle ~= nil then
             d.exitVehicle()
         end
+        self.lennySeatAt = 0
         self.lennyParked = true
         self.lastStepAt = now + 0.35
+        self.statusText = "Lenny: выходим из авто"
         return
     end
+    self.lennySeatAt = 0
 
-    -- Если машина уже стоит на подъёмнике -> сдаём Ленни
-    local objs = state.objectives or {}
-    local takeObj = objs["CopCar_Take"]
-    local took = self.lennyParked or (takeObj ~= nil and (takeObj.cur or 0) >= (takeObj.total or 1))
-    if took then
-        -- Проверим, действительно ли cop car на подъёмнике
-        local car = d.findCopCar ~= nil and d.findCopCar(lift.X, lift.Y, lift.Z, 28) or nil
-        if car ~= nil or self.lennyParked then
-            self.statusText = "Lenny: сдаём Cop Car на разбор"
-            local tag = self:_talkToNpc(now, "Lenny", "lenny_scrap", lx, ly, lz)
-            if tag == "retry_park" then
-                self.lennyParked = false
-                if car ~= nil and d.pivotVehicle ~= nil then
-                    d.pivotVehicle(car, lift.X, lift.Y - 0.5, lift.Z)
-                end
-            end
-            return
+    -- Проверяем, реально ли машина стоит на подъёмнике (<= 26 ст от центра подъёмника)
+    local parkedCar = d.findCopCar ~= nil and d.findCopCar(lift.X, lift.Y, lift.Z, 26) or nil
+    if self.lennyParked and parkedCar ~= nil then
+        self.statusText = "Lenny: сдаём Cop Car на разбор"
+        local tag = self:_talkToNpc(now, "Lenny", "lenny_scrap", lx, ly, lz)
+        if tag == "retry_park" then
+            self.lennyParked = false
         end
+        return
     end
+    -- Если машина не на подъёмнике (даже при CopCar_Take 1/1) — нужно заново сесть и привезти её!
+    self.lennyParked = false
 
-    -- Ищем полицейскую машину на парковке участка
+    -- Ищем полицейскую машину рядом с участком или в радиусе гаража
     local car, cx, cy, cz, boardPrompt = nil, nil, nil, nil, nil
     if d.findCopCar ~= nil then
-        car, cx, cy, cz, boardPrompt = d.findCopCar(-450, 16.3, 1534.4, 220)
+        car, cx, cy, cz, boardPrompt = d.findCopCar(-450, 16.3, 1534.4, 500)
     end
     if car ~= nil and cx ~= nil then
         self.lennyWaitCarAt = 0
