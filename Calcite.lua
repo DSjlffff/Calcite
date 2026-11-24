@@ -16850,27 +16850,27 @@ function bridge.create(ctx)
             if vf == nil then return nil, nil, nil, nil, nil end
             local bestCar, bx, by, bz, bestPrompt, bestD = nil, nil, nil, nil, nil, radius or 220
             for _, m in vf:GetChildren() do
-                local nm = string.lower(m.Name)
-                local match = anyVehicle == true
-                    or string.find(nm, "cop", 1, true) ~= nil
-                    or string.find(nm, "police", 1, true) ~= nil
-                    or string.find(nm, "patrol", 1, true) ~= nil
-                    or string.find(nm, "cruiser", 1, true) ~= nil
-                if match then
-                    local x, y, z = safePos(m)
-                    if x ~= nil then
-                        local dd = math.sqrt((x - rx) ^ 2 + (y - ry) ^ 2 + (z - rz) ^ 2)
-                        if dd < bestD then
-                            local bp = nil
-                            for _, sub in m:GetDescendants() do
-                                local isPp = false
-                                pcall(function() isPp = sub:IsA("ProximityPrompt") and sub.Enabled == true end)
-                                if isPp and (string.lower(tostring(sub.ActionText or "")) == "drive" or bp == nil) then
-                                    bp = sub
-                                end
+                local x, y, z = safePos(m)
+                if x ~= nil then
+                    local dd = math.sqrt((x - rx) ^ 2 + (y - ry) ^ 2 + (z - rz) ^ 2)
+                    local nm = string.lower(m.Name)
+                    local match = anyVehicle == true
+                        or dd <= 90
+                        or string.find(nm, "cop", 1, true) ~= nil
+                        or string.find(nm, "police", 1, true) ~= nil
+                        or string.find(nm, "patrol", 1, true) ~= nil
+                        or string.find(nm, "cruiser", 1, true) ~= nil
+                        or string.find(nm, "lenny", 1, true) ~= nil
+                    if match and dd < bestD then
+                        local bp = nil
+                        for _, sub in m:GetDescendants() do
+                            local isPp = false
+                            pcall(function() isPp = sub:IsA("ProximityPrompt") and sub.Enabled == true end)
+                            if isPp and (string.lower(tostring(sub.ActionText or "")) == "drive" or bp == nil) then
+                                bp = sub
                             end
-                            bestCar, bx, by, bz, bestPrompt, bestD = m, x, y, z, bp, dd
                         end
+                        bestCar, bx, by, bz, bestPrompt, bestD = m, x, y, z, bp, dd
                     end
                 end
             end
@@ -17391,22 +17391,12 @@ function stand_out_quests.pickDialogueOption(options, context)
 end
 
 local function hasQuest(state, questId)
-    if state.activeQuest == questId then
-        return true
-    end
-    return state.inactive ~= nil and state.inactive[questId] == true
+    return state.activeQuest == questId
 end
 
 local function findHeldAngelo(state)
     if stand_out_quests.isAngeloJob(state.activeQuest) then
         return state.activeQuest
-    end
-    if state.inactive ~= nil then
-        for id in state.inactive do
-            if stand_out_quests.isAngeloJob(id) then
-                return id
-            end
-        end
     end
     return nil
 end
@@ -17497,19 +17487,8 @@ function stand_out_quests.selectTarget(choice, state)
         return (not completed["BUKAY_BANDIT_PROBLEM"] and level >= 20) and "Usagi" or nil
     end
 
-    -- Режим "All": только повторяемые и дейлики (Angelo / Lenny / Lettuce / Garden / Meryl Test Drive).
-    -- Одноразовые побочки (Bobby / Usagi) не перехватывают режим "All" — их можно выбрать вручную в списке.
-    local heldAngelo = not state.angeloDoneToday and findHeldAngelo(state) or nil
-    if heldAngelo ~= nil then
-        local spec = ANGELO_JOBS[heldAngelo]
-        if spec ~= nil and spec.auto then
-            if spec.item == nil or stand_out_quests.countInventoryItem(state.inventoryJson, spec.item) >= (spec.count or 1) then
-                if not spec.boss or state.bossAlive then
-                    return "Angelo"
-                end
-            end
-        end
-    end
+    -- Режим "All": сначала ВСЕГДА выполняем текущий ActiveQuest (если это один из фарм-квестов),
+    -- и никогда не трогаем паузнутые/старые квесты из InactiveQuests!
     if hasQuest(state, "LENNY_COP_CAR") then
         return "Lenny"
     elseif hasQuest(state, "LETTUCE_TRADER") then
@@ -17523,6 +17502,17 @@ function stand_out_quests.selectTarget(choice, state)
         local needPlant = seedObj == nil or (seedObj.cur or 0) < (seedObj.total or 1)
         if needPlant or state.gardenHasReadyPot then
             return "Garden"
+        end
+    end
+    local heldAngelo = not state.angeloDoneToday and findHeldAngelo(state) or nil
+    if heldAngelo ~= nil then
+        local spec = ANGELO_JOBS[heldAngelo]
+        if spec ~= nil and spec.auto then
+            if spec.item == nil or stand_out_quests.countInventoryItem(state.inventoryJson, spec.item) >= (spec.count or 1) then
+                if not spec.boss or state.bossAlive then
+                    return "Angelo"
+                end
+            end
         end
     end
 
