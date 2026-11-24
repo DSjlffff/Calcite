@@ -6411,11 +6411,33 @@ function main.start(env)
                     end
                 end
             end,
-            teleportTo = function(x, y, z)
+            teleportTo = function(x, y, z, lookX, lookY, lookZ)
                 local character = localPlayer.Character
                 local root = character and character:FindFirstChild("HumanoidRootPart")
                 if root ~= nil then
-                    root.CFrame = env.CFrame.new(x, y, z)
+                    if lookX ~= nil and lookY ~= nil and lookZ ~= nil and env.CFrame.lookAt ~= nil then
+                        local pos = env.Vector3.new(x, y, z)
+                        local lookFlat = env.Vector3.new(lookX, y, lookZ)
+                        if (lookFlat - pos).Magnitude > 0.05 then
+                            root.CFrame = env.CFrame.lookAt(pos, lookFlat)
+                        else
+                            root.CFrame = env.CFrame.new(x, y, z)
+                        end
+                        -- Наводим камеру на цель (сундук Cheap Jewelry), чтобы Stand Out сразу дал ей белую обводку фокуса
+                        local cam = workspace.CurrentCamera
+                        if cam ~= nil then
+                            local dx, dz = lookX - x, lookZ - z
+                            local d = math.sqrt(dx * dx + dz * dz)
+                            if d > 0.05 then
+                                local camPos = env.Vector3.new(x - (dx / d) * 4.5, y + 4.5, z - (dz / d) * 4.5)
+                                pcall(function()
+                                    cam.CFrame = env.CFrame.lookAt(camPos, env.Vector3.new(lookX, lookY, lookZ))
+                                end)
+                            end
+                        end
+                    else
+                        root.CFrame = env.CFrame.new(x, y, z)
+                    end
                     root.AssemblyLinearVelocity = env.Vector3.new(0, 0, 0)
                 end
             end,
@@ -6754,20 +6776,13 @@ function main.start(env)
                 local kc = nil
                 pcall(function() kc = prompt.KeyboardKeyCode end)
                 kc = kc or defaultH
-                local pname = ""
-                pcall(function() pname = tostring(prompt.Name or "") end)
-                -- Промпты сундуков/камней/сборки Cheap Jewelry (BountyIncident_Box*/Gem*/Assembly):
-                -- бьём НАПРЯМУЮ по самому ProximityPrompt (InputHoldBegin + fireproximityprompt),
-                -- чтобы стоящий рядом дорожный знак [P] (тоже на [H]) никогда не перехватывал клавишу H!
-                local isDirectJewelry = string.find(pname, "BountyIncident_Box", 1, true) ~= nil
-                    or string.find(pname, "BountyIncident_Gem", 1, true) ~= nil
-                    or string.find(pname, "BountyIncident_Assembly", 1, true) ~= nil
-                pcall(function() prompt:InputHoldBegin() end)
-                if (holdDur <= 0.05 or isDirectJewelry) and type(env.fireproximityprompt) == "function" then
+                if holdDur <= 0.05 and type(env.fireproximityprompt) == "function" then
                     pcall(env.fireproximityprompt, prompt)
                 end
-                if not isDirectJewelry and vim ~= nil and kc ~= nil then
+                if vim ~= nil and kc ~= nil then
                     pcall(function() vim:SendKeyEvent(true, kc, false, game) end)
+                else
+                    pcall(function() prompt:InputHoldBegin() end)
                 end
             end,
             holdPromptEnd = function(prompt)
@@ -6824,11 +6839,33 @@ function main.start(env)
                 end)
                 return ok and type(val) == "string" and val or ""
             end,
-            teleportTo = function(x, y, z)
+            teleportTo = function(x, y, z, lookX, lookY, lookZ)
                 local character = localPlayer.Character
                 local root = character and character:FindFirstChild("HumanoidRootPart")
                 if root ~= nil then
-                    root.CFrame = env.CFrame.new(x, y, z)
+                    if lookX ~= nil and lookY ~= nil and lookZ ~= nil and env.CFrame.lookAt ~= nil then
+                        local pos = env.Vector3.new(x, y, z)
+                        local lookFlat = env.Vector3.new(lookX, y, lookZ)
+                        if (lookFlat - pos).Magnitude > 0.05 then
+                            root.CFrame = env.CFrame.lookAt(pos, lookFlat)
+                        else
+                            root.CFrame = env.CFrame.new(x, y, z)
+                        end
+                        -- Наводим камеру на цель (сундук Cheap Jewelry), чтобы Stand Out сразу дал ей белую обводку фокуса
+                        local cam = workspace.CurrentCamera
+                        if cam ~= nil then
+                            local dx, dz = lookX - x, lookZ - z
+                            local d = math.sqrt(dx * dx + dz * dz)
+                            if d > 0.05 then
+                                local camPos = env.Vector3.new(x - (dx / d) * 4.5, y + 4.5, z - (dz / d) * 4.5)
+                                pcall(function()
+                                    cam.CFrame = env.CFrame.lookAt(camPos, env.Vector3.new(lookX, lookY, lookZ))
+                                end)
+                            end
+                        end
+                    else
+                        root.CFrame = env.CFrame.new(x, y, z)
+                    end
                     root.AssemblyLinearVelocity = env.Vector3.new(0, 0, 0)
                 end
             end,
@@ -11913,6 +11950,41 @@ function stand_out_bounty.promptPosition(d)
     return nil, nil, nil
 end
 
+-- Вычисляет точку прямо ПЕРЕД сундуком/верстаком Cheap Jewelry со свободной стороны стола
+-- (не на крышке сундука и не со стороны забора/знака [P]!), чтобы коробка гарантированно получала белую обводку.
+function stand_out_bounty.jewelryStandPos(prompt, px, py, pz)
+    local fx, fz = 0, 1
+    pcall(function()
+        local cur = prompt
+        local scene = nil
+        for _ = 1, 5 do
+            if cur == nil then break end
+            if cur.Name == "Incident_Jewelry" then
+                scene = cur
+                break
+            end
+            cur = cur.Parent
+        end
+        if scene ~= nil and scene.FindFirstChild ~= nil then
+            local c2 = scene:FindFirstChild("Container2")
+            local c2r = c2 and c2:FindFirstChild("Root")
+            local asm = scene:FindFirstChild("Assembly")
+            local asmr = asm and asm:FindFirstChild("Root")
+            if c2r ~= nil and c2r.Position ~= nil and asmr ~= nil and asmr.Position ~= nil then
+                local dx = asmr.Position.X - c2r.Position.X
+                local dz = asmr.Position.Z - c2r.Position.Z
+                local len = math.sqrt(dx * dx + dz * dz)
+                if len > 0.1 then
+                    fx, fz = dx / len, dz / len
+                end
+            end
+        end
+    end)
+    local pname = prompt ~= nil and tostring(prompt.Name or "") or ""
+    local dist = string.find(pname, "Assembly", 1, true) ~= nil and 2.6 or 4.2
+    return px + fx * dist, py + 1.5, pz + fz * dist
+end
+
 -- true для подвижных промптов (напр. бегающие HarvestUnit1..3 в "Small Change, Big Problem").
 function stand_out_bounty.isMovingPrompt(prompt)
     if prompt == nil then
@@ -13396,20 +13468,31 @@ function Runner:update(now, opts, meX, meY, meZ)
                 local isJewelryBox = string.find(pname, "BountyIncident_Box", 1, true) ~= nil
                     or string.find(pname, "BountyIncident_Gem", 1, true) ~= nil
                     or string.find(pname, "BountyIncident_Assembly", 1, true) ~= nil
-                -- Гистерезис дистанции: для сундуков Jewelry подлетаем ближе (<= 4 ст) прямо к нужному сундуку
-                -- (не вбок +2.5, где рядом дорожный знак [P] и забор!), для остальных — 6 ст / 10 ст во время удержания
-                local maxStaticDist2 = isJewelryBox and (isHoldingThis and 36 or 16) or (isHoldingThis and 100 or 36)
-                if dist2 > maxStaticDist2 then
-                    self:_releasePrompt()
-                    if isJewelryBox then
-                        self.deps.teleportTo(px, py + 2.2, pz)
-                    else
-                        -- Статичный объект (Clean The Rock, Three Wishes, Stash): встаём СБОКУ на земле (не на макушке столба!)
-                        self.deps.teleportTo(px + 2.5, py + 1.5, pz)
+                if isJewelryBox then
+                    -- Встаём ПЕРЕД столом напротив нужного сундука и смотрим на него, чтобы появилась белая обводка!
+                    local sx, sy, sz = stand_out_bounty.jewelryStandPos(prompt, px, py, pz)
+                    local sdx, sdy, sdz = sx - meX, sy - meY, sz - meZ
+                    local sdist2 = sdx * sdx + sdy * sdy + sdz * sdz
+                    local maxSpotDist2 = isHoldingThis and 25 or 6.25
+                    if sdist2 > maxSpotDist2 then
+                        self:_releasePrompt()
+                        self.deps.teleportTo(sx, sy, sz, px, py, pz)
+                        self.lastAction = now
+                        self.statusText = title .. " | подхожу к сундуку"
+                        return
                     end
-                    self.lastAction = now
-                    self.statusText = title .. " | лечу к объекту"
-                    return
+                else
+                    -- Гистерезис дистанции: до начала удержания подлетаем ближе 6 ст,
+                    -- а пока [H] уже зажат — не сбрасываем удержание из-за толчка об коллизию камня (до 10 ст)
+                    local maxStaticDist2 = isHoldingThis and 100 or 36
+                    if dist2 > maxStaticDist2 then
+                        -- Статичный объект (Clean The Rock, Three Wishes, Stash): встаём СБОКУ на земле (не на макушке столба!)
+                        self:_releasePrompt()
+                        self.deps.teleportTo(px + 2.5, py + 1.5, pz)
+                        self.lastAction = now
+                        self.statusText = title .. " | лечу к объекту"
+                        return
+                    end
                 end
             end
 
