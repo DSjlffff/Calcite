@@ -16526,6 +16526,7 @@ function bridge.create(ctx)
             local stats = data and data:FindFirstChild("Stats")
             local st = {
                 activeQuest = readStrVal(stats, "ActiveQuest"),
+                inactiveRaw = readStrVal(stats, "InactiveQuests"),
                 completedRaw = readStrVal(stats, "CompletedQuests"),
                 cooldownsRaw = readStrVal(stats, "CompletedQuestsTime"),
                 dailyJson = readStrVal(stats, "DailyQuestState"),
@@ -17351,10 +17352,30 @@ function stand_out_quests.pickDialogueOption(options, context)
     return nil, nil
 end
 
+local function hasQuest(state, questId)
+    if state.activeQuest == questId then
+        return true
+    end
+    return state.inactive ~= nil and state.inactive[questId] == true
+end
+
+local function findHeldAngelo(state)
+    if stand_out_quests.isAngeloJob(state.activeQuest) then
+        return state.activeQuest
+    end
+    if state.inactive ~= nil then
+        for id in state.inactive do
+            if stand_out_quests.isAngeloJob(id) then
+                return id
+            end
+        end
+    end
+    return nil
+end
+
 -- Определяет какой квест из поддерживаемых должен выполняться следующим в зависимости от выбора пользователя и состояния.
 function stand_out_quests.selectTarget(choice, state)
     choice = choice or "All"
-    local active = state.activeQuest or ""
     local level = state.level or 0
     local completed = state.completed or {}
     local cooldowns = state.cooldowns or {}
@@ -17438,9 +17459,11 @@ function stand_out_quests.selectTarget(choice, state)
         return (not completed["BUKAY_BANDIT_PROBLEM"] and level >= 20) and "Usagi" or nil
     end
 
-    -- Режим "All": сначала доделываем уже активный поддерживаемый квест (кроме ожидающего роста горшка)
-    if stand_out_quests.isAngeloJob(active) then
-        local spec = ANGELO_JOBS[active]
+    -- Режим "All": только повторяемые и дейлики (Angelo / Lenny / Lettuce / Garden / Meryl Test Drive).
+    -- Одноразовые побочки (Bobby / Usagi) не перехватывают режим "All" — их можно выбрать вручную в списке.
+    local heldAngelo = not state.angeloDoneToday and findHeldAngelo(state) or nil
+    if heldAngelo ~= nil then
+        local spec = ANGELO_JOBS[heldAngelo]
         if spec ~= nil and spec.auto then
             if spec.item == nil or stand_out_quests.countInventoryItem(state.inventoryJson, spec.item) >= (spec.count or 1) then
                 if not spec.boss or state.bossAlive then
@@ -17448,13 +17471,14 @@ function stand_out_quests.selectTarget(choice, state)
                 end
             end
         end
-    elseif active == "LENNY_COP_CAR" then
+    end
+    if hasQuest(state, "LENNY_COP_CAR") then
         return "Lenny"
-    elseif active == "LETTUCE_TRADER" then
+    elseif hasQuest(state, "LETTUCE_TRADER") then
         return "Lettuce"
-    elseif active == "MERYL_TEST_DRIVE" then
+    elseif hasQuest(state, "MERYL_TEST_DRIVE") then
         return "MerylTestDrive"
-    elseif active == "BIG_CHOP_DAILY_GARDEN" then
+    elseif hasQuest(state, "BIG_CHOP_DAILY_GARDEN") then
         -- Если горшок ещё не посажен или уже созрел — делаем его, а пока растёт — уступаем Lenny/Angelo!
         local objs = state.objectives or {}
         local seedObj = objs["GardenDaily_Seed"]
@@ -17462,11 +17486,6 @@ function stand_out_quests.selectTarget(choice, state)
         if needPlant or state.gardenHasReadyPot then
             return "Garden"
         end
-    elseif active == "CAESAR_HAMON_BUBBLES" or active == "CAESAR_HAMON_VAMPIRE"
-        or active == "CAESAR_HAMON_WATER" or active == "CAESAR_HAMON_HUMU" then
-        return "Bobby"
-    elseif active == "BUKAY_BANDIT_PROBLEM" then
-        return "Usagi"
     end
 
     -- Иначе выбираем лучший доступный фарм-квест по приоритету
@@ -17576,11 +17595,11 @@ function Runner:_talkToNpc(now, npcName, dlgContext, lx, ly, lz)
 end
 
 function Runner:_stepAngelo(now, state, lx, ly, lz)
-    local active = state.activeQuest or ""
-    local jobId = stand_out_quests.isAngeloJob(active) and active or state.angeloJobId
+    local held = findHeldAngelo(state)
+    local jobId = held or state.angeloJobId
     local spec = jobId and ANGELO_JOBS[jobId] or nil
 
-    if not stand_out_quests.isAngeloJob(active) then
+    if held == nil then
         if state.angeloDoneToday or self.angeloDoneDay == (state.todayDay or 0) then
             self.statusText = "Angelo: выполнено сегодня"
             return
@@ -17648,8 +17667,7 @@ end
 
 function Runner:_stepLenny(now, state, lx, ly, lz)
     local d = self.deps
-    local active = state.activeQuest or ""
-    if active ~= "LENNY_COP_CAR" then
+    if not hasQuest(state, "LENNY_COP_CAR") then
         self.lennyParked = false
         self.lennyWaitCarAt = 0
         local rem = stand_out_quests.cooldownLeft(state.cooldowns, "LENNY_COP_CAR", 60, state.nowUnix)
@@ -17745,8 +17763,7 @@ end
 
 function Runner:_stepLettuce(now, state, lx, ly, lz)
     local d = self.deps
-    local active = state.activeQuest or ""
-    if active ~= "LETTUCE_TRADER" then
+    if not hasQuest(state, "LETTUCE_TRADER") then
         if self.crouching and d.setCrouch ~= nil then
             self.crouching = false
             d.setCrouch(false)
@@ -17861,8 +17878,7 @@ end
 
 function Runner:_stepGarden(now, state, lx, ly, lz)
     local d = self.deps
-    local active = state.activeQuest or ""
-    if active ~= "BIG_CHOP_DAILY_GARDEN" then
+    if not hasQuest(state, "BIG_CHOP_DAILY_GARDEN") then
         if stand_out_quests.isDailyDoneToday(state.dailyJson, "BIG_CHOP_DAILY_GARDEN", state.todayDay) then
             self.statusText = "Garden: дейлик выполнен"
             return
@@ -17917,8 +17933,7 @@ end
 
 function Runner:_stepMerylTestDrive(now, state, lx, ly, lz)
     local d = self.deps
-    local active = state.activeQuest or ""
-    if active ~= "MERYL_TEST_DRIVE" then
+    if not hasQuest(state, "MERYL_TEST_DRIVE") then
         self.merylCarEntered = false
         if stand_out_quests.isDailyDoneToday(state.dailyJson, "MERYL_TEST_DRIVE", state.todayDay)
             or self.merylDoneDay == (state.todayDay or 0) then
@@ -18087,6 +18102,7 @@ function Runner:update(now, cfg, lx, ly, lz)
     local d = self.deps
     local state = d.readState ~= nil and d.readState() or {}
     state.completed = state.completed or stand_out_quests.parseCompletedSet(state.completedRaw)
+    state.inactive = state.inactive or stand_out_quests.parseCompletedSet(state.inactiveRaw)
     state.cooldowns = state.cooldowns or stand_out_quests.parseCooldowns(state.cooldownsRaw)
     state.objectives = state.objectives or stand_out_quests.parseObjectives(state.objectivesRaw, state.objectivesTotalRaw)
     state.gardenWaiting = self.gardenWaiting
