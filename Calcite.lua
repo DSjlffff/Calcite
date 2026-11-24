@@ -3418,6 +3418,7 @@ local pairs = {
     ["Остальные предметы"] = "Other items", ["Не из каталога"] = "Not in catalog",
     ["Сюжет"] = "Story", ["Тренеры"] = "Trainers", ["Магазины"] = "Shops", ["Прочее"] = "Other",
     ["Квест"] = "Quest", ["Все доступные"] = "All Available",
+    ["Сюжетная линия Part 9"] = "Part 9 Storyline", ["Этапы Part 9"] = "Part 9 Chapters",
     [" ст/с"] = " st/s", [" мс"] = " ms", [" ст"] = " st",
 }
 local catalog = {}
@@ -8780,6 +8781,8 @@ function menu.create(deps)
     local hitboxTab = Window:AddTab("Hitboxes", "scan", "Части тела и точки наведения")
     local playerTab = Window:AddTab("Player", "user", "Перемещение персонажа")
     local farmTab = Window:AddTab("AutoFarm", "bot", "Автоматический сбор предметов")
+    local soFarm = {}
+    soFarm.storyTab = Window:AddTab("Auto Storyline", "book-open", "Сюжетная линия Part 9")
     local npcTab = Window:AddTab("NPC", "message-circle", "Диалоги и взаимодействия")
     local stealTab = Window:AddTab("Steal", "egg", "Зоны и доставка яиц")
     local teleportTab = Window:AddTab("Teleport", "map-pin", "Быстрое перемещение")
@@ -8964,7 +8967,6 @@ function menu.create(deps)
     local farmCount = farmGroup:AddLabel("Подобрано: 0")
 
     -- Stand Out AutoFarm: Item farm + Mob Farming + Farm Config (grouped in one local table for Luau register budget)
-    local soFarm = {}
     soFarm.itemGroup = farmTab:AddLeftGroupbox("Item farm")
     toggle(soFarm.itemGroup, "StandOutPickupEnabled", "Автоподбор", settings.standOutPickup, "enabled")
     toggle(soFarm.itemGroup, "StandOutPickupWorld", "Предметы на карте", settings.standOutPickup, "worldItems")
@@ -9087,11 +9089,20 @@ function menu.create(deps)
     end
     soFarm.questStatus = soFarm.questGroup:AddLabel("Завершено: 0")
 
-    soFarm.storyGroup = farmTab:AddRightGroupbox("Auto Storyline")
+    soFarm.storyGroup = soFarm.storyTab:AddLeftGroupbox("Auto Storyline")
     toggle(soFarm.storyGroup, "StandOutStoryEnabled", "Включить", settings.standOutStory, "enabled")
+    soFarm.storyStatus = soFarm.storyGroup:AddLabel("Сюжет: 0/58")
     soFarm.storyGroup:AddLabel("Проходит туториал и сюжетную линию Part 9 (P9_01..P9_47). " ..
         "Для баунти и прокачки уровня автоматически использует Auto Bounty и Farm Config.", true)
-    soFarm.storyStatus = soFarm.storyGroup:AddLabel("Сюжет: 0/58")
+
+    soFarm.storyInfoGroup = soFarm.storyTab:AddRightGroupbox("Этапы Part 9")
+    soFarm.storyInfoGroup:AddLabel("• Туториал: Cop, Jodio, Arrow\n" ..
+        "• Rohan's Villa & Wild Cat Size (P9_01–P9_05)\n" ..
+        "• Diamotch & Charming Man (P9_06–P9_17)\n" ..
+        "• Jodio Garden & Land Registry (P9_18–P9_22)\n" ..
+        "• Hospital, MRI & Bobby Jean (P9_23–P9_32)\n" ..
+        "• D'Arby Go Fish, Bounties & Lv 25 (P9_33–P9_34)\n" ..
+        "• Howler Megayacht, Ningbo & Key West (P9_35–P9_47)", true)
 
     -- aim
     local aimGroup = aimTab:AddLeftGroupbox("Наведение")
@@ -9515,7 +9526,7 @@ function menu.create(deps)
         soFarm.bountyGroup:SetVisible(modes.has(mode, "StandOutBounty"))
         soFarm.howlerGroup:SetVisible(modes.has(mode, "StandOutPickup"))
         soFarm.questGroup:SetVisible(modes.has(mode, "StandOutQuests"))
-        soFarm.storyGroup:SetVisible(modes.has(mode, "StandOutQuests"))
+        soFarm.storyTab:SetVisible(modes.has(mode, "StandOutQuests"))
         teamCheck:SetVisible(modes.has(mode, "TeamCheck"))
         throughWalls:SetVisible(modes.has(mode, "Wallbang"))
         autoStop:SetVisible(modes.has(mode, "AutoStop"))
