@@ -6591,6 +6591,17 @@ function main.start(env)
                 end
                 return nil
             end,
+            activeVerity = function()
+                local sb = handle._soBounty
+                if sb.verity ~= nil then
+                    if sb.verityAt ~= nil and env.clock() - sb.verityAt > 20.0 then
+                        sb.verity = nil
+                        return nil
+                    end
+                    return sb.verity
+                end
+                return nil
+            end,
             activeKaraoke = function()
                 local sb = handle._soBounty
                 if sb.karaoke ~= nil then
@@ -7523,6 +7534,13 @@ function main.start(env)
                                 if sub == "ClosePuzzle" then
                                     sb.puzzle = nil
                                     sb.puzzleSawGui = false
+                                    sb.verity = nil
+                                    return
+                                end
+                                if sub == "VerityDialogue" or sub == "VerityDialogueClose" then
+                                    local nowV = env.clock()
+                                    sb.verity = stand_out_bounty.applyVerityEvent(sb.verity, bountyId, sub, data, nowV)
+                                    sb.verityAt = nowV
                                     return
                                 end
                                 if type(sub) == "string" and (string.find(sub, "Drawing", 1, true) ~= nil or string.find(string.lower(sub), "rohan", 1, true) ~= nil) then
@@ -11329,12 +11347,11 @@ stand_out_bounty.open_retry = 1.2
 stand_out_bounty.begin_wait = 1.8
 stand_out_bounty.travel_retry = 2.0
 
--- Инциденты с ручными мини-играми (чай, Пако и т.п.) из Modules.Bounty.IncidentRules.Names.
--- Harvest, Hey Ya!, Cheap Jewelry, D'Arby, Rohan's Drawing Contest и Usagi's Karaoke Night поддерживаются автопрохождением!
+-- Инциденты с ручными мини-играми (чай, Пако) из Modules.Bounty.IncidentRules.Names.
+-- Harvest, Hey Ya!, Cheap Jewelry, D'Arby, Rohan, Usagi's Karaoke и Your Personal Helper Friend поддерживаются автопрохождением!
 local INCIDENT_NAMES = {
     ["iced tea run"] = true,
     ["paco's challenge"] = true,
-    ["your personal helper friend"] = true,
 }
 
 local Runner = {}
@@ -12736,6 +12753,64 @@ function stand_out_bounty.stepKaraoke(state, nowServer, nowClock, songPlayingInU
     return cmds, string.format("Karaoke: %d/%d", pressedCount, total)
 end
 
+-- Обрабатывает серверные пакеты VerityDialogue / VerityDialogueClose для "Your Personal Helper Friend" (Berity).
+function stand_out_bounty.applyVerityEvent(state, bountyId, sub, data, now)
+    if type(sub) ~= "string" then
+        return state
+    end
+    if sub == "VerityDialogueClose" or sub == "ClosePuzzle" then
+        return nil
+    end
+    if sub == "VerityDialogue" and type(data) == "table" and data.Token ~= nil then
+        return {
+            id = bountyId or (state and state.id),
+            token = data.Token,
+            choices = type(data.Choices) == "table" and data.Choices or {},
+            openedAt = now or 0,
+            lastSentAt = 0,
+        }
+    end
+    return state
+end
+
+-- Выбирает сюжетный вариант ответа в VerityChoices (любой, кроме Id="Leave" / "Never mind")
+-- и формирует пакет { Action = "VerityChoice", Id, Token, Choice }.
+function stand_out_bounty.nextVerityChoice(verity, now)
+    if type(verity) ~= "table" or verity.token == nil or type(verity.choices) ~= "table" or #verity.choices == 0 then
+        return nil, nil
+    end
+    if (now - (verity.openedAt or 0)) < 0.35 then
+        return nil, "Berity: читаю диалог..."
+    end
+    if (now - (verity.lastSentAt or 0)) < 0.9 then
+        return nil, "Berity: отвечаю..."
+    end
+    local picked = nil
+    for _, ch in ipairs(verity.choices) do
+        if type(ch) == "table" and type(ch.Id) == "string" then
+            local idLow = string.lower(ch.Id)
+            local txtLow = string.lower(tostring(ch.Text or ""))
+            if idLow ~= "leave" and string.find(txtLow, "never mind", 1, true) == nil then
+                picked = ch
+                break
+            end
+        end
+    end
+    if picked == nil then
+        picked = verity.choices[1]
+    end
+    if type(picked) ~= "table" or picked.Id == nil then
+        return nil, nil
+    end
+    verity.lastSentAt = now
+    return {
+        Action = "VerityChoice",
+        Id = verity.id,
+        Token = verity.token,
+        Choice = picked.Id,
+    }, "Berity: " .. tostring(picked.Id)
+end
+
 -- Проверяет, остались ли ещё невыполненные ходы в головоломке (без изменения puzzle.attempted).
 function stand_out_bounty.puzzleMovesRemaining(puzzle)
     if type(puzzle) ~= "table" or puzzle.open == false then
@@ -13059,10 +13134,12 @@ function Runner:update(now, opts, meX, meY, meZ)
     local puzzle = self.deps.activePuzzle ~= nil and self.deps.activePuzzle() or nil
     local rohan = self.deps.activeRohan ~= nil and self.deps.activeRohan() or nil
     local karaoke = self.deps.activeKaraoke ~= nil and self.deps.activeKaraoke() or nil
+    local verity = self.deps.activeVerity ~= nil and self.deps.activeVerity() or nil
     local darbySt = self.deps.darbyState ~= nil and self.deps.darbyState() or nil
     local inInspection = ui.jewelryOpen == true or ui.jewelryActionBtn ~= nil or puzzle ~= nil
     local inRohan = rohan ~= nil or ui.rohanOpen == true
     local inKaraoke = karaoke ~= nil
+    local inVerity = verity ~= nil
     local inDarbyGame = ui.darbyOpen == true or (darbySt ~= nil and darbySt.active == true)
     local darbyBusy = darbySt ~= nil and ((darbySt.tableCamera == true) or (darbySt.busyUntil ~= nil and now < darbySt.busyUntil))
     local inDarbyStorage = (ui.standStorageOpen == true or darbyBusy)
@@ -13075,8 +13152,8 @@ function Runner:update(now, opts, meX, meY, meZ)
     -- Дополнительно сверяем с атрибутом BountyNavigationActive (CanvasGroup трекера может оставаться Visible=true),
     -- но если на трекере явно видны незавершённые шаги (например MISSING FROG 1/2), таймер ИЛИ открыто окно мини-игры
     -- (игра может прятать BountyTracker во время мини-игры!) — баунти точно активно!
-    local hasActiveBounty = ui.trackerActive or inInspection or inRohan or inKaraoke or inDarbyGame or inDarbyStorage
-    if hasActiveBounty and not hasIncompleteSteps and not inInspection and not inRohan and not inKaraoke and not inDarbyGame and not inDarbyStorage and self.deps.navActive ~= nil then
+    local hasActiveBounty = ui.trackerActive or inInspection or inRohan or inKaraoke or inVerity or inDarbyGame or inDarbyStorage
+    if hasActiveBounty and not hasIncompleteSteps and not inInspection and not inRohan and not inKaraoke and not inVerity and not inDarbyGame and not inDarbyStorage and self.deps.navActive ~= nil then
         local okNav, nav = pcall(self.deps.navActive)
         if okNav and nav == false then
             local hasClock = string.find(ui.trackerTitle or "", "%d+:%d%d") ~= nil
@@ -13096,7 +13173,7 @@ function Runner:update(now, opts, meX, meY, meZ)
 
     -- Если на персонаже уже висит инцидент с мини-игрой, а включено «Пропускать мини-игры»,
     -- идём к Petyr и перезаписываем его на боевой/поисковый баунти!
-    local replaceIncident = hasActiveBounty and not inInspection and not inRohan and not inKaraoke and not inDarbyGame and (opts.skipIncidents ~= false) and stand_out_bounty.isIncident(ui.trackerTitle)
+    local replaceIncident = hasActiveBounty and not inInspection and not inRohan and not inKaraoke and not inVerity and not inDarbyGame and (opts.skipIncidents ~= false) and stand_out_bounty.isIncident(ui.trackerTitle)
 
     -- Отслеживаем завершение баунти (трекер был активен -> исчез)
     if self.wasTrackerActive and not hasActiveBounty then
@@ -13129,6 +13206,25 @@ function Runner:update(now, opts, meX, meY, meZ)
                 end
             end
             self.statusText = "Забираю награду..."
+            return
+        end
+
+        -- 0.40) Your Personal Helper Friend (Berity): авто-выбор варианта ответа в VerityDialogue
+        if inVerity then
+            self:_releasePrompt()
+            if self.deps.stopFighting ~= nil then
+                pcall(self.deps.stopFighting)
+            end
+            if self.deps.sendIncident ~= nil then
+                local move, suffix = stand_out_bounty.nextVerityChoice(verity, now)
+                if move ~= nil then
+                    self.lastAction = now
+                    pcall(self.deps.sendIncident, move)
+                end
+                self.statusText = title .. " | " .. (suffix or "Berity...")
+            else
+                self.statusText = title .. " | Berity..."
+            end
             return
         end
 
@@ -13439,7 +13535,7 @@ function Runner:update(now, opts, meX, meY, meZ)
             self.statusText = title .. " | стою на квадрате"
             return
         end
-        if string.match(objLow, "^%s*watch%s+") ~= nil then
+        if string.match(objLow, "^%s*watch%s+") ~= nil or string.find(objLow, "listen to the voice", 1, true) ~= nil then
             self:_releasePrompt()
             self.statusText = title .. " | жду сценку"
             return
@@ -13544,7 +13640,12 @@ function Runner:update(now, opts, meX, meY, meZ)
                 self:_releasePrompt()
                 if now - self.lastAction >= stand_out_bounty.travel_retry then
                     self.lastAction = now
-                    self.deps.teleportTo(tx + 2.5, ty + 1.5, tz)
+                    if ty > 45 then
+                        -- Высокие точки (напр. "Locate Berity" на кране Y=129.6): встаём в центр, чтобы не слететь с узкой балки!
+                        self.deps.teleportTo(tx, ty + 2.5, tz)
+                    else
+                        self.deps.teleportTo(tx + 2.5, ty + 1.5, tz, tx, ty, tz)
+                    end
                 end
                 self.statusText = title .. " | лечу к цели"
             else
