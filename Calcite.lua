@@ -15362,6 +15362,354 @@ end
 return stand_out_howler
 end
 
+__modules["stand_out_interact"] = function(require)
+-- Stand Out Unified Interact Engine: бронебойные взаимодействия с ProximityPrompt (мгновенные и с удержанием),
+-- ClickDetector и диалогами PlayerGui.Dialogue (на базе декомпила DialogueHandler и аудита всех промптов).
+-- Ключевые факты Stand Out (tools/standout_probe_interact.lua & standout_probe_dlghandler.lua):
+--   • Живые кнопки выбора диалога лежат ПРЯМО в Holder.Choices (ImageButton, сортировка по LayoutOrder), а НЕ в ChoiceLayout!
+--   • Body.Text всегда "" (RichText рендерит текст дочерними TextLabel внутри Body:GetChildren()).
+--   • Holder анимирует размер 0.12с (TweenInfo Quad Out) -> ждём 0.25с после появления кнопок, чтобы AbsolutePosition встал.
+--   • Все ProximityPrompt используют Key=H, Style=Custom; MaxActivationDistance от 5.8 ст (Big Chop) до 10-12 ст.
+--   • Многие квестовые/сюжетные промпты имеют HoldDuration 0.25..5.0с и/или RequiresLineOfSight=true.
+-- Чистая логика поверх deps, проверяется tests/stand_out_interact_test.lua.
+local stand_out_interact = {}
+
+stand_out_interact.tween_settle = 0.26      -- пауза после появления кнопок диалога (Holder tween = 0.12с)
+stand_out_interact.click_retry = 0.85       -- пауза перед эскалацией клика по той же кнопке
+stand_out_interact.blank_timeout = 3.0      -- через сколько секунд закрыть реально пустой диалог (0 глифов + 0 кнопок)
+stand_out_interact.hold_extra = 0.22        -- запас сверх HoldDuration для серверной проверки удержания
+stand_out_interact.instant_retry = 0.95     -- пауза между повторными триггерами мгновенного промпта
+stand_out_interact.approach_cap = 4.2       -- максимальная дистанция подхода к промпту (меньше Big Chop 5.8 и Petyr 7.0)
+
+local function low(s)
+    return string.lower(tostring(s or ""))
+end
+
+local function trim(s)
+    if type(s) ~= "string" then return "" end
+    return string.match(s, "^%s*(.-)%s*$") or ""
+end
+
+local function dist3(ax, ay, az, bx, by, bz)
+    local dx, dy, dz = ax - bx, ay - by, az - bz
+    return math.sqrt(dx * dx + dy * dy + dz * dz)
+end
+
+-- Оптимальная дистанция подхода к промпту с учётом MaxActivationDistance (всегда с запасом 1.5 ст).
+function stand_out_interact.approachDistance(maxActivationDist)
+    local d = tonumber(maxActivationDist)
+    if d == nil or d <= 0 then
+        return stand_out_interact.approach_cap
+    end
+    return math.max(2.2, math.min(d - 1.5, stand_out_interact.approach_cap))
+end
+
+-- Вычисляет безопасную точку рядом с объектом (3.2 ст вбок по Z, чтобы не застревать внутри NPC/детали и не ломать LOS).
+function stand_out_interact.approachPoint(tx, ty, tz, maxActivationDist)
+    local r = math.min(3.2, stand_out_interact.approachDistance(maxActivationDist) * 0.75)
+    return tx, ty + 1.2, tz + r
+end
+
+-- Выбирает лучший ProximityPrompt (или ClickDetector) из списка кандидатов.
+-- Каждый кандидат: { obj, isClick, name, action, objectText, enabled, available, hold, maxDist }
+-- opts: { preferredName, wantTalk = bool }
+function stand_out_interact.pickBestPrompt(candidates, opts)
+    if type(candidates) ~= "table" or #candidates == 0 then
+        return nil
+    end
+    opts = opts or {}
+    local prefName = opts.preferredName
+    local wantTalk = opts.wantTalk == true
+
+    local best, bestScore = nil, -1
+    for _, c in candidates do
+        if c.isClick then
+            local md = tonumber(c.maxDist) or 0
+            if md > 0 then
+                local score = wantTalk and 20 or 10
+                if score > bestScore then
+                    best, bestScore = c, score
+                end
+            end
+        elseif c.enabled ~= false and c.available ~= false then
+            local score = 50
+            local actLow = low(c.action)
+            local nameLow = low(c.name)
+            if prefName ~= nil and c.name == prefName then
+                score = 200
+            elseif wantTalk then
+                if actLow == "talk" or string.find(actLow, "talk", 1, true) ~= nil or string.find(nameLow, "talk", 1, true) ~= nil then
+                    score = 150
+                elseif string.find(actLow, "shop", 1, true) ~= nil
+                    or string.find(actLow, "cargo", 1, true) ~= nil
+                    or string.find(actLow, "deliver", 1, true) ~= nil
+                    or string.find(actLow, "gang", 1, true) ~= nil
+                    or string.find(actLow, "storage", 1, true) ~= nil then
+                    score = 15 -- второстепенные промпты NPC (GangShipment, BigChopShop и т.п.)
+                else
+                    score = 60
+                end
+            end
+            if score > bestScore then
+                best, bestScore = c, score
+            end
+        end
+    end
+    return best
+end
+
+-- Вычисляет сигнатуру текущего набора кнопок диалога (чтобы точно видеть переход на следующий экран).
+function stand_out_interact.choicesSignature(opts)
+    if type(opts) ~= "table" or #opts == 0 then
+        return ""
+    end
+    local parts = {}
+    for _, o in opts do
+        table.insert(parts, trim(tostring(o.text or "")))
+    end
+    return table.concat(parts, "|")
+end
+
+-- === Stateful Interact Controller ===
+local Controller = {}
+Controller.__index = Controller
+
+function stand_out_interact.new(deps)
+    return setmetatable({
+        deps = deps or {},
+        -- Prompt hold state
+        holdingPrompt = nil,
+        holdStartAt = 0,
+        holdTargetDur = 0,
+        lastPromptObj = nil,
+        lastPromptAt = -99,
+        promptAttempt = 0,
+        -- Dialogue state
+        dlgSig = "",
+        dlgSigAt = 0,
+        dlgBlankAt = 0,
+        dlgClickAt = -99,
+        dlgAttempt = 0,
+    }, Controller)
+end
+
+function Controller:releaseHold()
+    if self.holdingPrompt ~= nil then
+        local p = self.holdingPrompt
+        self.holdingPrompt = nil
+        self.holdStartAt = 0
+        self.holdTargetDur = 0
+        if self.deps.holdPromptEnd ~= nil then
+            self.deps.holdPromptEnd(p)
+        end
+    end
+end
+
+function Controller:resetDialogue()
+    self.dlgSig = ""
+    self.dlgSigAt = 0
+    self.dlgBlankAt = 0
+    self.dlgAttempt = 0
+end
+
+function Controller:stop()
+    self:releaseHold()
+    self:resetDialogue()
+    self.lastPromptObj = nil
+    self.promptAttempt = 0
+end
+
+-- Полный цикл взаимодействия с объектом/промптом:
+-- 1) Если далеко (> approachDistance) — телепортирует в безопасную точку рядом и даёт 1 тик на стабилизацию.
+-- 2) Если HoldDuration > 0.05 — честно держит InputHoldBegin + клавишу (H) ровно HoldDuration + 0.22с и отпускает.
+-- 3) Если HoldDuration <= 0.05 — вызывает fireproximityprompt, а при повторе эскалирует в InputHoldBegin/End + ClickDetector.
+-- Возвращает статус: "moving" | "holding" | "triggered" | "waiting" | "missing"
+function Controller:interactPrompt(now, promptInfo, lx, ly, lz)
+    local d = self.deps
+    if promptInfo == nil or promptInfo.obj == nil then
+        self:releaseHold()
+        return "missing"
+    end
+
+    local tx, ty, tz = promptInfo.x, promptInfo.y, promptInfo.z
+    local maxRange = stand_out_interact.approachDistance(promptInfo.maxDist)
+
+    -- 1) Подходим достаточно близко (с учётом MaxActivationDistance конкретного промпта!)
+    if tx ~= nil and (lx == nil or dist3(lx, ly, lz, tx, ty, tz) > maxRange) then
+        self:releaseHold()
+        local ax, ay, az = stand_out_interact.approachPoint(tx, ty, tz, promptInfo.maxDist)
+        if d.teleportTo ~= nil then
+            d.teleportTo(ax, ay, az, tx, ty, tz)
+        end
+        self.lastPromptAt = now - stand_out_interact.instant_retry + 0.22 -- короткий settle после ТП
+        return "moving"
+    end
+
+    -- 2) ClickDetector — мгновенный вызов
+    if promptInfo.isClick then
+        self:releaseHold()
+        if now - self.lastPromptAt >= stand_out_interact.instant_retry then
+            self.lastPromptAt = now
+            if d.fireClick ~= nil then
+                d.fireClick(promptInfo.obj)
+            elseif d.firePrompt ~= nil then
+                d.firePrompt(promptInfo.obj)
+            end
+            return "triggered"
+        end
+        return "waiting"
+    end
+
+    -- 3) Если это промпт с удержанием (HoldDuration > 0.05)
+    local holdDur = tonumber(promptInfo.hold) or 0
+    if holdDur > 0.05 then
+        if self.holdingPrompt ~= promptInfo.obj then
+            self:releaseHold()
+            self.holdingPrompt = promptInfo.obj
+            self.holdStartAt = now
+            self.holdTargetDur = holdDur + stand_out_interact.hold_extra
+            if d.holdPromptBegin ~= nil then
+                d.holdPromptBegin(promptInfo.obj, holdDur)
+            elseif d.firePrompt ~= nil then
+                d.firePrompt(promptInfo.obj)
+            end
+            return "holding"
+        end
+        if now - self.holdStartAt < self.holdTargetDur then
+            return "holding"
+        end
+        -- Завершили удержание!
+        self:releaseHold()
+        if d.firePrompt ~= nil then
+            d.firePrompt(promptInfo.obj) -- страхующий дожим, если сервер ждёт финальный триггер
+        end
+        self.lastPromptAt = now
+        return "triggered"
+    end
+
+    -- 4) Мгновенный ProximityPrompt (HoldDuration == 0) с авто-эскалацией при повторных попытках
+    self:releaseHold()
+    if self.lastPromptObj ~= promptInfo.obj then
+        self.lastPromptObj = promptInfo.obj
+        self.promptAttempt = 0
+    end
+    if now - self.lastPromptAt < stand_out_interact.instant_retry then
+        return "waiting"
+    end
+    self.lastPromptAt = now
+    self.promptAttempt += 1
+
+    if self.promptAttempt == 1 then
+        if d.firePrompt ~= nil then
+            d.firePrompt(promptInfo.obj)
+        end
+    elseif self.promptAttempt == 2 then
+        -- Эскалация 2: короткий InputHoldBegin + клавиша H + InputHoldEnd
+        if d.pulsePrompt ~= nil then
+            d.pulsePrompt(promptInfo.obj)
+        elseif d.firePrompt ~= nil then
+            d.firePrompt(promptInfo.obj)
+        end
+    else
+        -- Эскалация 3: firePrompt + запасной ClickDetector (если есть на том же NPC)
+        if d.firePrompt ~= nil then
+            d.firePrompt(promptInfo.obj)
+        end
+        if promptInfo.fallbackClick ~= nil and d.fireClick ~= nil then
+            d.fireClick(promptInfo.fallbackClick)
+        end
+        self.promptAttempt = 0
+    end
+    return "triggered"
+end
+
+-- Обрабатывает открытый диалог с 3-уровневой эскалацией клика:
+--   Уровень 1 (0.26с после появления кнопок): реальный клик мышью VIM (после окончания 0.12с tween Holder'а).
+--   Уровень 2 (+0.85с если кнопки не сменились): клавиша VIM (1..9).
+--   Уровень 3 (+1.70с если всё ещё висит): безопасный вызов conn.Function через task.spawn.
+-- Если диалог реально пустой (0 глифов в Body И 0 кнопок в Choices) > 3.0с — безопасно закрывает через closeDialogue.
+-- pickerFn(options) -> (chosenOption, tag)
+-- Возвращает (isOpen, tag)
+function Controller:stepDialogue(now, snap, pickerFn)
+    local d = self.deps
+    if snap == nil or not snap.isOpen then
+        self:resetDialogue()
+        return false, nil
+    end
+
+    -- Во время открытого диалога всегда отпускаем любые зажатые промпты
+    self:releaseHold()
+
+    local opts = snap.options or {}
+    local glyphCount = snap.glyphCount or 0
+
+    if #opts == 0 then
+        self.dlgSig = ""
+        self.dlgAttempt = 0
+        if glyphCount == 0 then
+            if self.dlgBlankAt == 0 then
+                self.dlgBlankAt = now
+            elseif now - self.dlgBlankAt >= stand_out_interact.blank_timeout then
+                self.dlgBlankAt = now
+                if d.closeDialogue ~= nil then
+                    d.closeDialogue()
+                end
+                return true, "closed_blank"
+            end
+        else
+            -- Текст печатается (глифы уже есть, кнопок ещё нет) — терпеливо ждём!
+            self.dlgBlankAt = 0
+        end
+        return true, "typing"
+    end
+
+    self.dlgBlankAt = 0
+    local sig = stand_out_interact.choicesSignature(opts)
+    if sig ~= self.dlgSig then
+        self.dlgSig = sig
+        self.dlgSigAt = now
+        self.dlgAttempt = 0
+        return true, "settling"
+    end
+
+    -- Ждём окончания 0.12с анимации resizeDialogue (tween_settle = 0.26с), чтобы кнопки перестали двигаться
+    if now - self.dlgSigAt < stand_out_interact.tween_settle then
+        return true, "settling"
+    end
+
+    local chosen, tag = pickerFn(opts)
+    if chosen == nil then
+        return true, "no_match"
+    end
+
+    if self.dlgAttempt > 0 and now - self.dlgClickAt < stand_out_interact.click_retry then
+        return true, "waiting_click"
+    end
+
+    self.dlgClickAt = now
+    self.dlgAttempt += 1
+
+    local mode = "mouse"
+    if self.dlgAttempt == 1 then
+        mode = "mouse"
+    elseif self.dlgAttempt == 2 then
+        mode = "key"
+    else
+        mode = "conn"
+        if self.dlgAttempt >= 4 then
+            self.dlgAttempt = 0
+        end
+    end
+
+    if d.clickDialogue ~= nil then
+        d.clickDialogue(chosen, mode)
+    end
+    return true, tag or "clicked"
+end
+
+return stand_out_interact
+end
+
 __modules["stand_out_mobs"] = function(require)
 -- Stand Out Mob Farming: сканер враждебных мобов, расчёт позиции (Behind/Below/Over/Front),
 -- Auto Summon (E), Auto Skill (1..9 с проверкой кулдауна и SkillActive) и M1-фолбэк.
@@ -16399,9 +16747,10 @@ return stand_out_pickup
 end
 
 __modules["stand_out_quest_bridge"] = function(require)
--- Roblox runtime adapter for stand_out_quests and stand_out_story.
+-- Roblox runtime adapter for stand_out_quests and stand_out_story, powered by stand_out_interact.
 -- Keeps main.lua compact and well below Luau's 200-local register limit.
 local stand_out_bounty = require("./stand_out_bounty")
+local stand_out_interact = require("./stand_out_interact")
 local stand_out_mobs = require("./stand_out_mobs")
 local stand_out_quests = require("./stand_out_quests")
 
@@ -16424,50 +16773,117 @@ local function safePos(obj)
     return nil, nil, nil
 end
 
-local function bestPrompt(root, preferredName)
-    if root == nil or root.GetDescendants == nil then return nil end
-    local fallbackPp, fallbackCd = nil, nil
+local function collectPromptCandidates(root)
+    local out = {}
+    if root == nil or root.GetDescendants == nil then
+        return out
+    end
     for _, d in root:GetDescendants() do
         local isPp, isCd = false, false
         pcall(function()
             isPp = d:IsA("ProximityPrompt")
             isCd = not isPp and d:IsA("ClickDetector")
         end)
-        if isPp and d.Enabled == true then
-            if preferredName ~= nil and d.Name == preferredName then
-                return d
-            end
-            if fallbackPp == nil then
-                fallbackPp = d
-            end
-        elseif isCd and fallbackCd == nil then
-            fallbackCd = d
+        if isPp then
+            local avail = true
+            pcall(function()
+                if d:GetAttribute("StoryPromptAvailable") == false then
+                    avail = false
+                end
+            end)
+            table.insert(out, {
+                obj = d,
+                isClick = false,
+                name = d.Name,
+                action = d.ActionText,
+                objectText = d.ObjectText,
+                enabled = d.Enabled == true,
+                available = avail,
+                hold = tonumber(d.HoldDuration) or 0,
+                maxDist = tonumber(d.MaxActivationDistance) or 10,
+            })
+        elseif isCd then
+            table.insert(out, {
+                obj = d,
+                isClick = true,
+                name = d.Name,
+                maxDist = tonumber(d.MaxActivationDistance) or 0,
+            })
         end
     end
-    return fallbackPp or fallbackCd
+    return out
+end
+
+local function pickPromptInfo(root, opts)
+    local cands = collectPromptCandidates(root)
+    local chosen = stand_out_interact.pickBestPrompt(cands, opts)
+    if chosen == nil then
+        return nil
+    end
+    local x, y, z = stand_out_bounty.promptPosition(chosen.obj)
+    if x == nil then
+        x, y, z = safePos(root)
+    end
+    chosen.x, chosen.y, chosen.z = x, y, z
+    -- Сохраняем запасной ClickDetector на том же NPC для 3-го уровня эскалации
+    if not chosen.isClick then
+        for _, c in cands do
+            if c.isClick and (c.maxDist or 0) > 0 then
+                chosen.fallbackClick = c.obj
+                break
+            end
+        end
+    end
+    return chosen
+end
+
+local function wrapSinglePrompt(pp)
+    if pp == nil then return nil end
+    local isCd = false
+    pcall(function() isCd = pp:IsA("ClickDetector") end)
+    local x, y, z = stand_out_bounty.promptPosition(pp)
+    return {
+        obj = pp,
+        isClick = isCd,
+        name = pp.Name,
+        action = not isCd and pp.ActionText or "",
+        objectText = not isCd and pp.ObjectText or "",
+        enabled = isCd or pp.Enabled == true,
+        available = true,
+        hold = not isCd and (tonumber(pp.HoldDuration) or 0) or 0,
+        maxDist = tonumber(pp.MaxActivationDistance) or 10,
+        x = x,
+        y = y,
+        z = z,
+    }
 end
 
 local function activateGuiBtn(btn, env)
     if btn == nil then return end
     local function trySig(sig)
         if sig == nil then return false end
-        if type(env.firesignal) == "function" then
-            if pcall(env.firesignal, sig) then return true end
-        end
         if type(env.getconnections) == "function" then
             local ok, conns = pcall(env.getconnections, sig)
             if ok and type(conns) == "table" and #conns > 0 then
                 for _, c in conns do
-                    if c.Fire ~= nil then pcall(function() c:Fire() end)
-                    elseif type(c.Function) == "function" then pcall(c.Function) end
+                    if type(c.Function) == "function" then
+                        if env.task and env.task.spawn then
+                            env.task.spawn(c.Function)
+                        else
+                            pcall(c.Function)
+                        end
+                    end
                 end
                 return true
             end
         end
+        if type(env.firesignal) == "function" then
+            if pcall(env.firesignal, sig) then return true end
+        end
         return false
     end
-    if not trySig(btn.Activated) then
-        trySig(btn.MouseButton1Click)
+    if not trySig(btn.MouseButton1Click) then
+        trySig(btn.Activated)
     end
 end
 
@@ -16499,6 +16915,15 @@ function bridge.create(ctx)
     local function clickRealMouse(btn)
         local vim = env.virtualInputManager
         if btn == nil or vim == nil then return false end
+        -- Если курсор залочен ShiftLock'ом, VIM mouse move не дойдёт до кнопки -> сразу отдаём false для эскалации
+        local locked = false
+        pcall(function()
+            local uis = game:GetService("UserInputService")
+            if uis ~= nil and env.Enum and env.Enum.MouseBehavior then
+                locked = uis.MouseBehavior == env.Enum.MouseBehavior.LockCenter
+            end
+        end)
+        if locked then return false end
         local okPos, pos, sz = pcall(function() return btn.AbsolutePosition, btn.AbsoluteSize end)
         if not okPos or pos == nil or sz == nil or sz.X <= 0 or sz.Y <= 0 then
             return false
@@ -16528,16 +16953,65 @@ function bridge.create(ctx)
         return true
     end
 
+    local function promptKeyCode(prompt)
+        local kc = nil
+        pcall(function() kc = prompt.KeyboardKeyCode end)
+        if kc == nil and env.Enum and env.Enum.KeyCode then
+            kc = env.Enum.KeyCode.H
+        end
+        return kc
+    end
+
+    local function fireClick(cd)
+        if cd ~= nil and type(env.fireclickdetector) == "function" then
+            pcall(env.fireclickdetector, cd)
+        end
+    end
+
     local function fireAnyPrompt(prompt)
         if prompt == nil then return end
         local isCd = false
         pcall(function() isCd = prompt:IsA("ClickDetector") end)
         if isCd then
-            if type(env.fireclickdetector) == "function" then
-                pcall(env.fireclickdetector, prompt)
-            end
-        elseif type(env.fireproximityprompt) == "function" then
+            fireClick(prompt)
+            return
+        end
+        pcall(function() prompt.RequiresLineOfSight = false end)
+        if type(env.fireproximityprompt) == "function" then
             pcall(env.fireproximityprompt, prompt)
+        end
+    end
+
+    local function holdPromptBegin(prompt, _)
+        if prompt == nil then return end
+        pcall(function() prompt.RequiresLineOfSight = false end)
+        pcall(function() prompt:InputHoldBegin() end)
+        local vim = env.virtualInputManager
+        local kc = promptKeyCode(prompt)
+        if vim ~= nil and kc ~= nil then
+            pcall(function() vim:SendKeyEvent(true, kc, false, game) end)
+        end
+    end
+
+    local function holdPromptEnd(prompt)
+        if prompt == nil then return end
+        pcall(function() prompt:InputHoldEnd() end)
+        local vim = env.virtualInputManager
+        local kc = promptKeyCode(prompt)
+        if vim ~= nil and kc ~= nil then
+            pcall(function() vim:SendKeyEvent(false, kc, false, game) end)
+        end
+    end
+
+    local function pulsePrompt(prompt)
+        if prompt == nil then return end
+        holdPromptBegin(prompt, 0)
+        if env.task and env.task.delay then
+            env.task.delay(0.08, function()
+                holdPromptEnd(prompt)
+            end)
+        else
+            holdPromptEnd(prompt)
         end
     end
 
@@ -16553,7 +17027,6 @@ function bridge.create(ctx)
 
     return {
         readState = function()
-            local sq = handle._soQuest
             local data = localPlayer and localPlayer:FindFirstChild("Data")
             local stats = data and data:FindFirstChild("Stats")
             local st = {
@@ -16575,7 +17048,6 @@ function bridge.create(ctx)
                 gardenHasReadyPot = false,
             }
 
-            -- Читаем заголовок живого QuestTracker UI (например "Catalytic Converter")
             pcall(function()
                 local pg = localPlayer and localPlayer:FindFirstChildOfClass("PlayerGui")
                 local qg = pg and pg:FindFirstChild("Quests")
@@ -16586,11 +17058,6 @@ function bridge.create(ctx)
                 end
             end)
 
-            -- НЕ вызываем env.gameRequire(Modules.Quests) внутри RenderStepped:
-            -- require игрового ModuleScript понижает thread identity текущего кадра до 2 и ломает доступ к CoreGui (SetText)!
-            -- Все нужные флаги (DailyQuestState, ActiveQuest, Inventory, GardeningState) уже читаются напрямую из Data.Stats.
-
-            -- Weather check
             pcall(function()
                 local w = workspace:GetAttribute("Weather")
                 if w == nil then
@@ -16606,7 +17073,6 @@ function bridge.create(ctx)
                 end
             end)
 
-            -- Garden ready pots
             local pots = stand_out_quests.parseGardenPots(st.gardenJson)
             for _, pot in pots do
                 if pot.ready then
@@ -16615,7 +17081,6 @@ function bridge.create(ctx)
                 end
             end
 
-            -- Boss check (Jotaro / DIO)
             pcall(function()
                 local gf = workspace:FindFirstChild("Game")
                 local pf = gf and gf:FindFirstChild("Players")
@@ -16636,69 +17101,71 @@ function bridge.create(ctx)
             return st
         end,
 
-        readDialogue = function()
+        -- Точное чтение диалога по декомпилу DialogueHandler:
+        --   • Живые кнопки выбора — прямые дети Holder.Choices (<ImageButton>, сортировка по LayoutOrder)
+        --   • RichText рендерит текст дочерними TextLabel внутри Body:GetChildren() (Body.Text всегда "")
+        readDialogueSnap = function()
             local pg = localPlayer and localPlayer:FindFirstChildOfClass("PlayerGui")
-            if pg == nil then return nil, "", false end
+            if pg == nil then
+                return { isOpen = false, options = {}, glyphCount = 0 }
+            end
             local dlg = pg:FindFirstChild("Dialogue")
             if dlg == nil or dlg.Enabled ~= true then
-                return nil, "", false
+                return { isOpen = false, options = {}, glyphCount = 0 }
             end
             local holder = dlg:FindFirstChild("Holder")
             if holder ~= nil and holder.Visible == false then
-                return nil, "", false
+                return { isOpen = false, options = {}, glyphCount = 0 }
             end
-            local bodyText = ""
+
+            local glyphCount = 0
             local opts = {}
             pcall(function()
                 local bs = holder and holder:FindFirstChild("BodyScroll")
                 local body = bs and bs:FindFirstChild("Body")
-                if body ~= nil and type(body.Text) == "string" then
-                    bodyText = body.Text
+                if body ~= nil then
+                    glyphCount = #body:GetChildren()
+                    if glyphCount == 0 and type(body.Text) == "string" and body.Text ~= "" then
+                        glyphCount = #body.Text
+                    end
                 end
                 local choices = holder and holder:FindFirstChild("Choices")
-                local layout = choices and choices:FindFirstChild("ChoiceLayout")
-                if layout ~= nil then
-                    for _, child in layout:GetChildren() do
-                        if child.Name ~= "Template" and (child:IsA("ImageButton") or child:IsA("TextButton")) and child.Visible ~= false then
-                            local txt = ""
-                            if child:IsA("TextButton") and child.Text ~= "" then
-                                txt = child.Text
-                            else
-                                local box = child:FindFirstChild("Box") or child:FindFirstChildWhichIsA("TextLabel", true)
-                                if box ~= nil and type(box.Text) == "string" then
-                                    txt = box.Text
-                                end
-                            end
-                            local plain = string.gsub(txt, "<[^>]+>", "")
-                            if plain ~= "" then
-                                local key = string.match(plain, "^%s*(%d)%.")
-                                table.insert(opts, { button = child, text = plain, key = key })
-                            end
+                if choices ~= nil then
+                    local btns = {}
+                    for _, child in choices:GetChildren() do
+                        if child:IsA("ImageButton") and child.Visible ~= false then
+                            table.insert(btns, child)
+                        end
+                    end
+                    table.sort(btns, function(a, b)
+                        return (a.LayoutOrder or 0) < (b.LayoutOrder or 0)
+                    end)
+                    for _, btn in btns do
+                        local box = btn:FindFirstChild("Box") or btn:FindFirstChildWhichIsA("TextLabel", true)
+                        local raw = box ~= nil and type(box.Text) == "string" and box.Text or ""
+                        local plain = string.gsub(raw, "<[^>]+>", "")
+                        if plain ~= "" then
+                            local key = string.match(plain, "^%s*(%d)%.")
+                            table.insert(opts, { button = btn, text = plain, key = key })
                         end
                     end
                 end
             end)
+
             if #opts == 0 then
                 local snap = stand_out_bounty.readUi(pg)
-                if snap ~= nil and snap.dialogueOptions ~= nil then
+                if snap ~= nil and snap.dialogueOptions ~= nil and #snap.dialogueOptions > 0 then
                     opts = snap.dialogueOptions
                 end
             end
-            return opts, bodyText, true
-        end,
 
-        isDialogueOpen = function()
-            local pg = localPlayer and localPlayer:FindFirstChildOfClass("PlayerGui")
-            local dlg = pg and pg:FindFirstChild("Dialogue")
-            if dlg == nil or dlg.Enabled ~= true then return false end
-            local holder = dlg:FindFirstChild("Holder")
-            return holder == nil or holder.Visible ~= false
+            return { isOpen = true, options = opts, glyphCount = glyphCount }
         end,
 
         closeDialogue = function()
             local gReq = env.gameRequire
             if type(gReq) ~= "function" then return end
-            -- Запускаем в отдельном task.spawn, чтобы gameRequire не понизил identity RenderStepped-потока!
+            -- Отдельный task.spawn, чтобы gameRequire не понижал thread identity основного кадра
             local run = function()
                 pcall(function()
                     local rs = game:GetService("ReplicatedStorage")
@@ -16719,27 +17186,59 @@ function bridge.create(ctx)
             end
         end,
 
-        clickDialogue = function(opt)
+        clickDialogue = function(opt, mode)
             if opt == nil then return end
-            -- В Stand Out кнопки диалога реагируют на настоящий клик мыши (VirtualInputManager) без зависаний firesignal!
-            if opt.button ~= nil and clickRealMouse(opt.button) then
-                return
-            end
-            if opt.key ~= nil then
-                sendKey(opt.key)
+            mode = mode or "mouse"
+            if mode == "mouse" then
+                if opt.button ~= nil and clickRealMouse(opt.button) then
+                    return
+                end
+                -- Если ShiftLock заблокировал курсор -> сразу пробуем безопасный task.spawn(conn.Function)
+                if opt.button ~= nil then
+                    activateGuiBtn(opt.button, env)
+                    return
+                end
+                if opt.key ~= nil then sendKey(opt.key) end
+            elseif mode == "key" then
+                if opt.key ~= nil then
+                    sendKey(opt.key)
+                elseif opt.button ~= nil then
+                    clickRealMouse(opt.button)
+                end
+            else
+                -- Уровень 3: task.spawn(conn.Function) без зависаний и без падения identity
+                if opt.button ~= nil then
+                    activateGuiBtn(opt.button, env)
+                elseif opt.key ~= nil then
+                    sendKey(opt.key)
+                end
             end
         end,
 
-        teleportTo = function(x, y, z)
+        teleportTo = function(x, y, z, lookX, lookY, lookZ)
             local ch = localPlayer and localPlayer.Character
             local root = ch and ch:FindFirstChild("HumanoidRootPart")
             if root ~= nil then
-                root.CFrame = env.CFrame.new(x, y, z)
+                if lookX ~= nil and lookY ~= nil and lookZ ~= nil and env.CFrame.lookAt ~= nil then
+                    local pos = env.Vector3.new(x, y, z)
+                    local flat = env.Vector3.new(lookX, y, lookZ)
+                    if (flat - pos).Magnitude > 0.05 then
+                        root.CFrame = env.CFrame.lookAt(pos, flat)
+                    else
+                        root.CFrame = env.CFrame.new(x, y, z)
+                    end
+                else
+                    root.CFrame = env.CFrame.new(x, y, z)
+                end
                 root.AssemblyLinearVelocity = env.Vector3.new(0, 0, 0)
             end
         end,
 
         firePrompt = fireAnyPrompt,
+        fireClick = fireClick,
+        holdPromptBegin = holdPromptBegin,
+        holdPromptEnd = holdPromptEnd,
+        pulsePrompt = pulsePrompt,
 
         findNpc = function(name, preferredPrompt)
             local gf = workspace:FindFirstChild("Game")
@@ -16754,7 +17253,8 @@ function bridge.create(ctx)
             end
             if npc == nil then return nil, nil, nil, nil end
             local x, y, z = safePos(npc)
-            return x, y, z, bestPrompt(npc, preferredPrompt)
+            local pInfo = pickPromptInfo(npc, { preferredName = preferredPrompt, wantTalk = true })
+            return x, y, z, pInfo
         end,
 
         interactNpc = function(name)
@@ -16762,7 +17262,10 @@ function bridge.create(ctx)
             local npcs = gf and gf:FindFirstChild("NPCs")
             local npc = npcs and npcs:FindFirstChild(name)
             if npc ~= nil then
-                fireAnyPrompt(bestPrompt(npc))
+                local pInfo = pickPromptInfo(npc, { wantTalk = true })
+                if pInfo ~= nil then
+                    fireAnyPrompt(pInfo.obj)
+                end
             end
         end,
 
@@ -16799,11 +17302,11 @@ function bridge.create(ctx)
                         local isPp = false
                         pcall(function() isPp = obj:IsA("ProximityPrompt") end)
                         if isPp then
-                            local x, y, z = stand_out_bounty.promptPosition(obj)
-                            return x, y, z, obj
+                            local pInfo = wrapSinglePrompt(obj)
+                            return pInfo.x, pInfo.y, pInfo.z, pInfo
                         end
                         local x, y, z = safePos(obj)
-                        return x, y, z, bestPrompt(obj)
+                        return x, y, z, pickPromptInfo(obj, { wantTalk = false })
                     end
                 end
             end
@@ -16816,10 +17319,9 @@ function bridge.create(ctx)
             local sa = gf:FindFirstChild("StoryActors")
             local folder = sa and sa:FindFirstChild(folderName)
             if folder == nil then return nil, nil, nil, nil end
-            local pp = bestPrompt(folder)
-            if pp ~= nil then
-                local x, y, z = stand_out_bounty.promptPosition(pp)
-                return pp, x, y, z
+            local pInfo = pickPromptInfo(folder, { wantTalk = false })
+            if pInfo ~= nil then
+                return pInfo, pInfo.x, pInfo.y, pInfo.z
             end
             return nil, nil, nil, nil
         end,
@@ -16857,7 +17359,10 @@ function bridge.create(ctx)
                     end
                 end
             end
-            return best, bx, by, bz
+            if best ~= nil then
+                return wrapSinglePrompt(best), bx, by, bz
+            end
+            return nil, nil, nil, nil
         end,
 
         findTrailPoints = function(folderName)
@@ -16893,9 +17398,9 @@ function bridge.create(ctx)
                         or (actionKind == "seed" and (string.find(nm, "plant", 1, true) ~= nil or string.find(nm, "seed", 1, true) ~= nil))
                         or (actionKind == "harvest" and (string.find(nm, "harvest", 1, true) ~= nil or string.find(nm, "pick", 1, true) ~= nil))
                     if hit then
-                        local x, y, z = stand_out_bounty.promptPosition(d)
-                        if x ~= nil then
-                            return d, x, y, z
+                        local pInfo = wrapSinglePrompt(d)
+                        if pInfo.x ~= nil then
+                            return pInfo, pInfo.x, pInfo.y, pInfo.z
                         end
                     end
                 end
@@ -16929,7 +17434,7 @@ function bridge.create(ctx)
                                 bp = sub
                             end
                         end
-                        bestCar, bx, by, bz, bestPrompt, bestD = m, x, y, z, bp, dd
+                        bestCar, bx, by, bz, bestPrompt, bestD = m, x, y, z, bp and wrapSinglePrompt(bp) or nil, dd
                     end
                 end
             end
@@ -17112,6 +17617,7 @@ __modules["stand_out_quests"] = function(require)
 --   • Bobby Hamon Chain (CAESAR_HAMON_BUBBLES -> VAMPIRE -> WATER -> HUMU)
 --   • Usagi: Bandit Problem (BUKAY_BANDIT_PROBLEM — 5 бандитов по трекерам)
 -- Чистая логика поверх deps, проверяется tests/stand_out_quests_test.lua.
+local stand_out_interact = require("./stand_out_interact")
 local stand_out_quests = {}
 
 stand_out_quests.step_delay = 0.28
@@ -17656,16 +18162,14 @@ local Runner = {}
 Runner.__index = Runner
 
 function stand_out_quests.new(deps)
+    deps = deps or {}
     return setmetatable({
-        deps = deps or {},
+        deps = deps,
+        interact = stand_out_interact.new(deps),
         completed = 0,
         statusText = "",
         wantsBounty = false,
         lastStepAt = -99,
-        lastTalkAt = -99,
-        lastClickAt = -99,
-        dlgBody = "",
-        dlgBodyChangedAt = 0,
         lastEmoteAt = -99,
         lastActiveQuest = "",
         angeloDoneDay = -1,
@@ -17685,6 +18189,9 @@ end
 function Runner:stop()
     self.wantsBounty = false
     self.statusText = ""
+    if self.interact ~= nil then
+        self.interact:stop()
+    end
     if self.crouching and self.deps.setCrouch ~= nil then
         self.crouching = false
         self.deps.setCrouch(false)
@@ -17694,57 +18201,40 @@ function Runner:stop()
     end
 end
 
+local function toPromptInfo(prompt, x, y, z)
+    if prompt == nil then return nil end
+    if type(prompt) == "table" and prompt.obj ~= nil then
+        if prompt.x == nil then prompt.x, prompt.y, prompt.z = x, y, z end
+        return prompt
+    end
+    return { obj = prompt, x = x, y = y, z = z, hold = 0, maxDist = 10 }
+end
+
+function Runner:_readDialogueSnap()
+    local d = self.deps
+    if d.readDialogueSnap ~= nil then
+        return d.readDialogueSnap()
+    end
+    if d.readDialogue ~= nil then
+        local opts, bodyText, isOpen = d.readDialogue()
+        if isOpen == nil then
+            isOpen = (opts ~= nil and #opts > 0) or (d.isDialogueOpen ~= nil and d.isDialogueOpen())
+        end
+        local glyphs = type(bodyText) == "string" and #bodyText or (opts ~= nil and #opts > 0 and 1 or 0)
+        return { isOpen = isOpen == true, options = opts or {}, glyphCount = glyphs }
+    end
+    return { isOpen = false, options = {}, glyphCount = 0 }
+end
+
 function Runner:_talkToNpc(now, npcName, dlgContext, lx, ly, lz)
     local d = self.deps
-    local opts, bodyText, isOpen = nil, nil, false
-    if d.readDialogue ~= nil then
-        opts, bodyText, isOpen = d.readDialogue()
-    end
-    if isOpen == nil then
-        isOpen = (opts ~= nil and #opts > 0) or (d.isDialogueOpen ~= nil and d.isDialogueOpen())
-    end
+    local snap = self:_readDialogueSnap()
+    local isOpen, tag = self.interact:stepDialogue(now, snap, function(opts)
+        return stand_out_quests.pickDialogueOption(opts, dlgContext)
+    end)
     if isOpen then
-        -- Если передан bodyText (живой клиент), ждём пока typewriter закончит печатать (0.45с без изменений),
-        -- иначе нажатие цифры посреди печати ломает переход в пустой диалог!
-        if bodyText ~= nil then
-            if bodyText ~= self.dlgBody then
-                self.dlgBody = bodyText
-                self.dlgBodyChangedAt = now
-                return "typing"
-            end
-            if bodyText == "" then
-                if self.dlgBodyChangedAt == 0 then
-                    self.dlgBodyChangedAt = now
-                elseif now - self.dlgBodyChangedAt >= 2.5 and d.closeDialogue ~= nil then
-                    d.closeDialogue()
-                    self.dlgBodyChangedAt = now
-                end
-                return "waiting_dlg"
-            end
-            if now - self.dlgBodyChangedAt < 0.45 then
-                return "typing"
-            end
-        end
-        if opts ~= nil and #opts > 0 then
-            local chosen, tag = stand_out_quests.pickDialogueOption(opts, dlgContext)
-            if chosen ~= nil then
-                if now - self.lastClickAt >= 1.0 then
-                    self.lastClickAt = now
-                    self.dlgBody = ""
-                    self.dlgBodyChangedAt = now
-                    if d.clickDialogue ~= nil then
-                        d.clickDialogue(chosen)
-                    end
-                    self.lastStepAt = now
-                    return tag or "clicked"
-                end
-                return "waiting_dlg"
-            end
-        end
-        return "waiting_dlg"
+        return tag or "waiting_dlg"
     end
-    self.dlgBody = ""
-    self.dlgBodyChangedAt = 0
 
     local nx, ny, nz, prompt = nil, nil, nil, nil
     if d.findNpc ~= nil then
@@ -17761,23 +18251,21 @@ function Runner:_talkToNpc(now, npcName, dlgContext, lx, ly, lz)
         return "missing"
     end
 
-    if lx == nil or dist3(lx, ly, lz, nx, ny, nz) > 9 then
-        if d.teleportTo ~= nil then
-            d.teleportTo(nx, ny + 1.5, nz + 3)
-        end
-        self.lastStepAt = now
-        return "moving"
+    local pInfo = toPromptInfo(prompt, nx, ny, nz)
+    if pInfo ~= nil then
+        return self.interact:interactPrompt(now, pInfo, lx, ly, lz)
     end
 
-    if now - self.lastTalkAt >= stand_out_quests.talk_retry then
-        self.lastTalkAt = now
-        self.lastClickAt = now
-        self.dlgBodyChangedAt = now
-        if prompt ~= nil and d.firePrompt ~= nil then
-            d.firePrompt(prompt)
-        elseif d.interactNpc ~= nil then
-            d.interactNpc(npcName)
+    -- Фолбэк, если NPC не прогружен или без промпта — подлетаем и пробуем interactNpc
+    if lx == nil or dist3(lx, ly, lz, nx, ny, nz) > stand_out_interact.approach_cap then
+        local ax, ay, az = stand_out_interact.approachPoint(nx, ny, nz, 10)
+        if d.teleportTo ~= nil then
+            d.teleportTo(ax, ay, az, nx, ny, nz)
         end
+        return "moving"
+    end
+    if d.interactNpc ~= nil then
+        d.interactNpc(npcName)
     end
     return "talking"
 end
@@ -17923,8 +18411,8 @@ function Runner:_stepLenny(now, state, lx, ly, lz)
             end
             return
         end
-        if boardPrompt ~= nil and d.firePrompt ~= nil then
-            d.firePrompt(boardPrompt)
+        if boardPrompt ~= nil then
+            self.interact:interactPrompt(now, toPromptInfo(boardPrompt, cx, cy, cz), lx, ly, lz)
         elseif d.sitInVehicle ~= nil then
             d.sitInVehicle(car)
         end
@@ -17993,12 +18481,10 @@ function Runner:_stepLettuce(now, state, lx, ly, lz)
             prompt, px, py, pz = d.findQuestPrompt("LettuceTrader")
         end
         if prompt ~= nil and px ~= nil then
-            self.statusText = "Lettuce: интеракция (" .. tostring(prompt.ObjectText or prompt.Name or "obj") .. ")"
-            if lx == nil or dist3(lx, ly, lz, px, py, pz) > 8 then
-                if d.teleportTo ~= nil then d.teleportTo(px, py + 1.5, pz + 2.5) end
-            elseif d.firePrompt ~= nil then
-                d.firePrompt(prompt)
-            end
+            local pInfo = toPromptInfo(prompt, px, py, pz)
+            local lbl = (pInfo and (pInfo.objectText or pInfo.name)) or "obj"
+            local st = self.interact:interactPrompt(now, pInfo, lx, ly, lz)
+            self.statusText = "Lettuce: " .. (st == "holding" and "держим " or "") .. tostring(lbl)
             return
         end
         local npcPos = stand_out_quests.npc_positions["Lettuce Trader"]
@@ -18108,12 +18594,9 @@ function Runner:_stepGarden(now, state, lx, ly, lz)
         prompt, px, py, pz = d.findGardenPrompt(actionKind)
     end
     if prompt ~= nil and px ~= nil then
-        self.statusText = "Garden: " .. actionKind
-        if lx == nil or dist3(lx, ly, lz, px, py, pz) > 8 then
-            if d.teleportTo ~= nil then d.teleportTo(px, py + 2, pz + 3) end
-        elseif d.firePrompt ~= nil then
-            d.firePrompt(prompt)
-        end
+        local pInfo = toPromptInfo(prompt, px, py, pz)
+        local st = self.interact:interactPrompt(now, pInfo, lx, ly, lz)
+        self.statusText = "Garden: " .. actionKind .. (st == "holding" and " (держим)" or "")
     else
         local bc = stand_out_quests.npc_positions["Big Chop"]
         if lx == nil or dist3(lx, ly, lz, bc.X, bc.Y, bc.Z) > 60 then
@@ -18178,8 +18661,8 @@ function Runner:_stepMerylTestDrive(now, state, lx, ly, lz)
         self.statusText = "Test Drive: садимся в авто"
         if lx == nil or dist3(lx, ly, lz, cx, cy, cz) > 10 then
             if d.teleportTo ~= nil then d.teleportTo(cx, cy + 2.5, cz + 3) end
-        elseif boardPrompt ~= nil and d.firePrompt ~= nil then
-            d.firePrompt(boardPrompt)
+        elseif boardPrompt ~= nil then
+            self.interact:interactPrompt(now, toPromptInfo(boardPrompt, cx, cy, cz), lx, ly, lz)
         elseif d.sitInVehicle ~= nil then
             d.sitInVehicle(car)
         end
@@ -18346,6 +18829,7 @@ __modules["stand_out_story"] = function(require)
 -- Данные всех 54+ шагов, NPC, QuestZones, QuestInteractables, DiamotchStoryNodes и DialogueInfo сняты через
 -- tools/standout_probe_quests2.lua и standout_probe_quests3.lua.
 -- Чистая логика поверх deps, проверяется tests/stand_out_story_test.lua.
+local stand_out_interact = require("./stand_out_interact")
 local stand_out_quests = require("./stand_out_quests")
 
 local stand_out_story = {}
@@ -18632,18 +19116,16 @@ local Runner = {}
 Runner.__index = Runner
 
 function stand_out_story.new(deps)
+    deps = deps or {}
     return setmetatable({
-        deps = deps or {},
+        deps = deps,
+        interact = stand_out_interact.new(deps),
         statusText = "",
         currentQuest = "",
         progressText = "",
         wantsBounty = false,
         wantsDarby = false,
         lastStepAt = -99,
-        lastTalkAt = -99,
-        lastClickAt = -99,
-        dlgBody = "",
-        dlgBodyChangedAt = 0,
         wiggleSign = 1,
         mapOpenedFor = "",
         huberCalledAt = 0,
@@ -18654,60 +19136,42 @@ function Runner:stop()
     self.wantsBounty = false
     self.wantsDarby = false
     self.statusText = ""
+    if self.interact ~= nil then
+        self.interact:stop()
+    end
     if self.deps.stopCombat ~= nil then
         self.deps.stopCombat()
     end
 end
 
+local function toPromptInfo(prompt, x, y, z)
+    if prompt == nil then return nil end
+    if type(prompt) == "table" and prompt.obj ~= nil then
+        if prompt.x == nil then prompt.x, prompt.y, prompt.z = x, y, z end
+        return prompt
+    end
+    return { obj = prompt, x = x, y = y, z = z, hold = 0, maxDist = 10 }
+end
+
 function Runner:_handleDialogue(now)
     local d = self.deps
-    local opts, bodyText, isOpen = nil, nil, false
-    if d.readDialogue ~= nil then
-        opts, bodyText, isOpen = d.readDialogue()
-    end
-    if isOpen == nil then
-        isOpen = (opts ~= nil and #opts > 0) or (d.isDialogueOpen ~= nil and d.isDialogueOpen())
-    end
-    if not isOpen then
-        self.dlgBody = ""
-        self.dlgBodyChangedAt = 0
-        return false
-    end
-    if bodyText ~= nil then
-        if bodyText ~= self.dlgBody then
-            self.dlgBody = bodyText
-            self.dlgBodyChangedAt = now
-            return true
+    local snap = nil
+    if d.readDialogueSnap ~= nil then
+        snap = d.readDialogueSnap()
+    elseif d.readDialogue ~= nil then
+        local opts, bodyText, isOpen = d.readDialogue()
+        if isOpen == nil then
+            isOpen = (opts ~= nil and #opts > 0) or (d.isDialogueOpen ~= nil and d.isDialogueOpen())
         end
-        if bodyText == "" then
-            if self.dlgBodyChangedAt == 0 then
-                self.dlgBodyChangedAt = now
-            elseif now - self.dlgBodyChangedAt >= 2.5 and d.closeDialogue ~= nil then
-                d.closeDialogue()
-                self.dlgBodyChangedAt = now
-            end
-            return true
-        end
-        if now - self.dlgBodyChangedAt < 0.45 then
-            return true
-        end
+        local glyphs = type(bodyText) == "string" and #bodyText or (opts ~= nil and #opts > 0 and 1 or 0)
+        snap = { isOpen = isOpen == true, options = opts or {}, glyphCount = glyphs }
+    else
+        snap = { isOpen = false, options = {}, glyphCount = 0 }
     end
-    if opts ~= nil and #opts > 0 then
-        local chosen = stand_out_story.pickDialogueOption(opts)
-        if chosen ~= nil then
-            if now - self.lastClickAt >= 1.0 then
-                self.lastClickAt = now
-                self.dlgBody = ""
-                self.dlgBodyChangedAt = now
-                if d.clickDialogue ~= nil then
-                    d.clickDialogue(chosen)
-                end
-            end
-            self.lastStepAt = now
-            return true
-        end
-    end
-    return true
+    local isOpen = self.interact:stepDialogue(now, snap, function(opts)
+        return stand_out_story.pickDialogueOption(opts), "clicked"
+    end)
+    return isOpen
 end
 
 function Runner:_resolvePos(step)
@@ -18796,11 +19260,12 @@ function Runner:update(now, lx, ly, lz)
         self.statusText = label
         -- Подойдём к D'Arby и начнём диалог, если игра Go Fish ещё не открыта
         local tx, ty, tz, prompt = self:_resolvePos(step)
-        if tx ~= nil and (lx == nil or dist3(lx, ly, lz, tx, ty, tz) > 12) then
-            if d.teleportTo ~= nil then d.teleportTo(tx, ty + 1.5, tz + 3) end
-        elseif prompt ~= nil and now - self.lastTalkAt >= stand_out_story.talk_retry then
-            self.lastTalkAt = now
-            if d.firePrompt ~= nil then d.firePrompt(prompt) end
+        local pInfo = toPromptInfo(prompt, tx, ty, tz)
+        if pInfo ~= nil then
+            self.interact:interactPrompt(now, pInfo, lx, ly, lz)
+        elseif tx ~= nil and (lx == nil or dist3(lx, ly, lz, tx, ty, tz) > stand_out_interact.approach_cap) then
+            local ax, ay, az = stand_out_interact.approachPoint(tx, ty, tz, 10)
+            if d.teleportTo ~= nil then d.teleportTo(ax, ay, az, tx, ty, tz) end
         end
         return
     elseif step.kind == "elimination" then
@@ -18820,11 +19285,7 @@ function Runner:update(now, lx, ly, lz)
             nearPrompt, px, py, pz = d.findNearestStoryPrompt(lx or 0, ly or 0, lz or 0, 120)
         end
         if nearPrompt ~= nil and px ~= nil then
-            if lx == nil or dist3(lx, ly, lz, px, py, pz) > 9 then
-                if d.teleportTo ~= nil then d.teleportTo(px, py + 2, pz + 2) end
-            elseif d.firePrompt ~= nil then
-                d.firePrompt(nearPrompt)
-            end
+            self.interact:interactPrompt(now, toPromptInfo(nearPrompt, px, py, pz), lx, ly, lz)
         elseif tx ~= nil and (lx == nil or dist3(lx, ly, lz, tx, ty, tz) > 30) then
             if d.teleportTo ~= nil then d.teleportTo(tx, ty + 2, tz) end
         end
@@ -18841,11 +19302,7 @@ function Runner:update(now, lx, ly, lz)
             end
         end
         if prompt ~= nil and px ~= nil then
-            if lx == nil or dist3(lx, ly, lz, px, py, pz) > 8 then
-                if d.teleportTo ~= nil then d.teleportTo(px, py + 2, pz + 3) end
-            elseif d.firePrompt ~= nil then
-                d.firePrompt(prompt)
-            end
+            self.interact:interactPrompt(now, toPromptInfo(prompt, px, py, pz), lx, ly, lz)
         else
             self.statusText = label .. " (ждём рост)"
         end
@@ -18864,11 +19321,12 @@ function Runner:update(now, lx, ly, lz)
         if step.npc ~= nil and d.findNpc ~= nil then
             local nx, ny, nz, prompt = d.findNpc(step.npc, step.promptName)
             if nx ~= nil then
-                if lx == nil or dist3(lx, ly, lz, nx, ny, nz) > 9 then
-                    if d.teleportTo ~= nil then d.teleportTo(nx, ny + 1.5, nz + 3) end
-                elseif prompt ~= nil and now - self.lastTalkAt >= stand_out_story.talk_retry then
-                    self.lastTalkAt = now
-                    if d.firePrompt ~= nil then d.firePrompt(prompt) end
+                local pInfo = toPromptInfo(prompt, nx, ny, nz)
+                if pInfo ~= nil then
+                    self.interact:interactPrompt(now, pInfo, lx, ly, lz)
+                elseif lx == nil or dist3(lx, ly, lz, nx, ny, nz) > stand_out_interact.approach_cap then
+                    local ax, ay, az = stand_out_interact.approachPoint(nx, ny, nz, 10)
+                    if d.teleportTo ~= nil then d.teleportTo(ax, ay, az, nx, ny, nz) end
                 end
                 self.statusText = label .. " (старт)"
                 return
@@ -18899,19 +19357,21 @@ function Runner:update(now, lx, ly, lz)
                 prompt, tx, ty, tz = np, px, py, pz
             end
         end
+        local pInfo = toPromptInfo(prompt, tx, ty, tz)
+        if pInfo ~= nil then
+            local st = self.interact:interactPrompt(now, pInfo, lx, ly, lz)
+            self.statusText = label .. (st == "holding" and " (держим)" or "")
+            return
+        end
         self.statusText = label
-        if tx ~= nil and (lx == nil or dist3(lx, ly, lz, tx, ty, tz) > 8) then
+        if tx ~= nil and (lx == nil or dist3(lx, ly, lz, tx, ty, tz) > stand_out_interact.approach_cap) then
+            local ax, ay, az = stand_out_interact.approachPoint(tx, ty, tz, 10)
             if d.teleportTo ~= nil then
-                d.teleportTo(tx, ty + 1.5, tz + 2.5)
+                d.teleportTo(ax, ay, az, tx, ty, tz)
             end
             return
         end
-        if prompt ~= nil and now - self.lastTalkAt >= stand_out_story.talk_retry then
-            self.lastTalkAt = now
-            if d.firePrompt ~= nil then
-                d.firePrompt(prompt)
-            end
-        elseif step.kind == "howler_yacht" then
+        if step.kind == "howler_yacht" then
             -- Для P9_36 Howler_Crates можно ударить M2 (R) если рядом есть ящики
             local cratesObj = objectives["Howler_Crates"]
             if cratesObj ~= nil and (cratesObj.cur or 0) < (cratesObj.total or 5) and d.pressHeavy ~= nil then
@@ -18921,22 +19381,23 @@ function Runner:update(now, lx, ly, lz)
         return
     end
 
-    -- По умолчанию: dialogue шаг (говорим с NPC, если нужно — сначала телепортируемся)
+    -- По умолчанию: dialogue шаг (говорим с NPC через unified interact!)
     local tx, ty, tz, prompt = self:_resolvePos(step)
     self.statusText = label
-    if tx ~= nil and (lx == nil or dist3(lx, ly, lz, tx, ty, tz) > 9) then
+    local pInfo = toPromptInfo(prompt, tx, ty, tz)
+    if pInfo ~= nil then
+        self.interact:interactPrompt(now, pInfo, lx, ly, lz)
+        return
+    end
+    if tx ~= nil and (lx == nil or dist3(lx, ly, lz, tx, ty, tz) > stand_out_interact.approach_cap) then
+        local ax, ay, az = stand_out_interact.approachPoint(tx, ty, tz, 10)
         if d.teleportTo ~= nil then
-            d.teleportTo(tx, ty + 1.5, tz + 3)
+            d.teleportTo(ax, ay, az, tx, ty, tz)
         end
         return
     end
-    if now - self.lastTalkAt >= stand_out_story.talk_retry then
-        self.lastTalkAt = now
-        if prompt ~= nil and d.firePrompt ~= nil then
-            d.firePrompt(prompt)
-        elseif step.npc ~= nil and d.interactNpc ~= nil then
-            d.interactNpc(step.npc)
-        end
+    if step.npc ~= nil and d.interactNpc ~= nil then
+        d.interactNpc(step.npc)
     end
 end
 
