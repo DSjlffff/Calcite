@@ -6846,12 +6846,19 @@ function main.start(env)
             end,
             activeTabletop = function()
                 local sb = handle._soBounty
-                if sb.tabletop ~= nil then
-                    if sb.tabletopAt ~= nil and env.clock() - sb.tabletopAt > 45.0 then
+                local tt = sb.tabletop
+                if tt ~= nil then
+                    local tNow = env.clock()
+                    -- Если сервер прислал State{Done=true}, но пакет End потерялся/задержался — не висим 45с!
+                    if tt.done == true and tNow - (tt.doneAt or sb.tabletopAt or 0) >= 1.5 then
                         sb.tabletop = nil
                         return nil
                     end
-                    return sb.tabletop
+                    if sb.tabletopAt ~= nil and tNow - sb.tabletopAt > 15.0 then
+                        sb.tabletop = nil
+                        return nil
+                    end
+                    return tt
                 end
                 return nil
             end,
@@ -7054,10 +7061,9 @@ function main.start(env)
                 if holdDur <= 0.05 and type(env.fireproximityprompt) == "function" then
                     pcall(env.fireproximityprompt, prompt)
                 end
+                pcall(function() prompt:InputHoldBegin() end)
                 if vim ~= nil and kc ~= nil then
                     pcall(function() vim:SendKeyEvent(true, kc, false, game) end)
-                else
-                    pcall(function() prompt:InputHoldBegin() end)
                 end
             end,
             holdPromptEnd = function(prompt)
@@ -13490,7 +13496,11 @@ function stand_out_bounty.applyTabletopEvent(state, kind, data, nowClock)
         local newIndex = tonumber(st.Index) or prevIndex
         state.index = newIndex
         state.fill = tonumber(st.Fill) or 0
+        local wasDone = state.done == true
         state.done = st.Done == true
+        if state.done and not wasDone then
+            state.doneAt = nowClock or 0
+        end
         if type(st.HoldStart) == "number" and finite(st.HoldStart) then
             state.serverHoldStart = st.HoldStart
         else
@@ -14120,6 +14130,7 @@ function Runner:update(now, opts, meX, meY, meZ)
 
         -- 0.415) ICED TEA RUN — Tabletop мини-игра: Hold POUR (82.5%) -> Drop Ice -> Drop Lemon -> Hold STIR -> Drop Glass
         if inTabletop then
+            self.wasInTabletop = true
             self:_releasePrompt()
             if self.deps.stopFighting ~= nil then
                 pcall(self.deps.stopFighting)
@@ -14132,6 +14143,10 @@ function Runner:update(now, opts, meX, meY, meZ)
             end
             self.statusText = title .. " | " .. (suffix or "Iced Tea...")
             return
+        elseif self.wasInTabletop then
+            -- После завершения стакана даём серверу 0.35с закрыть Tabletop, чтобы первый fireproximityprompt по кувшину не ушёл в кд
+            self.wasInTabletop = false
+            self.lastAction = math.max(self.lastAction or 0, now + 0.35)
         end
 
         -- 0.42) USAGI'S KARAOKE NIGHT: точные Input/Release по расписанию Notes из Remotes.Karaoke("Prepare")
@@ -14511,9 +14526,13 @@ function Runner:update(now, opts, meX, meY, meZ)
 
             local isCd = safeIsA(prompt, "ClickDetector")
             local holdDur = isCd and 0 or safeHoldDuration(prompt)
-            -- Щедрый таймаут (минимум 8 с для кастомных шкал вроде Clean The Rock / Three Wishes):
-            -- как только промпт завершится, он исчезнет и _releasePrompt отпустит [H] на следующем же кадре!
-            local maxHold = isCd and 0.5 or math.max(holdDur + 3.0, 8.0)
+            local pname = tostring(prompt.Name or "")
+            local isInstantIncident = (not isCd) and holdDur <= 0.05
+                and (string.find(pname, "BountyIncident_", 1, true) ~= nil)
+            -- Для мгновенных промптов инцидентов (Pitcher / Glass / Talk / Pickup) короткий цикл 1.2с,
+            -- чтобы при серверном кд сразу отпустить [H] и повторить fireproximityprompt (не висеть 8с!).
+            -- Для долгих/кастомных шкал (Clean The Rock / Three Wishes) оставляем 8с.
+            local maxHold = isCd and 0.5 or (isInstantIncident and 1.2 or math.max(holdDur + 3.0, 8.0))
 
             if self.promptHolding == prompt then
                 if now - self.promptSince >= maxHold then
