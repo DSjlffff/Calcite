@@ -15533,6 +15533,24 @@ function Runner:update(now, cfg, myX, myY, myZ)
                 return true
             end
         end
+        -- Если мини-игра подхвачена посреди сессии (после реинжекта) — сначала синхронизируем Version с сервером
+        -- и одновременно жмём Space для Harvest/Cover (родной Core.Gardening сам знает свой актуальный Version!).
+        if st.minigame.recovered then
+            if now - (self.mgSolver.lastSyncAt or -99) >= 0.8 then
+                self.mgSolver.lastSyncAt = now
+                if d.sendGrowingInput ~= nil then
+                    d.sendGrowingInput({ Action = "Sync", Token = st.minigame.token })
+                end
+            end
+            if (st.minigame.phase == "Clip" or st.minigame.phase == "Cover") and d.pressSpace ~= nil then
+                if now - (self.mgSolver.lastSpaceAt or -99) >= 0.25 then
+                    self.mgSolver.lastSpaceAt = now
+                    d.pressSpace()
+                end
+                self.statusText = st.minigame.phase == "Clip" and "Сад: собираем урожай..." or "Сад: прикапываем..."
+                return true
+            end
+        end
         local pkt, status = garden.decideMinigameAction(st.minigame, self.mgSolver, now)
         self.statusText = status
         if pkt ~= nil and d.sendGrowingInput ~= nil then
@@ -15887,9 +15905,26 @@ function bridge.create(ctx)
                             offer = false,
                         }
                     elseif kind == "GrowingUpdate" then
-                        if live.minigame ~= nil and payload.Token == live.minigame.token then
+                        if live.minigame == nil and payload.Token ~= nil then
+                            live.minigame = {
+                                token = payload.Token,
+                                kind = payload.Kind or "Harvest",
+                                phase = payload.Phase or "Clip",
+                                version = tonumber(payload.Version) or 0,
+                                count = tonumber(payload.Count) or 4,
+                                pourStarted = payload.PourStarted == true,
+                                pourElapsed = tonumber(payload.PourElapsed) or 0,
+                                covered = payload.Covered or {},
+                                clipped = payload.Clipped or {},
+                                closing = false,
+                                offer = false,
+                                recovered = false,
+                            }
+                        elseif live.minigame ~= nil and payload.Token == live.minigame.token then
                             local mg = live.minigame
-                            if tonumber(payload.Version) == nil or tonumber(payload.Version) >= mg.version then
+                            if mg.recovered or tonumber(payload.Version) == nil or tonumber(payload.Version) >= mg.version then
+                                mg.recovered = false
+                                mg.kind = payload.Kind or mg.kind
                                 mg.phase = payload.Phase or mg.phase
                                 mg.version = tonumber(payload.Version) or mg.version
                                 mg.count = tonumber(payload.Count) or mg.count
@@ -16044,14 +16079,56 @@ function bridge.create(ctx)
     return {
         readState = function()
             ensureRemote()
-            -- Если мини-игра уже закрылась по GUI/атрибуту (а пакет GrowingClosed был пропущен), чистим live.minigame
-            if live.minigame ~= nil then
-                local locked = false
+            local ownerTok = nil
+            local locked = false
+            pcall(function()
+                ownerTok = localPlayer:GetAttribute("GrowingInputOwner")
+                if ownerTok == nil then
+                    local cam = workspace.CurrentCamera
+                    ownerTok = cam and cam:GetAttribute("GrowingCameraOwner") or nil
+                end
+                locked = ownerTok ~= nil or localPlayer:GetAttribute("GardeningInputLocked") == true
+            end)
+
+            -- Восстановление активной мини-игры если скрипт перезапустили прямо во время неё!
+            if live.minigame == nil and type(ownerTok) == "string" and ownerTok ~= "" then
+                local kind, phase = "Harvest", "Clip"
                 pcall(function()
-                    locked = localPlayer:GetAttribute("GrowingInputOwner") ~= nil
-                        or localPlayer:GetAttribute("GardeningInputLocked") == true
+                    local pg = localPlayer:FindFirstChildOfClass("PlayerGui")
+                    local gi = pg and pg:FindFirstChild("GrowingInterface")
+                    local pres = gi and gi:FindFirstChild("Presentation")
+                    local instr = pres and pres:FindFirstChild("Instruction")
+                    local head = instr and instr:FindFirstChild("Heading")
+                    local hTxt = head and string.upper(tostring(head.Text or "")) or ""
+                    local footer = pres and pres:FindFirstChild("Footer")
+                    local stLbl = footer and footer:FindFirstChild("Status")
+                    local sTxt = stLbl and string.upper(tostring(stLbl.Text or "")) or ""
+                    if string.find(hTxt, "FILL", 1, true) ~= nil or string.find(sTxt, "BAG", 1, true) ~= nil or string.find(sTxt, "DIRT", 1, true) ~= nil then
+                        kind, phase = "Dirt", "Pour"
+                    elseif string.find(hTxt, "PLANT", 1, true) ~= nil or string.find(sTxt, "SEED", 1, true) ~= nil or string.find(sTxt, "MOUND", 1, true) ~= nil then
+                        kind = "Seed"
+                        phase = (string.find(sTxt, "MOUND", 1, true) ~= nil) and "Cover" or "Pour"
+                    else
+                        kind, phase = "Harvest", "Clip"
+                    end
                 end)
-                if not locked and live.minigame.closing then
+                live.minigame = {
+                    token = ownerTok,
+                    kind = kind,
+                    phase = phase,
+                    version = 0,
+                    count = 4,
+                    pourStarted = false,
+                    pourElapsed = 0,
+                    covered = {},
+                    clipped = {},
+                    closing = false,
+                    offer = false,
+                    recovered = true,
+                }
+            elseif live.minigame ~= nil and not locked then
+                -- Если мини-игра уже закрылась по GUI/атрибуту (а пакет GrowingClosed был пропущен), чистим live.minigame
+                if live.minigame.closing or live.minigame.recovered then
                     live.minigame = nil
                 end
             end
@@ -16132,6 +16209,20 @@ function bridge.create(ctx)
                 return true
             end)
             return ok and handled == true
+        end,
+
+        pressSpace = function()
+            local vim = env.virtualInputManager
+            local kc = env.Enum and env.Enum.KeyCode and env.Enum.KeyCode.Space
+            if vim == nil or kc == nil then return end
+            pcall(function() vim:SendKeyEvent(true, kc, false, game) end)
+            if env.task and env.task.delay then
+                env.task.delay(0.05, function()
+                    pcall(function() vim:SendKeyEvent(false, kc, false, game) end)
+                end)
+            else
+                pcall(function() vim:SendKeyEvent(false, kc, false, game) end)
+            end
         end,
 
         sendGrowingInput = function(pkt)
