@@ -15331,7 +15331,7 @@ function Runner:_interactPrompt(now, pInfo, myX, myY, myZ, label)
     if myX == nil or hDist > 3.6 or dy > 5.5 then
         if self.interact ~= nil then self.interact:releaseHold() end
         if d.teleportTo ~= nil then
-            d.teleportTo(pInfo.x, pInfo.y + 2.2, pInfo.z + 1.8, pInfo.x, pInfo.y, pInfo.z)
+            d.teleportTo(pInfo.x, pInfo.y + 2.2, pInfo.z + 2.8, pInfo.x, pInfo.y, pInfo.z)
         end
         self.tpSettleUntil = now + 0.42
         self.statusText = label .. " (подход)"
@@ -16268,9 +16268,28 @@ function bridge.create(ctx)
             live.shop = nil
         end,
 
-        -- Переиспользуем проверенные хелперы телепорта/промптов/диалогов из quest bridge
+        -- Переиспользуем проверенные хелперы телепорта/промптов/диалогов из quest bridge.
+        -- Для мгновенных садовых промптов (GardenWork / GardenPlace) Stand Out часто требует
+        -- InputHoldBegin + клавишу H (StoryInteractions), а не только fireproximityprompt -> бьём оба сразу с 1-й попытки!
         teleportTo = qDeps and qDeps.teleportTo,
-        firePrompt = qDeps and qDeps.firePrompt,
+        firePrompt = function(pp)
+            if pp == nil then return end
+            pcall(function()
+                if pp:IsA("ProximityPrompt") then
+                    pp.RequiresLineOfSight = false
+                end
+            end)
+            if qDeps and qDeps.firePrompt ~= nil then
+                qDeps.firePrompt(pp)
+            end
+            if qDeps and qDeps.pulsePrompt ~= nil then
+                local hold = 0
+                pcall(function() hold = tonumber(pp.HoldDuration) or 0 end)
+                if hold <= 0.05 then
+                    qDeps.pulsePrompt(pp)
+                end
+            end
+        end,
         fireClick = qDeps and qDeps.fireClick,
         holdPromptBegin = qDeps and qDeps.holdPromptBegin,
         holdPromptEnd = qDeps and qDeps.holdPromptEnd,
