@@ -6237,15 +6237,35 @@ function main.start(env)
             return info.stand ~= ""
         end,
         firePrompt = function(prompt)
+            if prompt == nil then return end
+            -- WorldItemPickup и GardenGather имеют RequiresLineOfSight=true -> снимаем локально, чтобы трава/ноги не мешали!
+            pcall(function() prompt.RequiresLineOfSight = false end)
             if type(env.fireproximityprompt) == "function" then
                 pcall(env.fireproximityprompt, prompt)
             end
         end,
         holdBegin = function(prompt)
-            prompt:InputHoldBegin()
+            if prompt == nil then return end
+            pcall(function() prompt.RequiresLineOfSight = false end)
+            pcall(function() prompt:InputHoldBegin() end)
+            local vim = env.virtualInputManager
+            local kc = nil
+            pcall(function() kc = prompt.KeyboardKeyCode end)
+            kc = kc or (env.Enum and env.Enum.KeyCode and env.Enum.KeyCode.H)
+            if vim ~= nil and kc ~= nil then
+                pcall(function() vim:SendKeyEvent(true, kc, false, game) end)
+            end
         end,
         holdEnd = function(prompt)
-            prompt:InputHoldEnd()
+            if prompt == nil then return end
+            pcall(function() prompt:InputHoldEnd() end)
+            local vim = env.virtualInputManager
+            local kc = nil
+            pcall(function() kc = prompt.KeyboardKeyCode end)
+            kc = kc or (env.Enum and env.Enum.KeyCode and env.Enum.KeyCode.H)
+            if vim ~= nil and kc ~= nil then
+                pcall(function() vim:SendKeyEvent(false, kc, false, game) end)
+            end
         end,
         serverHop = function()
             if handle._soPick.hopping then
@@ -16218,10 +16238,11 @@ __modules["stand_out_pickup"] = function(require)
 -- Чистая логика поверх переданных зависимостей, проверяется tests/stand_out_pickup_test.lua.
 local stand_out_pickup = {}
 
-stand_out_pickup.above = 3.0       -- студов над предметом при телепорте (в пределах MaxActivationDistance 9..10)
-stand_out_pickup.settle = 0.15     -- пауза после телепорта, чтобы сервер увидел персонажа рядом
-stand_out_pickup.extra_hold = 0.12 -- запас к HoldDuration промпта
-stand_out_pickup.give_up = 1.5     -- сколько ждать исчезновения предмета после подбора
+stand_out_pickup.above = 2.6       -- студов над предметом при телепорте (уверенно внутри MaxActivationDistance 9..10)
+stand_out_pickup.settle = 0.18     -- пауза после телепорта, чтобы сервер увидел персонажа рядом
+stand_out_pickup.extra_hold = 0.18 -- запас к HoldDuration промпта (1.2с на BuriedSupplies -> 1.38с)
+stand_out_pickup.retry_every = 0.32 -- повторный firePrompt во время waiting, если первый пакет пришёл до репликации ТП
+stand_out_pickup.give_up = 1.6     -- сколько ждать исчезновения предмета после подбора
 stand_out_pickup.skip_for = 10.0   -- на сколько секунд пропустить предмет, который не подобрался
 stand_out_pickup.hop_delay = 3.0   -- сколько секунд карта должна быть пустой перед сменой сервера
 stand_out_pickup.hop_retry = 12.0  -- пауза между повторными попытками телепорта, если сервер оказался полон
@@ -16516,6 +16537,7 @@ function stand_out_pickup.new(deps)
         state = "idle",      -- "idle" | "arriving" | "holding" | "waiting" | "breaking"
         target = nil,
         since = 0,
+        lastRetryAt = -99,
         lastRAt = -99,
         lastSummonAt = -99,
         skipped = {},        -- prompt or model -> timestamp
@@ -16663,6 +16685,7 @@ function Picker:update(now, entries, opts, meX, meY, meZ)
                 end
                 self.state = "waiting"
                 self.since = now
+                self.lastRetryAt = now
             end
         end
     elseif self.state == "waiting" then
@@ -16676,6 +16699,13 @@ function Picker:update(now, entries, opts, meX, meY, meZ)
             self.state = "idle"
             self.target = nil
             self.lastTargetName = ""
+        else
+            -- Продолжаем удерживать персонажа над предметом и повторяем firePrompt, если первый тик пришёл до синка ТП
+            self.deps.teleportTo(tx, ty + stand_out_pickup.above, tz)
+            if self.deps.firePrompt ~= nil and now - (self.lastRetryAt or 0) >= stand_out_pickup.retry_every then
+                self.lastRetryAt = now
+                pcall(self.deps.firePrompt, target.prompt)
+            end
         end
     end
 
