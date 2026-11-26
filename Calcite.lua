@@ -6410,46 +6410,6 @@ function main.start(env)
                     handle._soMob.noclip:step(on)
                 end
             end,
-            setHover = function(on)
-                local sm = handle._soMob
-                local character = localPlayer.Character
-                local root = character and character:FindFirstChild("HumanoidRootPart")
-                local hum = character and character:FindFirstChildOfClass("Humanoid")
-                if on then
-                    if hum ~= nil and env.Enum and env.Enum.HumanoidStateType then
-                        if sm.hoverHum ~= hum then
-                            sm.hoverHum = hum
-                            pcall(function() hum:SetStateEnabled(env.Enum.HumanoidStateType.FallingDown, false) end)
-                        end
-                    end
-                    if root ~= nil and env.Instance ~= nil and env.Instance.new ~= nil then
-                        local bv = sm.hoverBv
-                        if bv == nil or bv.Parent ~= root then
-                            if bv ~= nil then pcall(function() bv:Destroy() end) end
-                            local okBv, created = pcall(function()
-                                local v = env.Instance.new("BodyVelocity")
-                                v.Name = "_CalciteHover"
-                                v.Velocity = env.Vector3.new(0, 0, 0)
-                                v.MaxForce = env.Vector3.new(1e5, 1e5, 1e5)
-                                v.P = 1e4
-                                v.Parent = root
-                                return v
-                            end)
-                            sm.hoverBv = okBv and created or nil
-                        end
-                    end
-                else
-                    if sm.hoverBv ~= nil then
-                        pcall(function() sm.hoverBv:Destroy() end)
-                        sm.hoverBv = nil
-                    end
-                    if sm.hoverHum ~= nil and env.Enum and env.Enum.HumanoidStateType then
-                        local oldHum = sm.hoverHum
-                        sm.hoverHum = nil
-                        pcall(function() oldHum:SetStateEnabled(env.Enum.HumanoidStateType.FallingDown, true) end)
-                    end
-                end
-            end,
             pressKey = function(keyStr)
                 local okTb, focused = pcall(function() return UserInputService:GetFocusedTextBox() end)
                 if okTb and focused ~= nil then return end
@@ -16189,7 +16149,6 @@ function stand_out_mobs.new(deps)
         kills = 0,
         lastMobPos = nil,
         wasBelow = false,
-        wasHover = false,
         lastSummonAt = -99,
         lastSkillAt = -99,
         lastRAt = -99,
@@ -16201,15 +16160,9 @@ function stand_out_mobs.new(deps)
 end
 
 function Farmer:_exitBelow()
-    local hadBelow = self.wasBelow
-    local hadHover = self.wasHover
-    if hadBelow or hadHover then
+    if self.wasBelow then
         self.wasBelow = false
-        self.wasHover = false
-        if self.deps.setHover ~= nil then
-            self.deps.setHover(false)
-        end
-        if hadBelow and self.lastMobPos ~= nil and self.deps.setPose ~= nil then
+        if self.lastMobPos ~= nil and self.deps.setPose ~= nil then
             local p = self.lastMobPos
             self.deps.setPose(p.X, p.Y + 3, p.Z, p.X, p.Y + 3, p.Z - 1)
         end
@@ -16285,21 +16238,14 @@ function Farmer:update(now, entries, opts, meX, meY, meZ)
     self.lastMobPos = { X = mobPos.X, Y = mobPos.Y, Z = mobPos.Z }
 
     local method = opts.method or "Behind"
-    if method == "Below" or method == "Over" then
-        if self.wasBelow and method ~= "Below" then
-            self.wasBelow = false
-        end
-        if method == "Below" then
+    if method == "Below" then
+        if not self.wasBelow then
             self.wasBelow = true
         end
-        self.wasHover = true
         if self.deps.setNoclip ~= nil then
             self.deps.setNoclip(true)
         end
-        if self.deps.setHover ~= nil then
-            self.deps.setHover(true)
-        end
-    elseif self.wasBelow or self.wasHover then
+    elseif self.wasBelow then
         self:_exitBelow()
     end
 
