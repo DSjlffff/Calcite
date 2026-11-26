@@ -6410,6 +6410,46 @@ function main.start(env)
                     handle._soMob.noclip:step(on)
                 end
             end,
+            setHover = function(on)
+                local sm = handle._soMob
+                local character = localPlayer.Character
+                local root = character and character:FindFirstChild("HumanoidRootPart")
+                local hum = character and character:FindFirstChildOfClass("Humanoid")
+                if on then
+                    if hum ~= nil and env.Enum and env.Enum.HumanoidStateType then
+                        if sm.hoverHum ~= hum then
+                            sm.hoverHum = hum
+                            pcall(function() hum:SetStateEnabled(env.Enum.HumanoidStateType.FallingDown, false) end)
+                        end
+                    end
+                    if root ~= nil and env.Instance ~= nil and env.Instance.new ~= nil then
+                        local bv = sm.hoverBv
+                        if bv == nil or bv.Parent ~= root then
+                            if bv ~= nil then pcall(function() bv:Destroy() end) end
+                            local okBv, created = pcall(function()
+                                local v = env.Instance.new("BodyVelocity")
+                                v.Name = "_CalciteHover"
+                                v.Velocity = env.Vector3.new(0, 0, 0)
+                                v.MaxForce = env.Vector3.new(1e5, 1e5, 1e5)
+                                v.P = 1e4
+                                v.Parent = root
+                                return v
+                            end)
+                            sm.hoverBv = okBv and created or nil
+                        end
+                    end
+                else
+                    if sm.hoverBv ~= nil then
+                        pcall(function() sm.hoverBv:Destroy() end)
+                        sm.hoverBv = nil
+                    end
+                    if sm.hoverHum ~= nil and env.Enum and env.Enum.HumanoidStateType then
+                        local oldHum = sm.hoverHum
+                        sm.hoverHum = nil
+                        pcall(function() oldHum:SetStateEnabled(env.Enum.HumanoidStateType.FallingDown, true) end)
+                    end
+                end
+            end,
             pressKey = function(keyStr)
                 local okTb, focused = pcall(function() return UserInputService:GetFocusedTextBox() end)
                 if okTb and focused ~= nil then return end
@@ -16149,6 +16189,7 @@ function stand_out_mobs.new(deps)
         kills = 0,
         lastMobPos = nil,
         wasBelow = false,
+        wasHover = false,
         lastSummonAt = -99,
         lastSkillAt = -99,
         lastRAt = -99,
@@ -16160,9 +16201,15 @@ function stand_out_mobs.new(deps)
 end
 
 function Farmer:_exitBelow()
-    if self.wasBelow then
+    local hadBelow = self.wasBelow
+    local hadHover = self.wasHover
+    if hadBelow or hadHover then
         self.wasBelow = false
-        if self.lastMobPos ~= nil and self.deps.setPose ~= nil then
+        self.wasHover = false
+        if self.deps.setHover ~= nil then
+            self.deps.setHover(false)
+        end
+        if hadBelow and self.lastMobPos ~= nil and self.deps.setPose ~= nil then
             local p = self.lastMobPos
             self.deps.setPose(p.X, p.Y + 3, p.Z, p.X, p.Y + 3, p.Z - 1)
         end
@@ -16238,14 +16285,21 @@ function Farmer:update(now, entries, opts, meX, meY, meZ)
     self.lastMobPos = { X = mobPos.X, Y = mobPos.Y, Z = mobPos.Z }
 
     local method = opts.method or "Behind"
-    if method == "Below" then
-        if not self.wasBelow then
+    if method == "Below" or method == "Over" then
+        if self.wasBelow and method ~= "Below" then
+            self.wasBelow = false
+        end
+        if method == "Below" then
             self.wasBelow = true
         end
+        self.wasHover = true
         if self.deps.setNoclip ~= nil then
             self.deps.setNoclip(true)
         end
-    elseif self.wasBelow then
+        if self.deps.setHover ~= nil then
+            self.deps.setHover(true)
+        end
+    elseif self.wasBelow or self.wasHover then
         self:_exitBelow()
     end
 
@@ -17792,7 +17846,18 @@ function bridge.create(ctx)
                 local p = root.Position
                 lx, ly, lz = p.X, p.Y, p.Z
             end
-            soMob.farmer:update(now, { mob }, cfg, lx, ly, lz)
+            local fightOpts = {
+                filter = "All",
+                nameFilter = "",
+                autoSummon = cfg.autoSummon,
+                autoSkill = cfg.autoSkill,
+                skills = cfg.skills,
+                autoR = cfg.autoR,
+                autoM1 = cfg.autoM1,
+                distance = cfg.distance,
+                method = cfg.method,
+            }
+            soMob.farmer:update(now, { mob }, fightOpts, lx, ly, lz)
         end,
 
         stopCombat = function()
@@ -17815,16 +17880,18 @@ function bridge.create(ctx)
         setCrouch = function(wantCrouch)
             local ch = localPlayer and localPlayer.Character
             if ch == nil then return end
+            local want = wantCrouch == true
             local isCrouched = false
             pcall(function() isCrouched = ch:GetAttribute("Crouching") == true end)
-            if isCrouched == (wantCrouch == true) then
+            if isCrouched == want then
                 return
             end
             local nowT = env.clock()
             local sq = handle._soQuest
-            if sq.lastCrouchAt ~= nil and nowT - sq.lastCrouchAt < 0.45 then
+            if sq.lastCrouchWant == want and sq.lastCrouchAt ~= nil and nowT - sq.lastCrouchAt < 0.45 then
                 return
             end
+            sq.lastCrouchWant = want
             sq.lastCrouchAt = nowT
             sendKey("C")
         end,
@@ -18445,11 +18512,13 @@ function stand_out_quests.new(deps)
         trailIdx = 1,
         gardenWaiting = false,
         crouching = false,
+        combatMob = nil,
     }, Runner)
 end
 
 function Runner:stop()
     self.wantsBounty = false
+    self.combatMob = nil
     self.statusText = ""
     if self.interact ~= nil then
         self.interact:stop()
@@ -18577,6 +18646,7 @@ function Runner:_stepAngelo(now, state, lx, ly, lz)
     if bossObj ~= nil and (bossObj.cur or 0) < (bossObj.total or 1) then
         local boss = self.deps.findMobByName ~= nil and self.deps.findMobByName({ "jotaro", "dio" }) or nil
         if boss ~= nil then
+            self.combatMob = boss
             self.statusText = "Angelo: бой с " .. tostring(boss.name or "Boss")
             if self.deps.fightMob ~= nil then
                 self.deps.fightMob(boss, now)
@@ -18819,6 +18889,7 @@ function Runner:_stepLettuce(now, state, lx, ly, lz)
         local ref = state.trackerPos or stand_out_quests.npc_positions["Lettuce Trader"]
         local mob = d.findMobByName ~= nil and d.findMobByName({ "thug", "bandit", "lettuce" }, ref.X, ref.Y, ref.Z, 300) or nil
         if mob ~= nil then
+            self.combatMob = mob
             self.statusText = "Lettuce: бьём " .. tostring(mob.name or "Thug")
             if d.fightMob ~= nil then d.fightMob(mob, now) end
         else
@@ -18834,6 +18905,7 @@ function Runner:_stepLettuce(now, state, lx, ly, lz)
     if not done("Lettuce_YoYoMa") then
         local mob = d.findMobByName ~= nil and d.findMobByName({ "yo-yo", "yoyo", "ma" }) or nil
         if mob ~= nil then
+            self.combatMob = mob
             self.statusText = "Lettuce: бьём Yo-Yo Ma"
             if d.fightMob ~= nil then d.fightMob(mob, now) end
         else
@@ -19019,6 +19091,7 @@ function Runner:_stepBobby(now, state, lx, ly, lz)
         local h = stand_out_quests.bobby_humu_pos
         local mob = d.findMobByName ~= nil and d.findMobByName({ "humu" }, h.X, h.Y, h.Z, 180) or nil
         if mob ~= nil then
+            self.combatMob = mob
             self.statusText = "Bobby: бой с Training Humu"
             if d.fightMob ~= nil then d.fightMob(mob, now) end
         else
@@ -19048,6 +19121,7 @@ function Runner:_stepUsagi(now, state, lx, ly, lz)
     local cur, tot = o and o.cur or 0, o and o.total or 5
     local mob = d.findMobByName ~= nil and d.findMobByName({ "bandit" }) or nil
     if mob ~= nil then
+        self.combatMob = mob
         self.statusText = string.format("Usagi: Bandit %d/%d", cur, tot)
         if d.fightMob ~= nil then d.fightMob(mob, now) end
         return
@@ -19065,13 +19139,19 @@ function Runner:_stepUsagi(now, state, lx, ly, lz)
 end
 
 function Runner:update(now, cfg, lx, ly, lz)
-    self.wantsBounty = false
+    local d = self.deps
     if now - self.lastStepAt < stand_out_quests.step_delay then
+        -- Во время боя удерживаем позицию (Over/Below/Behind) КАЖДЫЙ кадр, иначе за 0.28с персонаж падает на моба!
+        if self.combatMob ~= nil and d.fightMob ~= nil then
+            d.fightMob(self.combatMob, now)
+        end
         return
     end
     self.lastStepAt = now
+    self.wantsBounty = false
+    local prevCombat = self.combatMob
+    self.combatMob = nil
 
-    local d = self.deps
     local state = d.readState ~= nil and d.readState() or {}
     state.completed = state.completed or stand_out_quests.parseCompletedSet(state.completedRaw)
     state.activeSet = state.activeSet or stand_out_quests.parseCompletedSet(state.activeQuest)
@@ -19097,6 +19177,9 @@ function Runner:update(now, cfg, lx, ly, lz)
 
     local target = stand_out_quests.selectTarget(cfg and cfg.quest or "All", state)
     if target == nil then
+        if prevCombat ~= nil and d.stopCombat ~= nil then
+            d.stopCombat()
+        end
         self.statusText = "Все квесты на кд / выполнены"
         return
     end
@@ -19115,6 +19198,10 @@ function Runner:update(now, cfg, lx, ly, lz)
         self:_stepBobby(now, state, lx, ly, lz)
     elseif target == "Usagi" then
         self:_stepUsagi(now, state, lx, ly, lz)
+    end
+
+    if prevCombat ~= nil and self.combatMob == nil and d.stopCombat ~= nil then
+        d.stopCombat()
     end
 end
 
@@ -20982,13 +21069,30 @@ function bridge.create(ctx)
                 local p = root.Position
                 lx, ly, lz = p.X, p.Y, p.Z
             end
+            local mModel = mob.model
+            local mRoot = mob.root or (mModel and (mModel:FindFirstChild("HumanoidRootPart") or mModel.PrimaryPart or mModel:FindFirstChildWhichIsA("BasePart")))
+            local mHum = mob.humanoid or (mModel and mModel:FindFirstChildOfClass("Humanoid"))
+            if mRoot == nil or mHum == nil then return end
             -- Wrap raid mob into stand_out_mobs entry format
             local entry = {
-                model = mob.model,
+                model = mModel,
+                root = mRoot,
+                humanoid = mHum,
                 name = mob.name,
                 boss = mob.isBoss == true,
             }
-            soMob.farmer:update(now, { entry }, cfg, lx, ly, lz)
+            local fightOpts = {
+                filter = "All",
+                nameFilter = "",
+                autoSummon = cfg.autoSummon,
+                autoSkill = cfg.autoSkill,
+                skills = cfg.skills,
+                autoR = cfg.autoR,
+                autoM1 = cfg.autoM1,
+                distance = cfg.distance,
+                method = cfg.method,
+            }
+            soMob.farmer:update(now, { entry }, fightOpts, lx, ly, lz)
         end,
 
         stopCombat = function()
@@ -21336,12 +21440,14 @@ function stand_out_story.new(deps)
         wiggleSign = 1,
         mapOpenedFor = "",
         huberCalledAt = 0,
+        combatMob = nil,
     }, Runner)
 end
 
 function Runner:stop()
     self.wantsBounty = false
     self.wantsDarby = false
+    self.combatMob = nil
     self.statusText = ""
     if self.interact ~= nil then
         self.interact:stop()
@@ -21402,14 +21508,25 @@ function Runner:_resolvePos(step)
 end
 
 function Runner:update(now, lx, ly, lz)
-    self.wantsBounty = false
-    self.wantsDarby = false
+    local d = self.deps
     if now - self.lastStepAt < stand_out_story.step_delay then
+        if self.combatMob ~= nil and d.fightMob ~= nil then
+            d.fightMob(self.combatMob, now)
+        end
         return
     end
     self.lastStepAt = now
+    self.wantsBounty = false
+    self.wantsDarby = false
+    local prevCombat = self.combatMob
+    self.combatMob = nil
 
-    local d = self.deps
+    local function leaveCombat()
+        if prevCombat ~= nil and self.combatMob == nil and d.stopCombat ~= nil then
+            d.stopCombat()
+        end
+    end
+
     local state = d.readState ~= nil and d.readState() or {}
     local completed = state.completed or stand_out_quests.parseCompletedSet(state.completedRaw)
     local objectives = state.objectives or stand_out_quests.parseObjectives(state.objectivesRaw, state.objectivesTotalRaw)
@@ -21418,6 +21535,7 @@ function Runner:update(now, lx, ly, lz)
 
     local qid = stand_out_story.nextQuest(state.activeQuest or "", completed)
     if qid == nil then
+        leaveCombat()
         self.currentQuest = ""
         self.statusText = "Сюжетка Part 9 пройдена (" .. self.progressText .. ")"
         return
@@ -21426,6 +21544,7 @@ function Runner:update(now, lx, ly, lz)
 
     -- Всегда сначала прокликиваем открытый сюжетный диалог (ускоряет переходы и катсцены!)
     if self:_handleDialogue(now) then
+        leaveCombat()
         local st = stand_out_story.steps[qid]
         self.statusText = (st and st.label or qid) .. " (диалог)"
         return
@@ -21433,10 +21552,14 @@ function Runner:update(now, lx, ly, lz)
 
     local step = stand_out_story.steps[qid]
     if step == nil then
+        leaveCombat()
         self.statusText = "Неизвестный шаг: " .. qid
         return
     end
     local label = step.label or qid
+    if step.kind ~= "combat" then
+        leaveCombat()
+    end
 
     -- 1) Bounty / Level grind steps -> делегируем Auto Bounty!
     if step.kind == "bounty" then
@@ -21518,12 +21641,14 @@ function Runner:update(now, lx, ly, lz)
         local tx, ty, tz = self:_resolvePos(step)
         local mob = d.findMobByName ~= nil and d.findMobByName(step.mobs, tx, ty, tz, 260) or nil
         if mob ~= nil then
+            self.combatMob = mob
             self.statusText = label .. ": " .. tostring(mob.name or "враг")
             if d.fightMob ~= nil then
                 d.fightMob(mob, now)
             end
             return
         end
+        leaveCombat()
         -- Если бой ещё не начался, возможно нужен стартовый диалог (например Paco в P9_41)
         if step.npc ~= nil and d.findNpc ~= nil then
             local nx, ny, nz, prompt = d.findNpc(step.npc, step.promptName)
