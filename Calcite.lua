@@ -3311,6 +3311,8 @@ local rows = {
     { "Visuals", "Визуалы", "Visuals" }, { "Aim", "Наведение", "Aim" },
     { "Hitboxes", "Хитбоксы", "Hitboxes" }, { "Settings", "Настройки", "Settings" },
     { "Player", "Персонаж", "Player" }, { "AutoFarm", "Автофарм", "Auto farm" },
+    { "Auto Storyline", "Авто Сторилайн", "Auto Storyline" },
+    { "Priorities", "Приоритеты", "Priorities" },
     { "Teleport", "Телепорт", "Teleport" }, { "Steal", "Сбор яиц", "Egg collection" },
     { "Search", "Поиск настроек", "Search settings" },
     { "Search...", "Поиск...", "Search..." },
@@ -3423,6 +3425,10 @@ local pairs = {
     ["Автопокупка (горшок/земля/семена)"] = "Auto Buy (pot/dirt/seeds)",
     ["Автоудобрение"] = "Auto Fertilize",
     ["Автопродажа урожая"] = "Auto Sell Harvest",
+    ["Порядок важности автофармов"] = "Auto farm priority order",
+    ["Важность фармов (1 — главный, 10 — последний)"] = "Farm priority (1 — highest, 10 — lowest)",
+    ["Текущий порядок"] = "Current order",
+    ["Сбросить приоритеты"] = "Reset priorities",
     ["Сюжетная линия Part 9"] = "Part 9 Storyline", ["Этапы Part 9"] = "Part 9 Chapters",
     [" ст/с"] = " st/s", [" мс"] = " ms", [" ст"] = " st",
 }
@@ -4183,6 +4189,7 @@ local stand_out_raid = require("./stand_out_raid")
 local stand_out_raid_bridge = require("./stand_out_raid_bridge")
 local stand_out_garden = require("./stand_out_garden")
 local stand_out_garden_bridge = require("./stand_out_garden_bridge")
+local stand_out_priority = require("./stand_out_priority")
 local glider = require("./glider")
 local yba_npcs = require("./yba_npcs")
 local yba_waypoints = require("./yba_waypoints")
@@ -4375,6 +4382,7 @@ function main.start(env)
         _soQuest = { runner = nil, story = nil, wasQuestOn = false, wasStoryOn = false, mod = nil, modTried = false, mobCache = nil, mobCacheAt = -99 },
         _soRaid = { runner = nil, wasOn = false },
         _soGarden = { runner = nil, wasOn = false },
+        _soPrioOrder = {},
         _charMove = { savedWs = nil, savedJp = nil, savedUseJp = nil, wasWs = false, wasJp = false, lastChar = nil },
     }
 
@@ -8509,32 +8517,9 @@ function main.start(env)
             ui.setStandOutHowler(handle._soHowler.collector.statusText)
         end
 
-        -- Stand Out Auto Pick Up: телепорт к ближайшему мировому предмету / закопанному припасу и подбор (пауза внутри рейда)
+        -- Stand Out Автофармы: динамический планировщик по пользовательским приоритетам (вкладка «Приоритеты», 1/10 = главный)
         local inRaidNow = false
         pcall(function() inRaidNow = localPlayer:GetAttribute("TrainRaidActive") == true end)
-        local soPick = handle._soPick
-        if not howlerBusy and not inRaidNow and s.standOutPickup ~= nil and s.standOutPickup.enabled and haveLocal and soPick.picker ~= nil then
-            if not soPick.wasOn then
-                soPick.entries = stand_out_pickup.scan(workspace, s.standOutPickup)
-                soPick.wasOn = true
-            end
-            local okPick, errPick = pcall(function()
-                soPick.picker:update(now, soPick.entries, s.standOutPickup, localX, localY, localZ)
-            end)
-            if not okPick then
-                warn("Calcite StandOutPickup: " .. tostring(errPick))
-            end
-            ui.setStandOutPickup(soPick.picker.taken, soPick.picker.lastTargetName)
-        elseif soPick.wasOn then
-            soPick.wasOn = false
-            if soPick.picker ~= nil then
-                soPick.picker:stop()
-                ui.setStandOutPickup(soPick.picker.taken, "")
-            end
-        end
-
-        -- Stand Out Mob Farming: работает только пока свой персонаж жив; после респавна сразу пересканирует мобов
-        local soMob = handle._soMob
         local localAlive = haveLocal
         if localAlive then
             local myChar = localPlayer.Character
@@ -8543,102 +8528,39 @@ function main.start(env)
                 localAlive = false
             end
         end
-        local itemBusy = howlerBusy or (s.standOutPickup ~= nil and s.standOutPickup.enabled
-            and soPick.picker ~= nil and soPick.picker.target ~= nil)
-        -- Stand Out Auto Raid (приоритет над Storyline / Quest / Bounty / Mob Farming; внутри рейда игнорирует Item farm)
-        local raidOn = s.standOutRaid ~= nil and s.standOutRaid.enabled and localAlive and handle._soRaid.runner ~= nil
-        if raidOn then
-            handle._soRaid.wasOn = true
-            if inRaidNow or not itemBusy then
-                local okR, errR = pcall(function()
-                    handle._soRaid.runner:update(now, s.standOutRaid, localX, localY, localZ)
-                end)
-                if not okR then
-                    warn("Calcite StandOutRaid: " .. tostring(errR))
-                end
-                ui.setStandOutRaid(handle._soRaid.runner.clears, handle._soRaid.runner.statusText)
-            end
-        elseif handle._soRaid.wasOn then
-            handle._soRaid.wasOn = false
-            if handle._soRaid.runner ~= nil then
-                handle._soRaid.runner:stop()
-                ui.setStandOutRaid(handle._soRaid.runner.clears, "")
-            end
-        end
 
-        -- Stand Out Auto Garden (работает вне рейда; пока растения растут — gardenBusy=false и не мешает остальным фармам!)
-        local gardenBusy = false
-        local soGarden = handle._soGarden
-        if not inRaidNow and not raidOn and s.standOutGarden ~= nil and s.standOutGarden.enabled and localAlive and soGarden.runner ~= nil then
-            soGarden.wasOn = true
-            if not itemBusy then
-                local okG, busyG = pcall(function()
-                    return soGarden.runner:update(now, s.standOutGarden, localX, localY, localZ)
-                end)
-                if okG then
-                    gardenBusy = busyG == true
-                else
-                    warn("Calcite StandOutGarden: " .. tostring(busyG))
-                end
-                ui.setStandOutGarden(soGarden.runner.harvested, soGarden.runner.statusText)
-            end
-        elseif soGarden.wasOn then
-            soGarden.wasOn = false
-            if soGarden.runner ~= nil then
-                soGarden.runner:stop()
-                ui.setStandOutGarden(soGarden.runner.harvested, "")
-            end
-        end
-
-        -- Stand Out Auto Storyline (приоритет над Auto Quest / Auto Bounty / Mob Farming)
+        local soPick = handle._soPick
+        local soMob = handle._soMob
         local soQuest = handle._soQuest
-        local storyOn = s.standOutStory ~= nil and s.standOutStory.enabled and localAlive and soQuest.story ~= nil and not raidOn and not gardenBusy
-        if storyOn then
-            soQuest.wasStoryOn = true
-            if not itemBusy then
-                local okSt, errSt = pcall(function()
-                    soQuest.story:update(now, localX, localY, localZ)
-                end)
-                if not okSt then
-                    warn("Calcite StandOutStory: " .. tostring(errSt))
-                end
-                ui.setStandOutStory(soQuest.story.progressText, soQuest.story.statusText)
-            end
-        elseif soQuest.wasStoryOn then
-            soQuest.wasStoryOn = false
-            if soQuest.story ~= nil then
-                soQuest.story:stop()
-                ui.setStandOutStory(soQuest.story.progressText, "")
-            end
-        end
-
-        -- Stand Out Auto Quest (уступает Auto Raid, Item farm, активному Auto Garden и Auto Storyline)
-        local questOn = s.standOutQuests ~= nil and s.standOutQuests.enabled and localAlive and soQuest.runner ~= nil and not storyOn and not raidOn and not gardenBusy
-        if questOn then
-            soQuest.wasQuestOn = true
-            if not itemBusy then
-                local okQ, errQ = pcall(function()
-                    soQuest.runner:update(now, s.standOutQuests, localX, localY, localZ)
-                end)
-                if not okQ then
-                    warn("Calcite StandOutQuest: " .. tostring(errQ))
-                end
-                ui.setStandOutQuest(soQuest.runner.completed, soQuest.runner.statusText)
-            end
-        elseif soQuest.wasQuestOn then
-            soQuest.wasQuestOn = false
-            if soQuest.runner ~= nil then
-                soQuest.runner:stop()
-                ui.setStandOutQuest(soQuest.runner.completed, "")
-            end
-        end
-
-        -- Stand Out Auto Bounty (включается вручную ИЛИ по запросу Auto Quest / Auto Storyline!)
         local soBounty = handle._soBounty
-        local questWantsBounty = (storyOn and soQuest.story.wantsBounty) or (questOn and soQuest.runner.wantsBounty)
-        local bountyOn = localAlive and soBounty.runner ~= nil and not raidOn and not gardenBusy
-            and ((s.standOutBounty ~= nil and s.standOutBounty.enabled and not storyOn and not questOn) or questWantsBounty)
-        if bountyOn then
+        local soGarden = handle._soGarden
+        local soRaid = handle._soRaid
+
+        local prioOrder = stand_out_priority.ordered(s.standOutPriority, handle._soPrioOrder)
+        local claimed = howlerBusy
+        local ranPick, ranRaid, ranGarden, ranStory, ranQuest, ranBounty, ranMob = false, false, false, false, false, false, false
+        local questWantsBounty = false
+
+        local function stepRaid()
+            if not (s.standOutRaid ~= nil and s.standOutRaid.enabled and localAlive and soRaid.runner ~= nil) then
+                return false
+            end
+            soRaid.wasOn = true
+            ranRaid = true
+            local okR, errR = pcall(function()
+                soRaid.runner:update(now, s.standOutRaid, localX, localY, localZ)
+            end)
+            if not okR then
+                warn("Calcite StandOutRaid: " .. tostring(errR))
+            end
+            ui.setStandOutRaid(soRaid.runner.clears, soRaid.runner.statusText)
+            return true
+        end
+
+        local function stepBounty()
+            if not (localAlive and soBounty.runner ~= nil) then
+                return false
+            end
             if not soBounty.wasOn then
                 local pNames = {}
                 for _, pl in Players:GetPlayers() do
@@ -8653,16 +8575,166 @@ function main.start(env)
                 soBounty.mobs = stand_out_bounty.scanMyMobs(workspace, localPlayer.UserId, pNames, localPlayer.Name, tx, ty, tz, uiSnap.trackerObjective)
                 soBounty.wasOn = true
             end
-            if not itemBusy then
-                local okB, errB = pcall(function()
-                    soBounty.runner:update(now, s.standOutBounty, localX, localY, localZ)
-                end)
-                if not okB then
-                    warn("Calcite StandOutBounty: " .. tostring(errB))
-                end
-                ui.setStandOutBounty(soBounty.runner.completed, soBounty.runner.statusText)
+            ranBounty = true
+            local okB, errB = pcall(function()
+                soBounty.runner:update(now, s.standOutBounty, localX, localY, localZ)
+            end)
+            if not okB then
+                warn("Calcite StandOutBounty: " .. tostring(errB))
             end
-        elseif soBounty.wasOn then
+            ui.setStandOutBounty(soBounty.runner.completed, soBounty.runner.statusText)
+            return true
+        end
+
+        -- Внутри активного рейда нельзя телепортироваться в город: рейд всегда удерживает приоритет пока не закончится
+        if not claimed and inRaidNow and stepRaid() then
+            claimed = true
+        end
+
+        for _, slot in ipairs(prioOrder) do
+            if claimed then
+                break
+            end
+            if slot == "raid" then
+                if not ranRaid and stepRaid() then
+                    claimed = true
+                end
+            elseif slot == "pickup" then
+                if not inRaidNow and s.standOutPickup ~= nil and s.standOutPickup.enabled and haveLocal and soPick.picker ~= nil then
+                    if not soPick.wasOn then
+                        soPick.entries = stand_out_pickup.scan(workspace, s.standOutPickup)
+                        soPick.wasOn = true
+                    end
+                    ranPick = true
+                    local okPick, errPick = pcall(function()
+                        soPick.picker:update(now, soPick.entries, s.standOutPickup, localX, localY, localZ)
+                    end)
+                    if not okPick then
+                        warn("Calcite StandOutPickup: " .. tostring(errPick))
+                    end
+                    ui.setStandOutPickup(soPick.picker.taken, soPick.picker.lastTargetName)
+                    if soPick.picker.target ~= nil then
+                        claimed = true
+                    end
+                end
+            elseif slot == "garden" then
+                if not inRaidNow and s.standOutGarden ~= nil and s.standOutGarden.enabled and localAlive and soGarden.runner ~= nil then
+                    soGarden.wasOn = true
+                    ranGarden = true
+                    local okG, busyG = pcall(function()
+                        return soGarden.runner:update(now, s.standOutGarden, localX, localY, localZ)
+                    end)
+                    if okG then
+                        if busyG == true then
+                            claimed = true
+                        end
+                    else
+                        warn("Calcite StandOutGarden: " .. tostring(busyG))
+                    end
+                    ui.setStandOutGarden(soGarden.runner.harvested, soGarden.runner.statusText)
+                end
+            elseif slot == "story" then
+                if not inRaidNow and s.standOutStory ~= nil and s.standOutStory.enabled and localAlive and soQuest.story ~= nil then
+                    soQuest.wasStoryOn = true
+                    ranStory = true
+                    local okSt, errSt = pcall(function()
+                        soQuest.story:update(now, localX, localY, localZ)
+                    end)
+                    if not okSt then
+                        warn("Calcite StandOutStory: " .. tostring(errSt))
+                    end
+                    ui.setStandOutStory(soQuest.story.progressText, soQuest.story.statusText)
+                    if soQuest.story.wantsBounty then
+                        questWantsBounty = true
+                        stepBounty()
+                    end
+                    claimed = true
+                end
+            elseif slot == "quest" then
+                if not inRaidNow and s.standOutQuests ~= nil and s.standOutQuests.enabled and localAlive and soQuest.runner ~= nil then
+                    soQuest.wasQuestOn = true
+                    ranQuest = true
+                    local okQ, errQ = pcall(function()
+                        soQuest.runner:update(now, s.standOutQuests, localX, localY, localZ)
+                    end)
+                    if not okQ then
+                        warn("Calcite StandOutQuest: " .. tostring(errQ))
+                    end
+                    ui.setStandOutQuest(soQuest.runner.completed, soQuest.runner.statusText)
+                    if soQuest.runner.wantsBounty then
+                        questWantsBounty = true
+                        stepBounty()
+                    end
+                    if not soQuest.runner.idle then
+                        claimed = true
+                    end
+                end
+            elseif slot == "bounty" then
+                if not inRaidNow and not ranBounty and s.standOutBounty ~= nil and s.standOutBounty.enabled then
+                    if stepBounty() then
+                        claimed = true
+                    end
+                end
+            elseif slot == "mobs" then
+                if not inRaidNow and s.standOutMobs ~= nil and s.standOutMobs.enabled and localAlive and soMob.farmer ~= nil then
+                    if not soMob.wasOn then
+                        local pNames = {}
+                        for _, pl in Players:GetPlayers() do
+                            pNames[pl.Name] = true
+                        end
+                        soMob.entries = stand_out_mobs.scan(workspace, pNames)
+                        soMob.wasOn = true
+                    end
+                    ranMob = true
+                    local okMob, errMob = pcall(function()
+                        soMob.farmer:update(now, soMob.entries, s.standOutMobs, localX, localY, localZ)
+                    end)
+                    if not okMob then
+                        warn("Calcite StandOutMobs: " .. tostring(errMob))
+                    end
+                    ui.setStandOutMob(soMob.farmer.kills, soMob.farmer.statusText)
+                    claimed = true
+                end
+            end
+        end
+
+        -- Аккуратная остановка всех модулей, которые выключены или уступили более приоритетному
+        if not ranPick and soPick.wasOn then
+            soPick.wasOn = false
+            if soPick.picker ~= nil then
+                soPick.picker:stop()
+                ui.setStandOutPickup(soPick.picker.taken, "")
+            end
+        end
+        if not ranRaid and soRaid.wasOn then
+            soRaid.wasOn = false
+            if soRaid.runner ~= nil then
+                soRaid.runner:stop()
+                ui.setStandOutRaid(soRaid.runner.clears, "")
+            end
+        end
+        if not ranGarden and soGarden.wasOn then
+            soGarden.wasOn = false
+            if soGarden.runner ~= nil then
+                soGarden.runner:stop()
+                ui.setStandOutGarden(soGarden.runner.harvested, "")
+            end
+        end
+        if not ranStory and soQuest.wasStoryOn then
+            soQuest.wasStoryOn = false
+            if soQuest.story ~= nil then
+                soQuest.story:stop()
+                ui.setStandOutStory(soQuest.story.progressText, "")
+            end
+        end
+        if not ranQuest and soQuest.wasQuestOn then
+            soQuest.wasQuestOn = false
+            if soQuest.runner ~= nil then
+                soQuest.runner:stop()
+                ui.setStandOutQuest(soQuest.runner.completed, "")
+            end
+        end
+        if not ranBounty and not questWantsBounty and soBounty.wasOn then
             soBounty.wasOn = false
             soBounty.prompt = nil
             soBounty.lastPromptScan = -99
@@ -8671,27 +8743,7 @@ function main.start(env)
                 ui.setStandOutBounty(soBounty.runner.completed, "")
             end
         end
-
-        -- Stand Out Mob Farming (уступает Auto Raid, Item farm, активному Auto Garden, Auto Storyline, Auto Quest и Auto Bounty)
-        if s.standOutMobs ~= nil and s.standOutMobs.enabled and localAlive and soMob.farmer ~= nil and not raidOn and not gardenBusy and not bountyOn and not questOn and not storyOn then
-            if not soMob.wasOn then
-                local pNames = {}
-                for _, pl in Players:GetPlayers() do
-                    pNames[pl.Name] = true
-                end
-                soMob.entries = stand_out_mobs.scan(workspace, pNames)
-                soMob.wasOn = true
-            end
-            if not itemBusy then
-                local okMob, errMob = pcall(function()
-                    soMob.farmer:update(now, soMob.entries, s.standOutMobs, localX, localY, localZ)
-                end)
-                if not okMob then
-                    warn("Calcite StandOutMobs: " .. tostring(errMob))
-                end
-                ui.setStandOutMob(soMob.farmer.kills, soMob.farmer.statusText)
-            end
-        elseif soMob.wasOn then
+        if not ranMob and soMob.wasOn then
             soMob.wasOn = false
             if soMob.farmer ~= nil then
                 soMob.farmer:stop()
@@ -8813,6 +8865,7 @@ local i18n = require("./i18n")
 local ui_localize = require("./ui_localize")
 local ui_style = require("./ui_style")
 local ui_preferences = require("./ui_preferences")
+local stand_out_priority = require("./stand_out_priority")
 
 local menu = {}
 
@@ -8896,17 +8949,18 @@ function menu.create(deps)
 
     local Window = Library:CreateWindow(ui_style.configure(deps))
 
-    -- the auto farm, the user's own character, then what is drawn, the aim, and the menu itself
-    local visualsTab = Window:AddTab("Visuals", "eye", "Игроки, предметы и игровые метки")
-    local aimTab = Window:AddTab("Aim", "crosshair", "Выбор цели и управление прицелом")
-    local hitboxTab = Window:AddTab("Hitboxes", "scan", "Части тела и точки наведения")
-    local playerTab = Window:AddTab("Player", "user", "Перемещение персонажа")
+    -- Tab order (Stand Out visible sequence: AutoFarm -> Auto Storyline -> Player -> Visuals -> Priorities -> Settings)
     local farmTab = Window:AddTab("AutoFarm", "bot", "Автоматический сбор предметов")
     local soFarm = {}
     soFarm.storyTab = Window:AddTab("Auto Storyline", "book-open", "Сюжетная линия Part 9")
+    local playerTab = Window:AddTab("Player", "user", "Перемещение персонажа")
+    local visualsTab = Window:AddTab("Visuals", "eye", "Игроки, предметы и игровые метки")
+    local aimTab = Window:AddTab("Aim", "crosshair", "Выбор цели и управление прицелом")
+    local hitboxTab = Window:AddTab("Hitboxes", "scan", "Части тела и точки наведения")
     local npcTab = Window:AddTab("NPC", "message-circle", "Диалоги и взаимодействия")
     local stealTab = Window:AddTab("Steal", "egg", "Зоны и доставка яиц")
     local teleportTab = Window:AddTab("Teleport", "map-pin", "Быстрое перемещение")
+    soFarm.prioritiesTab = Window:AddTab("Priorities", "list-ordered", "Порядок важности автофармов")
     local settingsTab = Window:AddTab("Settings", "settings", "Язык, оформление и конфигурации")
 
     local presentation
@@ -9260,6 +9314,47 @@ function menu.create(deps)
         "• Hospital, MRI & Bobby Jean (P9_23–P9_32)\n" ..
         "• D'Arby Go Fish, Bounties & Lv 25 (P9_33–P9_34)\n" ..
         "• Howler Megayacht, Ningbo & Key West (P9_35–P9_47)", true)
+
+    -- Stand Out Priorities: слайдеры 1/10..10/10 (1 = самый важный) + живая сводка очереди
+    do
+        soFarm.prioGroup = soFarm.prioritiesTab:AddLeftGroupbox("Важность фармов (1 — главный, 10 — последний)")
+        soFarm.prioOrderGroup = soFarm.prioritiesTab:AddRightGroupbox("Текущий порядок")
+        soFarm.prioSummary = soFarm.prioOrderGroup:AddLabel(stand_out_priority.summary(settings.standOutPriority), true)
+        soFarm.prioOrderGroup:AddLabel("1/10 — самый высокий приоритет, 10/10 — самый низкий.\n" ..
+            "Item Farm, Auto Garden и Auto Quest (когда на КД) автоматически уступают ход следующему в очереди, пока им нечего делать.", true)
+        local function refreshPrioSummary()
+            if soFarm.prioSummary ~= nil then
+                soFarm.prioSummary:SetText(stand_out_priority.summary(settings.standOutPriority))
+            end
+        end
+        for _, slot in ipairs(stand_out_priority.SLOTS) do
+            local key = slot.key
+            soFarm.prioGroup:AddSlider(slot.id, {
+                Text = slot.label,
+                Default = settings.standOutPriority[key] or slot.default,
+                Min = 1,
+                Max = 10,
+                Rounding = 0,
+                Suffix = "/10",
+            })
+            Options[slot.id]:OnChanged(function()
+                settings.standOutPriority[key] = Options[slot.id].Value
+                refreshPrioSummary()
+            end)
+        end
+        soFarm.prioGroup:AddButton({
+            Text = "Сбросить приоритеты",
+            Func = function()
+                for _, slot in ipairs(stand_out_priority.SLOTS) do
+                    settings.standOutPriority[slot.key] = slot.default
+                    if Options[slot.id] ~= nil and Options[slot.id].SetValue ~= nil then
+                        Options[slot.id]:SetValue(slot.default)
+                    end
+                end
+                refreshPrioSummary()
+            end,
+        })
+    end
 
     -- aim
     local aimGroup = aimTab:AddLeftGroupbox("Наведение")
@@ -9687,6 +9782,7 @@ function menu.create(deps)
         soFarm.raidGroup:SetVisible(modes.has(mode, "StandOutRaid"))
         soFarm.gardenGroup:SetVisible(modes.has(mode, "StandOutGarden"))
         soFarm.storyTab:SetVisible(modes.has(mode, "StandOutQuests"))
+        soFarm.prioritiesTab:SetVisible(modes.has(mode, "StandOutMobs"))
         teamCheck:SetVisible(modes.has(mode, "TeamCheck"))
         throughWalls:SetVisible(modes.has(mode, "Wallbang"))
         autoStop:SetVisible(modes.has(mode, "AutoStop"))
@@ -11319,6 +11415,16 @@ function settings.defaults(mode)
             autoFertilize = false,
             autoSell = false,
         },
+        -- Stand Out Priorities: важность каждого автофарма 1..10 (1 = самый важный, 10 = самый низкий)
+        standOutPriority = {
+            raid = 1,
+            pickup = 2,
+            garden = 3,
+            story = 4,
+            quest = 5,
+            bounty = 6,
+            mobs = 7,
+        },
         -- Player WalkSpeed / JumpPower
         walkSpeed = {
             enabled = false,
@@ -11469,6 +11575,7 @@ function settings.inEffectInto(out, s, mode)
     local standOutStory = copyInto(reusing and e.standOutStory or nil, s.standOutStory)
     local standOutRaid = copyInto(reusing and e.standOutRaid or nil, s.standOutRaid)
     local standOutGarden = copyInto(reusing and e.standOutGarden or nil, s.standOutGarden)
+    local standOutPriority = copyInto(reusing and e.standOutPriority or nil, s.standOutPriority)
     local walkSpeed = copyInto(reusing and e.walkSpeed or nil, s.walkSpeed)
     local jumpPower = copyInto(reusing and e.jumpPower or nil, s.jumpPower)
     local watermark = copyInto(reusing and e.watermark or nil, s.watermark)
@@ -11511,6 +11618,7 @@ function settings.inEffectInto(out, s, mode)
     e.standOutStory = standOutStory
     e.standOutRaid = standOutRaid
     e.standOutGarden = standOutGarden
+    e.standOutPriority = standOutPriority
     e.walkSpeed = walkSpeed
     e.jumpPower = jumpPower
     e.watermark = watermark
@@ -18362,6 +18470,78 @@ end
 return stand_out_pickup
 end
 
+__modules["stand_out_priority"] = function(require)
+-- Stand Out Farm Priorities: пользовательский порядок важности автофармов (1..10, где 1 — самый важный).
+-- Чистая логика поверх таблицы настроек, проверяется tests/stand_out_priority_test.lua.
+local priority = {}
+
+priority.SLOTS = {
+    { key = "raid",   id = "StandOutPrioRaid",   label = "Auto Raid",      default = 1 },
+    { key = "pickup", id = "StandOutPrioPickup", label = "Item Farm",      default = 2 },
+    { key = "garden", id = "StandOutPrioGarden", label = "Auto Garden",    default = 3 },
+    { key = "story",  id = "StandOutPrioStory",  label = "Auto Storyline", default = 4 },
+    { key = "quest",  id = "StandOutPrioQuest",  label = "Auto Quest",     default = 5 },
+    { key = "bounty", id = "StandOutPrioBounty", label = "Auto Bounty",    default = 6 },
+    { key = "mobs",   id = "StandOutPrioMobs",   label = "Mob Farming",    default = 7 },
+}
+
+local BASE_INDEX = {}
+local LABEL_BY_KEY = {}
+for i, slot in ipairs(priority.SLOTS) do
+    BASE_INDEX[slot.key] = i
+    LABEL_BY_KEY[slot.key] = slot.label
+end
+
+function priority.defaults()
+    local t = {}
+    for _, slot in ipairs(priority.SLOTS) do
+        t[slot.key] = slot.default
+    end
+    return t
+end
+
+function priority.rankOf(cfg, key)
+    local raw = type(cfg) == "table" and tonumber(cfg[key]) or nil
+    if raw == nil then
+        local idx = BASE_INDEX[key] or 10
+        return math.clamp(idx, 1, 10)
+    end
+    return math.clamp(math.floor(raw + 0.5), 1, 10)
+end
+
+-- Возвращает список ключей слотов в порядке убывания важности (от 1/10 к 10/10).
+-- При равенстве чисел используется стабильный базовый порядок (SLOTS).
+function priority.ordered(cfg, outBuf)
+    local list = outBuf or {}
+    table.clear(list)
+    for i, slot in ipairs(priority.SLOTS) do
+        list[i] = slot.key
+    end
+    table.sort(list, function(a, b)
+        local ra = priority.rankOf(cfg, a)
+        local rb = priority.rankOf(cfg, b)
+        if ra ~= rb then
+            return ra < rb
+        end
+        return (BASE_INDEX[a] or 99) < (BASE_INDEX[b] or 99)
+    end)
+    return list
+end
+
+-- Короткая текстовая сводка для вкладки «Приоритеты»
+function priority.summary(cfg)
+    local order = priority.ordered(cfg)
+    local lines = {}
+    for i, key in ipairs(order) do
+        local r = priority.rankOf(cfg, key)
+        table.insert(lines, string.format("%d. %s (%d/10)", i, LABEL_BY_KEY[key] or key, r))
+    end
+    return table.concat(lines, "\n")
+end
+
+return priority
+end
+
 __modules["stand_out_quest_bridge"] = function(require)
 -- Roblox runtime adapter for stand_out_quests and stand_out_story, powered by stand_out_interact.
 -- Keeps main.lua compact and well below Luau's 200-local register limit.
@@ -19976,12 +20156,14 @@ function stand_out_quests.new(deps)
         crouching = false,
         combatMob = nil,
         lettuceCooldownUntil = 0,
+        idle = false,
     }, Runner)
 end
 
 function Runner:stop()
     self.wantsBounty = false
     self.combatMob = nil
+    self.idle = false
     self.statusText = ""
     if self.interact ~= nil then
         self.interact:stop()
@@ -20663,9 +20845,11 @@ function Runner:update(now, cfg, lx, ly, lz)
         if prevCombat ~= nil and d.stopCombat ~= nil then
             d.stopCombat()
         end
+        self.idle = true
         self.statusText = "Все квесты на кд / выполнены"
         return
     end
+    self.idle = false
 
     if target == "Angelo" then
         self:_stepAngelo(now, state, lx, ly, lz)
