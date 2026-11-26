@@ -6628,6 +6628,16 @@ function main.start(env)
                 end
                 return nil
             end,
+            secondsUntilRefresh = function()
+                local m = handle._soBounty.mod
+                if m ~= nil and type(m.GetSecondsUntilNextRotation) == "function" then
+                    local ok, sec = pcall(m.GetSecondsUntilNextRotation)
+                    if ok and type(sec) == "number" and sec > 0 then
+                        return sec
+                    end
+                end
+                return nil
+            end,
             petyrPosition = function()
                 local gf = workspace:FindFirstChild("Game")
                 local npcs = gf and gf:FindFirstChild("NPCs")
@@ -8671,7 +8681,7 @@ function main.start(env)
                 end
             elseif slot == "bounty" then
                 if not inRaidNow and not ranBounty and s.standOutBounty ~= nil and s.standOutBounty.enabled then
-                    if stepBounty() then
+                    if stepBounty() and not soBounty.runner.idle then
                         claimed = true
                     end
                 end
@@ -12319,6 +12329,34 @@ function stand_out_bounty.parseTier(labelText)
     return num and tonumber(num) or nil
 end
 
+-- Парсит таймер обновления доски баунти вида "7 BOUNTIES | REFRESH IN 26:07" или "REFRESH IN 1:05:10" в секунды.
+function stand_out_bounty.parseRefreshSeconds(text)
+    if type(text) ~= "string" or text == "" then
+        return nil
+    end
+    local up = string.upper(text)
+    local h, m, s = string.match(up, "REFRESH%s+IN%s*(%d+):(%d+):(%d+)")
+    if h ~= nil and m ~= nil and s ~= nil then
+        return tonumber(h) * 3600 + tonumber(m) * 60 + tonumber(s)
+    end
+    local m2, s2 = string.match(up, "REFRESH%s+IN%s*(%d+):(%d+)")
+    if m2 ~= nil and s2 ~= nil then
+        return tonumber(m2) * 60 + tonumber(s2)
+    end
+    return nil
+end
+
+local function formatClock(totalSec)
+    local sec = math.max(0, math.floor(totalSec + 0.5))
+    local h = math.floor(sec / 3600)
+    local m = math.floor((sec % 3600) / 60)
+    local s = sec % 60
+    if h > 0 then
+        return string.format("%d:%02d:%02d", h, m, s)
+    end
+    return string.format("%02d:%02d", m, s)
+end
+
 -- Читает состояние Bounty UI (открыта ли доска, какой тир выбран, активен ли трекер, список баунти, диалог сдачи награды).
 -- scanRohan=true включается ТОЛЬКО в момент сдачи работы Рохану, чтобы не гонять GetDescendants по всему PlayerGui каждый кадр!
 function stand_out_bounty.readUi(playerGui, scanRohan)
@@ -12331,6 +12369,7 @@ function stand_out_bounty.readUi(playerGui, scanRohan)
         nextBtn = nil,
         prevBtn = nil,
         beginBtn = nil,
+        exitBtn = nil,
         openEvent = nil,
         claimBtn = nil,
         yesBtn = nil,
@@ -12578,6 +12617,7 @@ function stand_out_bounty.readUi(playerGui, scanRohan)
 
         local startBox = sel:FindFirstChild("Start")
         info.beginBtn = startBox and startBox:FindFirstChild("Begin") or nil
+        info.exitBtn = sel:FindFirstChild("EXIT") or sel:FindFirstChild("Exit") or sel:FindFirstChild("Close")
 
         local rot = sel:FindFirstChild("RotationTimer")
         if rot ~= nil and (safeIsA(rot, "TextLabel") or type(rot.Text) == "string") then
@@ -14265,6 +14305,11 @@ function stand_out_bounty.new(deps)
         fallbackTier = nil,     -- если на max tier все не-инциденты пройдены, пробуем тир ниже
         completed = 0,
         statusText = "",
+        idle = false,           -- true когда все баунти пройдены и ждём обновления ротации (уступает другим фармам)
+        allCompleteUntil = nil, -- время (now), когда на доске истечёт таймер REFRESH IN
+        allCompleteWakeAt = nil,-- время (now), когда можно снова открыть Petyr (+2с буфер сервера)
+        allCompleteSkipIncidents = nil,
+        lastCloseAt = -99,
         wasTrackerActive = false,
         promptHolding = nil,
         promptSince = 0,
@@ -14294,6 +14339,8 @@ function Runner:stop()
     self.tierStuckCount = 0
     self.fallbackTier = nil
     self.statusText = ""
+    -- allCompleteUntil / allCompleteWakeAt намеренно сохраняем, чтобы после перехвата
+    -- более приоритетным фармом (напр. Item Farm) не переоткрывать пустую доску баунти снова!
 end
 
 function Runner:_desiredTier(opts)
@@ -14380,6 +14427,9 @@ function Runner:update(now, opts, meX, meY, meZ)
 
     -- Если баунти уже активно (и это не мини-игра под замену) — выполняем его!
     if hasActiveBounty and not replaceIncident then
+        self.idle = false
+        self.allCompleteUntil = nil
+        self.allCompleteWakeAt = nil
         self.state = "active"
         local title = ui.trackerTitle ~= "" and ui.trackerTitle or "Bounty"
         local objLow = string.lower(ui.trackerObjective or "")
@@ -14923,6 +14973,42 @@ function Runner:update(now, opts, meX, meY, meZ)
 
     self:_releasePrompt()
 
+    -- Если ранее видели, что все баунти на доске COMPLETE, ждём обновления ротации:
+    -- не летим к Petyr, не переоткрываем меню, закрываем доску кнопкой EXIT и уступаем другим фармам!
+    local wantSkipIncidents = opts.skipIncidents ~= false
+    if self.allCompleteWakeAt ~= nil then
+        -- Если пользователь выключил «Пропускать мини-игры», а раньше мы пропустили инциденты — перепроверяем доску сразу
+        if self.allCompleteSkipIncidents == true and wantSkipIncidents == false then
+            self.allCompleteUntil = nil
+            self.allCompleteWakeAt = nil
+            self.allCompleteSkipIncidents = nil
+            self.idle = false
+        elseif now < self.allCompleteWakeAt then
+            self.idle = true
+            self.state = "idle"
+            if ui.selectOpen and ui.exitBtn ~= nil and now - (self.lastCloseAt or -99) >= 0.8 then
+                self.lastCloseAt = now
+                if self.deps.activateButton ~= nil then
+                    pcall(self.deps.activateButton, ui.exitBtn)
+                end
+                if self.deps.clickUiButton ~= nil then
+                    pcall(self.deps.clickUiButton, ui.exitBtn)
+                end
+            end
+            local rem = self.allCompleteUntil ~= nil and math.max(0, math.ceil(self.allCompleteUntil - now)) or 0
+            self.statusText = rem > 0
+                and ("Все пройдены (REFRESH IN " .. formatClock(rem) .. ")")
+                or "Все баунти пройдены (жду обнову)"
+            return
+        else
+            self.allCompleteUntil = nil
+            self.allCompleteWakeAt = nil
+            self.allCompleteSkipIncidents = nil
+            self.idle = false
+        end
+    end
+    self.idle = false
+
     -- Баунти НЕ активно (или меняем инцидент на боевой): идём к Petyr, открываем доску и запускаем баунти!
     if not ui.selectOpen then
         local px, py, pz = self.deps.petyrPosition()
@@ -15000,14 +15086,43 @@ function Runner:update(now, opts, meX, meY, meZ)
 
     -- Шаг 2: выбрать лучший баунти на этом тире
     -- В Stand Out завершённый баунти помечается COMPLETE сразу для всех тиров до обновления ротации,
-    -- поэтому вниз по тирам не спускаемся — ждём обновления доски на максимальном доступном тире.
+    -- поэтому вниз по тирам не спускаемся — запоминаем таймер обновления, закрываем доску и уступаем другим фармам.
     if self.state == "picking" then
+        if ui.bounties == nil or #ui.bounties == 0 then
+            self.lastAction = now + 0.5
+            return
+        end
         local chosen = stand_out_bounty.pickBounty(ui.bounties, opts.skipIncidents ~= false)
         if chosen == nil then
+            local waitSec = stand_out_bounty.parseRefreshSeconds(ui.rotationText)
+            if (waitSec == nil or waitSec <= 0) and self.deps.secondsUntilRefresh ~= nil then
+                local okSec, srvSec = pcall(self.deps.secondsUntilRefresh)
+                if okSec and type(srvSec) == "number" and finite(srvSec) and srvSec > 0 then
+                    waitSec = math.ceil(srvSec)
+                end
+            end
+            if waitSec == nil or waitSec <= 0 then
+                waitSec = 60
+            end
+            self.allCompleteUntil = now + waitSec
+            self.allCompleteWakeAt = now + waitSec + 2.0
+            self.allCompleteSkipIncidents = opts.skipIncidents ~= false
+            self.idle = true
+            self.state = "idle"
+            if ui.exitBtn ~= nil then
+                self.lastCloseAt = now
+                if self.deps.activateButton ~= nil then
+                    pcall(self.deps.activateButton, ui.exitBtn)
+                elseif self.deps.clickUiButton ~= nil then
+                    pcall(self.deps.clickUiButton, ui.exitBtn)
+                end
+            end
             local timer = (type(ui.rotationText) == "string" and ui.rotationText ~= "")
                 and (string.match(ui.rotationText, "REFRESH IN%s*[%d:]+") or ui.rotationText) or ""
-            self.statusText = timer ~= "" and ("Все пройдены (" .. timer .. ")") or "Все баунти пройдены (жду обнову)"
-            self.lastAction = now + 3.0
+            self.statusText = timer ~= ""
+                and ("Все пройдены (" .. timer .. ")")
+                or ("Все пройдены (REFRESH IN " .. formatClock(waitSec) .. ")")
+            self.lastAction = now
             return
         end
 
