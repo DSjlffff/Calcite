@@ -21118,33 +21118,56 @@ function raid.pickRaidToStart(cfgRaid, difficulty, level, hasAccess, boardCooldo
 end
 
 -- Chooses the safest Z lane for Highway Star Stage 2 chase driving (+X direction, centered on originZ).
--- obstacles: array of { x, z, radius } (other cars + potholes).
+-- Highway has 3 lanes at originZ - 15.5, originZ, originZ + 15.5; cars are ~9.3..10.3 studs wide,
+-- oncoming traffic moves at ~-45.6 st/s while player moves at ~+45..55 st/s (~100 st/s closing speed).
+-- obstacles: array of { x, z, radius, vx?, vz? } (oncoming vehicles + potholes).
 -- Returns: targetZ, steer (-1 left / 0 straight / +1 right).
-function raid.chooseChaseSteering(carX, carZ, lookZ, originZ, obstacles)
+local CHASE_LANES = { -15.5, -10.5, -5.0, 0.0, 5.0, 10.5, 15.5 }
+
+function raid.chooseChaseSteering(carX, carZ, lookZ, originZ, obstacles, carVx, carVz)
     local oz = originZ or carZ
+    local myVx = math.max(30, tonumber(carVx) or 50)
     local bestLaneZ = oz
     local bestScore = -1e18
 
-    -- 9 candidate lanes across road width [-14 .. +14] around originZ
-    for i = -4, 4 do
-        local laneZ = oz + i * 3.5
-        -- Small preference for staying near current Z and center of road to avoid wild swerving
-        local score = -math.abs(laneZ - carZ) * 0.65 - math.abs(laneZ - oz) * 0.15
+    for _, offset in ipairs(CHASE_LANES) do
+        local laneZ = oz + offset
+        -- Mild preference for staying near current Z and clean lane centers (-15.5, 0, +15.5)
+        local isMainLane = (offset == 0.0 or math.abs(offset) == 15.5)
+        local score = -math.abs(laneZ - carZ) * 0.55 - math.abs(offset) * 0.08 + (isMainLane and 1.5 or 0)
 
         if type(obstacles) == "table" then
             for _, obs in ipairs(obstacles) do
                 local dx = (obs.x or 0) - carX
-                if dx >= -6 and dx <= 150 then
-                    local dz = math.abs((obs.z or oz) - laneZ)
-                    local rad = (obs.radius or 5.5) + 2.8
-                    if dz < rad then
-                        -- Urgent collision penalty inversely weighted by forward distance
-                        local urgency = 180 / math.max(8, dx + 14)
-                        local overlap = (rad - dz) / rad
-                        score = score - urgency * (1 + overlap * 4) * 25
-                    elseif dz < rad + 4 then
-                        local urgency = 45 / math.max(12, dx + 20)
-                        score = score - urgency * 4
+                if dx >= -22 and dx <= 400 then
+                    local obsZ = obs.z or oz
+                    local obsVx = tonumber(obs.vx)
+                    if obsVx == nil then
+                        obsVx = -45
+                    end
+                    local relVx = math.max(25, myVx - obsVx)
+                    local ttc = dx > 0 and (dx / relVx) or 0
+                    -- Real clearance: our half-width (~4.7) + obstacle half-width (~5.2) + 2.6 safety buffer = ~12.5 st
+                    local safeRad = (obs.radius or 5.2) + 4.8 + 2.5
+                    local dz = math.abs(obsZ - laneZ)
+
+                    if dz < safeRad then
+                        local urgency = 1.0 / (ttc + 0.35)
+                        local overlap = (safeRad - dz) / safeRad
+                        score = score - urgency * (1.2 + overlap * 5.0) * 650
+                    elseif dz < safeRad + 4.0 then
+                        local urgency = 1.0 / (ttc + 0.6)
+                        score = score - urgency * 60
+                    end
+
+                    -- Never cut across the nose of an obstacle that is right next to or immediately ahead of us
+                    if dx >= -16 and dx <= 85 then
+                        local minZ = math.min(carZ, laneZ)
+                        local maxZ = math.max(carZ, laneZ)
+                        if obsZ >= minZ - 3.5 and obsZ <= maxZ + 3.5 and math.abs(obsZ - carZ) >= 4.0 then
+                            local cutUrgency = 1.0 / (ttc + 0.25)
+                            score = score - cutUrgency * 900
+                        end
                     end
                 end
             end
@@ -21156,14 +21179,18 @@ function raid.chooseChaseSteering(carX, carZ, lookZ, originZ, obstacles)
         end
     end
 
-    -- Car faces +X: positive Z is to the RIGHT, negative Z is to the LEFT.
-    -- Predict Z slightly ahead using lookZ (lateral heading component) for damped steering.
-    local predictedZ = carZ + (lookZ or 0) * 14
+    -- Car faces +X: positive Z is RIGHT (+1 / D), negative Z is LEFT (-1 / A).
+    -- Predict Z using actual lateral velocity (carVz) + heading (lookZ) to eliminate fishtailing.
+    local vz = tonumber(carVz)
+    if vz == nil then
+        vz = (lookZ or 0) * myVx
+    end
+    local predictedZ = carZ + vz * 0.42 + (lookZ or 0) * 6.0
     local err = bestLaneZ - predictedZ
     local steer = 0
-    if err > 1.35 then
+    if err > 1.25 then
         steer = 1
-    elseif err < -1.35 then
+    elseif err < -1.25 then
         steer = -1
     end
     return bestLaneZ, steer
@@ -21762,10 +21789,10 @@ function raid.new(deps)
 
             local originZ = (st.chase and st.chase.originZ) or 30000
             local obstacles = d.findChaseObstacles and d.findChaseObstacles(raidId, car.model) or {}
-            local _, steer = raid.chooseChaseSteering(car.x, car.z, car.lookZ or 0, originZ, obstacles)
+            local _, steer = raid.chooseChaseSteering(car.x, car.z, car.lookZ or 0, originZ, obstacles, car.vx, car.vz)
             self.drivingActive = true
             if d.driveChase then
-                d.driveChase(car.model, 1, steer)
+                d.driveChase(car.model, 1, steer, now)
             end
             local pct = 0
             if st.chase and st.chase.start and st.chase.duration and st.chase.duration > 0 then
@@ -22326,12 +22353,16 @@ function bridge.create(ctx)
 
     -- Driving key state (for Highway Star Stage 2 chase)
     local heldDrive = { W = false, A = false, D = false }
-    local function setDriveKey(keyName, down)
-        if heldDrive[keyName] == down then return end
+    local lastThrottleRepulse = -99
+    local function setDriveKey(keyName, down, forcePulse)
+        if not forcePulse and heldDrive[keyName] == down then return end
         heldDrive[keyName] = down
         local vim = env.virtualInputManager
         local kc = env.Enum and env.Enum.KeyCode and env.Enum.KeyCode[keyName]
         if vim ~= nil and kc ~= nil then
+            if forcePulse and down then
+                pcall(function() vim:SendKeyEvent(false, kc, false, game) end)
+            end
             pcall(function() vim:SendKeyEvent(down, kc, false, game) end)
         end
     end
@@ -22748,11 +22779,15 @@ function bridge.create(ctx)
             if car == nil then return nil end
 
             local x, y, z = safePos(car)
-            local lookZ = 0
+            local lookZ, vx, vz = 0, 50, 0
             pcall(function()
                 local pp = car.PrimaryPart or car:FindFirstChildWhichIsA("BasePart", true)
                 if pp ~= nil then
                     lookZ = pp.CFrame.LookVector.Z
+                    local vel = pp.AssemblyLinearVelocity
+                    if vel ~= nil then
+                        vx, vz = vel.X, vel.Z
+                    end
                 end
             end)
 
@@ -22810,6 +22845,8 @@ function bridge.create(ctx)
                 x = x,
                 y = y,
                 z = z,
+                vx = vx,
+                vz = vz,
                 lookZ = lookZ,
                 seatPrompt = seatPrompt,
                 seatedInDriver = curSeat ~= nil and curSeat == driverSeat,
@@ -22824,31 +22861,57 @@ function bridge.create(ctx)
             if vf ~= nil then
                 for _, v in vf:GetChildren() do
                     if v ~= carModel then
-                        local x, y, z = safePos(v)
-                        if x ~= nil and y > 20000 then
-                            table.insert(obs, { x = x, z = z, radius = 6.2 })
-                        end
+                        pcall(function()
+                            local rAttr = v:GetAttribute("HighwayRaid")
+                            local pp = v:IsA("Model") and (v.PrimaryPart or v:FindFirstChildWhichIsA("BasePart", true)) or v
+                            if pp ~= nil and pp:IsA("BasePart") then
+                                local p = pp.Position
+                                if (raidId ~= nil and rAttr == raidId) or p.Y > 20000 then
+                                    local vel = pp.AssemblyLinearVelocity
+                                    local halfW = 5.2
+                                    local tId = tostring(v:GetAttribute("CarTemplateId") or v.Name or "")
+                                    if string.find(string.lower(tId), "van", 1, true) ~= nil or string.find(string.lower(tId), "truck", 1, true) ~= nil then
+                                        halfW = 5.6
+                                    end
+                                    table.insert(obs, {
+                                        x = p.X,
+                                        z = p.Z,
+                                        vx = vel ~= nil and vel.X or -45,
+                                        vz = vel ~= nil and vel.Z or 0,
+                                        radius = halfW,
+                                    })
+                                end
+                            end
+                        end)
                     end
                 end
             end
             local container = findRaidContainer(workspace, "HighwayStar", raidId)
-            if container ~= nil then
+            local function scanHazards(root)
+                if root == nil then return end
                 pcall(function()
-                    for _, d in container:GetDescendants() do
+                    for _, d in root:GetDescendants() do
                         if d:IsA("BasePart") then
                             local nl = string.lower(d.Name)
                             if string.find(nl, "pothole", 1, true) ~= nil or string.find(nl, "hole", 1, true) ~= nil or string.find(nl, "cone", 1, true) ~= nil or string.find(nl, "barrier", 1, true) ~= nil then
                                 local p = d.Position
-                                table.insert(obs, {
-                                    x = p.X,
-                                    z = p.Z,
-                                    radius = math.max(d.Size.X, d.Size.Z) * 0.5 + 1.5,
-                                })
+                                if p.Y > 20000 then
+                                    table.insert(obs, {
+                                        x = p.X,
+                                        z = p.Z,
+                                        vx = 0,
+                                        vz = 0,
+                                        radius = math.max(d.Size.X, d.Size.Z) * 0.5 + 1.0,
+                                    })
+                                end
                             end
                         end
                     end
                 end)
             end
+            scanHazards(container)
+            local map = gf and gf:FindFirstChild("Map")
+            scanHazards(map and map:FindFirstChild("Hazards"))
             return obs
         end,
 
@@ -22872,8 +22935,28 @@ function bridge.create(ctx)
             return bx, by, bz
         end,
 
-        driveChase = function(_, throttle, steer)
-            setDriveKey("W", (throttle or 0) > 0)
+        driveChase = function(carModel, throttle, steer, now)
+            local wantGas = (throttle or 0) > 0
+            local repulseGas = false
+            if wantGas and heldDrive.W and carModel ~= nil and (now == nil or now - lastThrottleRepulse >= 0.45) then
+                local curThr = 1
+                pcall(function()
+                    local dt = carModel:GetAttribute("DriveThrottle")
+                    if type(dt) == "number" then
+                        curThr = dt
+                    else
+                        local vs = carModel:FindFirstChildWhichIsA("VehicleSeat", true)
+                        if vs ~= nil then
+                            curThr = vs.ThrottleFloat
+                        end
+                    end
+                end)
+                if curThr < 0.5 then
+                    repulseGas = true
+                    lastThrottleRepulse = now or os.clock()
+                end
+            end
+            setDriveKey("W", wantGas, repulseGas)
             setDriveKey("A", (steer or 0) < 0)
             setDriveKey("D", (steer or 0) > 0)
         end,
