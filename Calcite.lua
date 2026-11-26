@@ -17179,6 +17179,8 @@ function bridge.create(ctx)
             local st = {
                 activeQuest = readStrVal(stats, "ActiveQuest"),
                 trackerTitle = "",
+                trackerName = "",
+                trackerPos = nil,
                 inactiveRaw = readStrVal(stats, "InactiveQuests"),
                 completedRaw = readStrVal(stats, "CompletedQuests"),
                 cooldownsRaw = readStrVal(stats, "CompletedQuestsTime"),
@@ -17194,6 +17196,17 @@ function bridge.create(ctx)
                 bossAlive = false,
                 gardenHasReadyPot = false,
             }
+
+            pcall(function()
+                local tn = localPlayer and localPlayer:GetAttribute("VisibleQuestTrackerName")
+                if type(tn) == "string" then
+                    st.trackerName = tn
+                end
+                local tp = localPlayer and localPlayer:GetAttribute("VisibleQuestTrackerPosition")
+                if tp ~= nil and tp.X ~= nil and tp.Y ~= nil and tp.Z ~= nil then
+                    st.trackerPos = { X = tp.X, Y = tp.Y, Z = tp.Z }
+                end
+            end)
 
             pcall(function()
                 local pg = localPlayer and localPlayer:FindFirstChildOfClass("PlayerGui")
@@ -17460,15 +17473,46 @@ function bridge.create(ctx)
             return nil, nil, nil, nil
         end,
 
-        findQuestPrompt = function(folderName)
+        findQuestPrompt = function(folderName, nearPos)
             local gf = workspace:FindFirstChild("Game")
             if gf == nil then return nil, nil, nil, nil end
             local sa = gf:FindFirstChild("StoryActors")
             local folder = sa and sa:FindFirstChild(folderName)
-            if folder == nil then return nil, nil, nil, nil end
-            local pInfo = pickPromptInfo(folder, { wantTalk = false })
-            if pInfo ~= nil then
-                return pInfo, pInfo.x, pInfo.y, pInfo.z
+            if folder ~= nil then
+                local pInfo = pickPromptInfo(folder, { wantTalk = false })
+                if pInfo ~= nil then
+                    return pInfo, pInfo.x, pInfo.y, pInfo.z
+                end
+            end
+            -- Фолбэк: ищем активный ProximityPrompt рядом с маркером квеста (Note / Bush / Key вне папки ларька)
+            if nearPos ~= nil and nearPos.X ~= nil then
+                local roots = {
+                    sa,
+                    gf:FindFirstChild("QuestInteractables"),
+                    gf:FindFirstChild("Interactables"),
+                    gf:FindFirstChild("Effects"),
+                }
+                local best, bx, by, bz, bestD = nil, nil, nil, nil, 28
+                for _, root in roots do
+                    if root ~= nil and root.GetDescendants ~= nil then
+                        for _, d in root:GetDescendants() do
+                            local okPp = false
+                            pcall(function() okPp = d:IsA("ProximityPrompt") and d.Enabled == true end)
+                            if okPp then
+                                local x, y, z = stand_out_bounty.promptPosition(d)
+                                if x ~= nil then
+                                    local dd = math.sqrt((x - nearPos.X) ^ 2 + (y - nearPos.Y) ^ 2 + (z - nearPos.Z) ^ 2)
+                                    if dd < bestD then
+                                        best, bx, by, bz, bestD = d, x, y, z, dd
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+                if best ~= nil then
+                    return wrapSinglePrompt(best), bx, by, bz
+                end
             end
             return nil, nil, nil, nil
         end,
@@ -17514,17 +17558,39 @@ function bridge.create(ctx)
 
         findTrailPoints = function(folderName)
             local gf = workspace:FindFirstChild("Game")
-            local sa = gf and gf:FindFirstChild("StoryActors")
-            local folder = sa and sa:FindFirstChild(folderName)
-            if folder == nil then return nil end
+            if gf == nil then return nil end
             local pts = {}
-            for _, d in folder:GetDescendants() do
-                local ok = false
-                pcall(function() ok = d:IsA("BasePart") end)
-                if ok then
-                    local p = d.Position
-                    if p ~= nil then
-                        table.insert(pts, { X = p.X, Y = p.Y, Z = p.Z })
+            local roots = {
+                gf:FindFirstChild("StoryActors") and gf.StoryActors:FindFirstChild(folderName),
+                gf:FindFirstChild("QuestMarkers"),
+                gf:FindFirstChild("Effects"),
+            }
+            for _, root in roots do
+                if root ~= nil and root.GetDescendants ~= nil then
+                    for _, d in root:GetDescendants() do
+                        local ok = false
+                        pcall(function()
+                            if not d:IsA("BasePart") then return end
+                            -- Игнорируем сам разрушенный ларёк LettuceStall (доски/капуста/навес)!
+                            local cur = d.Parent
+                            while cur ~= nil and cur ~= workspace do
+                                if cur.Name == "LettuceStall" then return end
+                                cur = cur.Parent
+                            end
+                            local nl = string.lower(d.Name)
+                            if string.find(nl, "drool", 1, true) ~= nil
+                                or string.find(nl, "trail", 1, true) ~= nil
+                                or string.find(nl, "slime", 1, true) ~= nil
+                                or string.find(nl, "puddle", 1, true) ~= nil then
+                                ok = true
+                            end
+                        end)
+                        if ok then
+                            local p = d.Position
+                            if p ~= nil then
+                                table.insert(pts, { X = p.X, Y = p.Y, Z = p.Z })
+                            end
+                        end
                     end
                 end
             end
@@ -18615,7 +18681,7 @@ function Runner:_stepLettuce(now, state, lx, ly, lz)
         return o ~= nil and (o.cur or 0) >= (o.total or 1)
     end
 
-    -- 1) Clues / Note / Bush / Key: ищем активный ProximityPrompt внутри StoryActors.LettuceTrader
+        -- 1) Clues / Note / Bush / Key: ищем активный ProximityPrompt внутри StoryActors.LettuceTrader или рядом с маркером
     if not done("Lettuce_Clues") or (done("Lettuce_Thugs") and not done("Lettuce_Note"))
         or (done("Lettuce_Note") and not done("Lettuce_Bush"))
         or (done("Lettuce_YoYoMa") and not done("Lettuce_Key")) then
@@ -18625,7 +18691,7 @@ function Runner:_stepLettuce(now, state, lx, ly, lz)
         end
         local prompt, px, py, pz = nil, nil, nil, nil
         if d.findQuestPrompt ~= nil then
-            prompt, px, py, pz = d.findQuestPrompt("LettuceTrader")
+            prompt, px, py, pz = d.findQuestPrompt("LettuceTrader", state.trackerPos)
         end
         if prompt ~= nil and px ~= nil then
             local pInfo = toPromptInfo(prompt, px, py, pz)
@@ -18634,34 +18700,74 @@ function Runner:_stepLettuce(now, state, lx, ly, lz)
             self.statusText = "Lettuce: " .. (st == "holding" and "держим " or "") .. tostring(lbl)
             return
         end
-        local npcPos = stand_out_quests.npc_positions["Lettuce Trader"]
-        if lx == nil or dist3(lx, ly, lz, npcPos.X, npcPos.Y, npcPos.Z) > 35 then
-            if d.teleportTo ~= nil then d.teleportTo(npcPos.X, npcPos.Y + 2, npcPos.Z + 4) end
+        local goPos = state.trackerPos or stand_out_quests.npc_positions["Lettuce Trader"]
+        if goPos ~= nil and (lx == nil or dist3(lx, ly, lz, goPos.X, goPos.Y, goPos.Z) > 12) then
+            if d.teleportTo ~= nil then d.teleportTo(goPos.X, goPos.Y + 2, goPos.Z + 3) end
         end
         self.statusText = "Lettuce: ищем объект квеста..."
         return
     end
 
-    -- 2) Trail (crouch & follow drool trail)
+    -- 2) Trail (crouch & follow drool trail): идём строго по VisibleQuestTrackerPosition с паузой на каждой луже!
     if not done("Lettuce_Trail") then
         if not self.crouching and d.setCrouch ~= nil then
             self.crouching = true
             d.setCrouch(true)
+        end
+        local tp = state.trackerPos
+        if tp ~= nil and tp.X ~= nil then
+            local key = string.format("%d,%d", math.floor(tp.X + 0.5), math.floor(tp.Z + 0.5))
+            if self.trailLastKey ~= key then
+                self.trailLastKey = key
+                self.trailWaitAt = now
+                self.trailNudge = 0
+                self.trailLastTpAt = now
+                if d.teleportTo ~= nil then
+                    d.teleportTo(tp.X, tp.Y + 2.0, tp.Z)
+                end
+                self.statusText = "Lettuce: идём к следу..."
+                return
+            end
+            local curD = lx ~= nil and dist3(lx, ly, lz, tp.X, tp.Y, tp.Z) or 999
+            if curD > 4.5 and now - (self.trailLastTpAt or 0) >= 0.45 then
+                self.trailLastTpAt = now
+                if d.teleportTo ~= nil then
+                    d.teleportTo(tp.X, tp.Y + 2.0, tp.Z)
+                end
+            elseif now - (self.trailWaitAt or now) >= 1.6 then
+                -- Если маркер не сдвинулся за 1.6с -> легкий сдвиг по луже + повтор приседа если слетел
+                self.trailWaitAt = now
+                self.trailNudge = (self.trailNudge or 0) + 1
+                local ox = (self.trailNudge % 2 == 1) and 1.6 or -1.6
+                local oz = (self.trailNudge % 4 >= 2) and 1.6 or -1.6
+                if d.teleportTo ~= nil then
+                    d.teleportTo(tp.X + ox, tp.Y + 1.8, tp.Z + oz)
+                end
+                if self.trailNudge % 2 == 0 and d.setCrouch ~= nil then
+                    d.setCrouch(true)
+                end
+            end
+            self.statusText = string.format("Lettuce: след (%.0f ст)", curD)
+            return
         end
         local pts = d.findTrailPoints ~= nil and d.findTrailPoints("LettuceTrader") or nil
         if pts ~= nil and #pts > 0 then
             if self.trailIdx > #pts then self.trailIdx = 1 end
             local pt = pts[self.trailIdx]
             self.statusText = string.format("Lettuce: след %d/%d", self.trailIdx, #pts)
-            if d.teleportTo ~= nil then
-                d.teleportTo(pt.X, pt.Y + 1.5, pt.Z)
+            if now - (self.trailWaitAt or 0) >= 0.9 then
+                self.trailWaitAt = now
+                if d.teleportTo ~= nil then
+                    d.teleportTo(pt.X, pt.Y + 1.8, pt.Z)
+                end
+                self.trailIdx += 1
             end
-            self.trailIdx += 1
         else
             self.statusText = "Lettuce: идём по следу (присядь)"
         end
         return
     end
+    self.trailLastKey = nil
 
     if self.crouching and d.setCrouch ~= nil then
         self.crouching = false
@@ -18670,14 +18776,14 @@ function Runner:_stepLettuce(now, state, lx, ly, lz)
 
     -- 3) Thugs
     if not done("Lettuce_Thugs") then
-        local mob = d.findMobByName ~= nil and d.findMobByName({ "thug", "bandit", "lettuce" }, -293.4, 19.6, 1492.6, 260) or nil
+        local ref = state.trackerPos or stand_out_quests.npc_positions["Lettuce Trader"]
+        local mob = d.findMobByName ~= nil and d.findMobByName({ "thug", "bandit", "lettuce" }, ref.X, ref.Y, ref.Z, 300) or nil
         if mob ~= nil then
             self.statusText = "Lettuce: бьём " .. tostring(mob.name or "Thug")
             if d.fightMob ~= nil then d.fightMob(mob, now) end
         else
-            local npcPos = stand_out_quests.npc_positions["Lettuce Trader"]
-            if lx == nil or dist3(lx, ly, lz, npcPos.X, npcPos.Y, npcPos.Z) > 30 then
-                if d.teleportTo ~= nil then d.teleportTo(npcPos.X, npcPos.Y + 2, npcPos.Z + 4) end
+            if ref ~= nil and (lx == nil or dist3(lx, ly, lz, ref.X, ref.Y, ref.Z) > 15) then
+                if d.teleportTo ~= nil then d.teleportTo(ref.X, ref.Y + 2, ref.Z + 3) end
             end
             self.statusText = "Lettuce: ждём Thugs"
         end
@@ -18691,6 +18797,10 @@ function Runner:_stepLettuce(now, state, lx, ly, lz)
             self.statusText = "Lettuce: бьём Yo-Yo Ma"
             if d.fightMob ~= nil then d.fightMob(mob, now) end
         else
+            local tp = state.trackerPos
+            if tp ~= nil and (lx == nil or dist3(lx, ly, lz, tp.X, tp.Y, tp.Z) > 15) then
+                if d.teleportTo ~= nil then d.teleportTo(tp.X, tp.Y + 2, tp.Z + 3) end
+            end
             self.statusText = "Lettuce: ищем Yo-Yo Ma..."
         end
         return
