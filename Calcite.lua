@@ -15158,6 +15158,7 @@ function garden.decideMinigameAction(mg, solverState, now)
         solverState.lastSendAt = -99
         solverState.lastCoverAt = -99
         solverState.lastCoverIdx = 0
+        solverState.lastClipAt = -99
         solverState.lastSyncAt = now
     end
 
@@ -15230,16 +15231,24 @@ function garden.decideMinigameAction(mg, solverState, now)
         end
     end
 
-    -- 3) Сбор урожая: один пакет ClipAll!
+    -- 3) Сбор урожая: пошагово срываем каждый несорванный плод Clip(Index = 1..count)
+    -- (работает на всех аккаунтах без зависимости от AutoHarvest / ClipAll!)
     if kind == "Harvest" and phase == "Clip" then
-        if not solverState.clipAllSent or now - solverState.lastSendAt >= 0.65 then
-            solverState.clipAllSent = true
-            solverState.lastSendAt = now
-            return {
-                Action = "ClipAll",
-                Token = mg.token,
-                Version = ver,
-            }, "Сад: собираем урожай!"
+        local clipped = mg.clipped or {}
+        local count = tonumber(mg.count) or 4
+        if now - solverState.lastClipAt >= garden.STEP_SECONDS then
+            for i = 1, count do
+                if clipped[i] ~= true and clipped[tostring(i)] ~= true then
+                    solverState.lastClipAt = now
+                    solverState.lastSendAt = now
+                    return {
+                        Action = "Clip",
+                        Index = i,
+                        Token = mg.token,
+                        Version = ver,
+                    }, string.format("Сад: собираем урожай (%d/%d)", i, count)
+                end
+            end
         end
         return nil, "Сад: собираем урожай..."
     end
@@ -15277,6 +15286,11 @@ function garden.new(deps)
         lastHarvestCountedToken = nil,
         needSellAfterHarvest = false,
         lastStepAt = -99,
+        tpSettleUntil = 0,
+        postMinigameUntil = 0,
+        wasInMinigame = false,
+        dirtDragToken = nil,
+        dirtDragStartedAt = 0,
     }, Runner)
 end
 
@@ -15286,6 +15300,11 @@ function Runner:stop()
     self.busy = false
     self.mgSolver = {}
     self.needSellAfterHarvest = false
+    self.tpSettleUntil = 0
+    self.postMinigameUntil = 0
+    self.wasInMinigame = false
+    self.dirtDragToken = nil
+    self.dirtDragStartedAt = 0
     if self.interact ~= nil then
         self.interact:stop()
     end
@@ -15303,6 +15322,27 @@ function Runner:_interactPrompt(now, pInfo, myX, myY, myZ, label)
     if pInfo == nil or pInfo.x == nil then
         return false
     end
+    local d = self.deps
+    -- После телепорта ждём 0.42с, чтобы сервер Stand Out точно принял новую позицию (и не ругался "Move closer")
+    local dx = (myX or 0) - pInfo.x
+    local dz = (myZ or 0) - pInfo.z
+    local dy = math.abs((myY or 0) - pInfo.y)
+    local hDist = math.sqrt(dx * dx + dz * dz)
+    if myX == nil or hDist > 3.6 or dy > 5.5 then
+        if self.interact ~= nil then self.interact:releaseHold() end
+        if d.teleportTo ~= nil then
+            d.teleportTo(pInfo.x, pInfo.y + 2.2, pInfo.z + 1.8, pInfo.x, pInfo.y, pInfo.z)
+        end
+        self.tpSettleUntil = now + 0.42
+        self.statusText = label .. " (подход)"
+        self.busy = true
+        return true
+    end
+    if now < (self.tpSettleUntil or 0) then
+        self.statusText = label .. "..."
+        self.busy = true
+        return true
+    end
     local st = self.interact:interactPrompt(now, pInfo, myX, myY, myZ)
     self.statusText = label .. (st == "holding" and " (держим)" or "")
     self.busy = true
@@ -15318,11 +15358,17 @@ function Runner:_stepShop(now, st, wantKind, wantId, myX, myY, myZ)
         if nx ~= nil then bx, by, bz = nx, ny, nz end
     end
 
-    if myX == nil or dist3(myX, myY, myZ, bx, by, bz) > 10 then
+    if myX == nil or dist3(myX, myY, myZ, bx, by, bz) > 9 then
         if d.teleportTo ~= nil then
-            d.teleportTo(bx, by + 1.5, bz + 4.0, bx, by, bz)
+            d.teleportTo(bx, by + 1.8, bz + 3.5, bx, by, bz)
         end
+        self.tpSettleUntil = now + 0.45
         self.statusText = "Сад: летим к Big Chop"
+        self.busy = true
+        return true
+    end
+    if now < (self.tpSettleUntil or 0) then
+        self.statusText = "Сад: подходим к Big Chop..."
         self.busy = true
         return true
     end
@@ -15459,6 +15505,7 @@ function Runner:update(now, cfg, myX, myY, myZ)
     if st.minigame ~= nil and st.minigame.token ~= nil then
         self.waitingForGrowth = false
         self.busy = true
+        self.wasInMinigame = true
         if st.minigame.closing and st.minigame.kind == "Harvest" and self.lastHarvestCountedToken ~= st.minigame.token then
             self.lastHarvestCountedToken = st.minigame.token
             self.harvested += 1
@@ -15466,11 +15513,42 @@ function Runner:update(now, cfg, myX, myY, myZ)
                 self.needSellAfterHarvest = true
             end
         end
+        -- Для Dirt: используем нативное перетаскивание мешка (GrowingLocal + DragStart), чтобы родной
+        -- Core.Gardening сам держал Pouring=true и НЕ отправлял PourCancel!
+        if st.minigame.kind == "Dirt" and st.minigame.phase == "Pour" and not st.minigame.closing and d.triggerDirtPour ~= nil then
+            local retryDrag = (self.dirtDragToken == st.minigame.token) and not st.minigame.pourStarted
+                and (now - (self.dirtDragStartedAt or 0) >= 1.4)
+            local isFirst = (self.dirtDragToken ~= st.minigame.token) or retryDrag
+            local okDrag = d.triggerDirtPour(st.minigame.token, isFirst)
+            if okDrag then
+                if isFirst then
+                    self.dirtDragToken = st.minigame.token
+                    self.dirtDragStartedAt = now
+                end
+                self.statusText = "Сад: сыплем землю..."
+                return true
+            end
+            if isFirst then
+                self.statusText = "Сад: открываем мешок..."
+                return true
+            end
+        end
         local pkt, status = garden.decideMinigameAction(st.minigame, self.mgSolver, now)
         self.statusText = status
         if pkt ~= nil and d.sendGrowingInput ~= nil then
             d.sendGrowingInput(pkt)
         end
+        return true
+    end
+
+    -- После завершения мини-игры даём 0.45с на репликацию атрибутов горшка/инвентаря с сервера
+    if self.wasInMinigame then
+        self.wasInMinigame = false
+        self.dirtDragToken = nil
+        self.postMinigameUntil = now + 0.45
+    end
+    if now < (self.postMinigameUntil or 0) then
+        self.busy = true
         return true
     end
 
@@ -15902,6 +15980,14 @@ function bridge.create(ctx)
                 local workPp = model:FindFirstChild("GardenWork", true)
                 local pickupPp = model:FindFirstChild("GardenPickup", true)
                 local px, py, pz = safePos(model)
+                local workInfo = wrapPrompt(workPp)
+                if workInfo ~= nil and px ~= nil then
+                    workInfo.x, workInfo.y, workInfo.z = px, py, pz
+                end
+                local pickupInfo = wrapPrompt(pickupPp)
+                if pickupInfo ~= nil and px ~= nil then
+                    pickupInfo.x, pickupInfo.y, pickupInfo.z = px, py, pz
+                end
                 local crop = string.gsub(contains, " Seed$", "")
                 table.insert(out, {
                     id = potId,
@@ -15915,11 +16001,14 @@ function bridge.create(ctx)
                     x = px,
                     y = py,
                     z = pz,
-                    workPrompt = wrapPrompt(workPp),
-                    pickupPrompt = wrapPrompt(pickupPp),
+                    workPrompt = workInfo,
+                    pickupPrompt = pickupInfo,
                 })
             end
         end
+        table.sort(out, function(a, b)
+            return tostring(a.id or "") < tostring(b.id or "")
+        end)
         return out
     end
 
@@ -15987,6 +16076,62 @@ function bridge.create(ctx)
                 objectivesRaw = qState.objectivesRaw or "",
                 objectivesTotalRaw = qState.objectivesTotalRaw or "",
             }
+        end,
+
+        -- Нативное перетаскивание мешка с землёй в 3D-сцене Core.Gardening (GrowingLocal):
+        -- избегает конфликта с Core.Gardening (который шлёт PourCancel если v341.Pouring == false!).
+        -- Вызывает DragStart 1 раз на токен и держит GrowingBag ровно над центром горшка (Dirt + 2.6Y),
+        -- после чего родной Core.Gardening сам шлёт PourStart -> ждёт 0.73с -> PourEnd!
+        triggerDirtPour = function(token, firstFire)
+            local ok, handled = pcall(function()
+                local cam = workspace.CurrentCamera
+                local scene = cam and cam:FindFirstChild("GrowingLocal")
+                local pot = scene and scene:FindFirstChild("GrowingPot")
+                local bag = pot and pot:FindFirstChild("GrowingBag")
+                local dirt = pot and pot:FindFirstChild("Dirt", true)
+                if bag == nil or dirt == nil then
+                    return false
+                end
+                local goalCF = env.CFrame.new(dirt.Position + env.Vector3.new(0, 2.6, 0))
+                local bagPose = scene:FindFirstChild("BagPose")
+                if bagPose ~= nil then
+                    bagPose.Value = goalCF
+                end
+                if bag.PivotTo ~= nil then
+                    bag:PivotTo(goalCF)
+                end
+                if firstFire then
+                    local drag = bag:FindFirstChildOfClass("DragDetector")
+                    if drag ~= nil and drag.DragStart ~= nil then
+                        local fired = false
+                        if type(env.getconnections) == "function" then
+                            local okC, conns = pcall(env.getconnections, drag.DragStart)
+                            if okC and type(conns) == "table" then
+                                for _, conn in ipairs(conns) do
+                                    if type(conn.Function) == "function" then
+                                        if env.task and env.task.spawn then
+                                            env.task.spawn(conn.Function, localPlayer)
+                                        else
+                                            pcall(conn.Function, localPlayer)
+                                        end
+                                        fired = true
+                                    elseif conn.Fire ~= nil then
+                                        pcall(function() conn:Fire(localPlayer) end)
+                                        fired = true
+                                    end
+                                end
+                            end
+                        end
+                        if not fired and type(env.firesignal) == "function" then
+                            fired = pcall(env.firesignal, drag.DragStart, localPlayer)
+                        end
+                        return fired
+                    end
+                    return false
+                end
+                return true
+            end)
+            return ok and handled == true
         end,
 
         sendGrowingInput = function(pkt)
