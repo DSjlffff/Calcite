@@ -17404,7 +17404,23 @@ function bridge.create(ctx)
             local gf = workspace:FindFirstChild("Game")
             if gf == nil then return nil, nil, nil, nil end
             local npcs = gf:FindFirstChild("NPCs")
-            local npc = npcs and npcs:FindFirstChild(name)
+            local npc = nil
+            -- В конце квеста Lettuce Trader на карте появляется личный "Lettuce Trader Escort", а старый NPC скрыт!
+            if name == "Lettuce Trader" and npcs ~= nil then
+                local uid = localPlayer and localPlayer.UserId
+                for _, ch in npcs:GetChildren() do
+                    if ch.Name == "Lettuce Trader Escort" then
+                        local okO, owner = pcall(function() return ch:GetAttribute("StoryOwnerUserId") end)
+                        if okO and (owner == nil or owner == uid) then
+                            npc = ch
+                            break
+                        end
+                    end
+                end
+            end
+            if npc == nil then
+                npc = npcs and npcs:FindFirstChild(name)
+            end
             if npc == nil then
                 local sa = gf:FindFirstChild("StoryActors")
                 if sa ~= nil then
@@ -17557,9 +17573,30 @@ function bridge.create(ctx)
         end,
 
         findTrailPoints = function(folderName)
-            local gf = workspace:FindFirstChild("Game")
-            if gf == nil then return nil end
             local pts = {}
+            -- По декомпилу ClientSideQuests: LettuceTrader строит папку workspace.CurrentCamera.LettuceTrail
+            -- в точном порядке точек p35[1..N]. Главные лужи имеют Size.X >= 1.9 и Size.Y <= 0.06
+            -- (мелкие брызги Size.X <= 1.0, ящики Size.X <= 1.4).
+            if folderName == "LettuceTrader" then
+                pcall(function()
+                    local cam = workspace.CurrentCamera
+                    local folder = cam and cam:FindFirstChild("LettuceTrail")
+                    if folder == nil then return end
+                    for _, d in ipairs(folder:GetChildren()) do
+                        if d:IsA("BasePart") and d.Size.X >= 1.85 and d.Size.Y <= 0.07 then
+                            local p = d.Position
+                            if p ~= nil then
+                                table.insert(pts, { X = p.X, Y = p.Y, Z = p.Z })
+                            end
+                        end
+                    end
+                end)
+                if #pts > 0 then
+                    return pts
+                end
+            end
+            local gf = workspace:FindFirstChild("Game")
+            if gf == nil then return pts end
             local roots = {
                 gf:FindFirstChild("StoryActors") and gf.StoryActors:FindFirstChild(folderName),
                 gf:FindFirstChild("QuestMarkers"),
@@ -17571,7 +17608,6 @@ function bridge.create(ctx)
                         local ok = false
                         pcall(function()
                             if not d:IsA("BasePart") then return end
-                            -- Игнорируем сам разрушенный ларёк LettuceStall (доски/капуста/навес)!
                             local cur = d.Parent
                             while cur ~= nil and cur ~= workspace do
                                 if cur.Name == "LettuceStall" then return end
@@ -17776,7 +17812,20 @@ function bridge.create(ctx)
             end)
         end,
 
-        setCrouch = function(_)
+        setCrouch = function(wantCrouch)
+            local ch = localPlayer and localPlayer.Character
+            if ch == nil then return end
+            local isCrouched = false
+            pcall(function() isCrouched = ch:GetAttribute("Crouching") == true end)
+            if isCrouched == (wantCrouch == true) then
+                return
+            end
+            local nowT = env.clock()
+            local sq = handle._soQuest
+            if sq.lastCrouchAt ~= nil and nowT - sq.lastCrouchAt < 0.45 then
+                return
+            end
+            sq.lastCrouchAt = nowT
             sendKey("C")
         end,
 
@@ -18708,66 +18757,57 @@ function Runner:_stepLettuce(now, state, lx, ly, lz)
         return
     end
 
-    -- 2) Trail (crouch & follow drool trail): идём строго по VisibleQuestTrackerPosition с паузой на каждой луже!
+    -- 2) Trail (crouch & follow drool trail): идём по цепочке точек workspace.CurrentCamera.LettuceTrail в приседе!
     if not done("Lettuce_Trail") then
-        if not self.crouching and d.setCrouch ~= nil then
-            self.crouching = true
+        self.crouching = true
+        if d.setCrouch ~= nil then
             d.setCrouch(true)
-        end
-        local tp = state.trackerPos
-        if tp ~= nil and tp.X ~= nil then
-            local key = string.format("%d,%d", math.floor(tp.X + 0.5), math.floor(tp.Z + 0.5))
-            if self.trailLastKey ~= key then
-                self.trailLastKey = key
-                self.trailWaitAt = now
-                self.trailNudge = 0
-                self.trailLastTpAt = now
-                if d.teleportTo ~= nil then
-                    d.teleportTo(tp.X, tp.Y + 2.0, tp.Z)
-                end
-                self.statusText = "Lettuce: идём к следу..."
-                return
-            end
-            local curD = lx ~= nil and dist3(lx, ly, lz, tp.X, tp.Y, tp.Z) or 999
-            if curD > 4.5 and now - (self.trailLastTpAt or 0) >= 0.45 then
-                self.trailLastTpAt = now
-                if d.teleportTo ~= nil then
-                    d.teleportTo(tp.X, tp.Y + 2.0, tp.Z)
-                end
-            elseif now - (self.trailWaitAt or now) >= 1.6 then
-                -- Если маркер не сдвинулся за 1.6с -> легкий сдвиг по луже + повтор приседа если слетел
-                self.trailWaitAt = now
-                self.trailNudge = (self.trailNudge or 0) + 1
-                local ox = (self.trailNudge % 2 == 1) and 1.6 or -1.6
-                local oz = (self.trailNudge % 4 >= 2) and 1.6 or -1.6
-                if d.teleportTo ~= nil then
-                    d.teleportTo(tp.X + ox, tp.Y + 1.8, tp.Z + oz)
-                end
-                if self.trailNudge % 2 == 0 and d.setCrouch ~= nil then
-                    d.setCrouch(true)
-                end
-            end
-            self.statusText = string.format("Lettuce: след (%.0f ст)", curD)
-            return
         end
         local pts = d.findTrailPoints ~= nil and d.findTrailPoints("LettuceTrader") or nil
         if pts ~= nil and #pts > 0 then
-            if self.trailIdx > #pts then self.trailIdx = 1 end
+            if self.trailIdx < 1 or self.trailIdx > #pts then
+                self.trailIdx = 1
+            end
             local pt = pts[self.trailIdx]
-            self.statusText = string.format("Lettuce: след %d/%d", self.trailIdx, #pts)
-            if now - (self.trailWaitAt or 0) >= 0.9 then
+            local curD = lx ~= nil and dist3(lx, ly, lz, pt.X, pt.Y, pt.Z) or 999
+            if curD > 4.5 and now - (self.trailLastTpAt or 0) >= 0.25 then
+                self.trailLastTpAt = now
                 self.trailWaitAt = now
                 if d.teleportTo ~= nil then
-                    d.teleportTo(pt.X, pt.Y + 1.8, pt.Z)
+                    d.teleportTo(pt.X, pt.Y + 2.0, pt.Z)
                 end
-                self.trailIdx += 1
+            elseif now - (self.trailWaitAt or 0) >= 0.48 then
+                -- Выждали ~0.48с на точке следа -> переходим к следующей луже по порядку (на последней ждём дольше)
+                local dwell = (self.trailIdx == #pts) and 1.2 or 0.48
+                if now - (self.trailWaitAt or 0) >= dwell then
+                    self.trailIdx = (self.trailIdx % #pts) + 1
+                    local nextPt = pts[self.trailIdx]
+                    self.trailWaitAt = now
+                    self.trailLastTpAt = now
+                    if nextPt ~= nil and d.teleportTo ~= nil then
+                        d.teleportTo(nextPt.X, nextPt.Y + 2.0, nextPt.Z)
+                    end
+                end
             end
-        else
-            self.statusText = "Lettuce: идём по следу (присядь)"
+            self.statusText = string.format("Lettuce: след %d/%d", self.trailIdx, #pts)
+            return
         end
+        local tp = state.trackerPos
+        if tp ~= nil and tp.X ~= nil then
+            local curD = lx ~= nil and dist3(lx, ly, lz, tp.X, tp.Y, tp.Z) or 999
+            if curD > 4.5 and now - (self.trailLastTpAt or 0) >= 0.5 then
+                self.trailLastTpAt = now
+                if d.teleportTo ~= nil then
+                    d.teleportTo(tp.X, tp.Y + 2.0, tp.Z)
+                end
+            end
+            self.statusText = string.format("Lettuce: к началу следа (%.0f ст)", curD)
+            return
+        end
+        self.statusText = "Lettuce: идём по следу (присядь)"
         return
     end
-    self.trailLastKey = nil
+    self.trailIdx = 1
 
     if self.crouching and d.setCrouch ~= nil then
         self.crouching = false
