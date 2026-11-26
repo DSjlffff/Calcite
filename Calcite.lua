@@ -3419,6 +3419,10 @@ local pairs = {
     ["Сюжет"] = "Story", ["Тренеры"] = "Trainers", ["Магазины"] = "Shops", ["Прочее"] = "Other",
     ["Квест"] = "Quest", ["Все доступные"] = "All Available",
     ["Рейд"] = "Raid", ["Сложность"] = "Difficulty",
+    ["Дейлик Big Chop"] = "Big Chop Daily",
+    ["Автопокупка (горшок/земля/семена)"] = "Auto Buy (pot/dirt/seeds)",
+    ["Автоудобрение"] = "Auto Fertilize",
+    ["Автопродажа урожая"] = "Auto Sell Harvest",
     ["Сюжетная линия Part 9"] = "Part 9 Storyline", ["Этапы Part 9"] = "Part 9 Chapters",
     [" ст/с"] = " st/s", [" мс"] = " ms", [" ст"] = " st",
 }
@@ -4177,6 +4181,8 @@ local stand_out_story = require("./stand_out_story")
 local stand_out_quest_bridge = require("./stand_out_quest_bridge")
 local stand_out_raid = require("./stand_out_raid")
 local stand_out_raid_bridge = require("./stand_out_raid_bridge")
+local stand_out_garden = require("./stand_out_garden")
+local stand_out_garden_bridge = require("./stand_out_garden_bridge")
 local glider = require("./glider")
 local yba_npcs = require("./yba_npcs")
 local yba_waypoints = require("./yba_waypoints")
@@ -4368,6 +4374,7 @@ function main.start(env)
         _soHowler = { collector = nil, remote = nil, conn = nil, tried = false },
         _soQuest = { runner = nil, story = nil, wasQuestOn = false, wasStoryOn = false, mod = nil, modTried = false, mobCache = nil, mobCacheAt = -99 },
         _soRaid = { runner = nil, wasOn = false },
+        _soGarden = { runner = nil, wasOn = false },
         _charMove = { savedWs = nil, savedJp = nil, savedUseJp = nil, wasWs = false, wasJp = false, lastChar = nil },
     }
 
@@ -5181,6 +5188,11 @@ function main.start(env)
         if handle._soRaid.runner ~= nil then
             pcall(function()
                 handle._soRaid.runner:stop()
+            end)
+        end
+        if handle._soGarden.runner ~= nil then
+            pcall(function()
+                handle._soGarden.runner:stop()
             end)
         end
         if handle._soHowler.conn ~= nil then
@@ -7255,9 +7267,21 @@ function main.start(env)
                 getMobConfig = function()
                     return current and current.standOutMobs or s.standOutMobs
                 end,
+                getGardenConfig = function()
+                    return current and current.standOutGarden or s.standOutGarden
+                end,
             })
             handle._soQuest.runner = stand_out_quests.new(qDeps)
             handle._soQuest.story = stand_out_story.new(qDeps)
+            local gDeps = stand_out_garden_bridge.create({
+                game = game,
+                workspace = workspace,
+                localPlayer = localPlayer,
+                env = env,
+                connections = connections,
+                questDeps = qDeps,
+            })
+            handle._soGarden.runner = stand_out_garden.new(gDeps)
         end
         do
             local rDeps = stand_out_raid_bridge.create({
@@ -8542,9 +8566,33 @@ function main.start(env)
             end
         end
 
+        -- Stand Out Auto Garden (работает вне рейда; пока растения растут — gardenBusy=false и не мешает остальным фармам!)
+        local gardenBusy = false
+        local soGarden = handle._soGarden
+        if not inRaidNow and not raidOn and s.standOutGarden ~= nil and s.standOutGarden.enabled and localAlive and soGarden.runner ~= nil then
+            soGarden.wasOn = true
+            if not itemBusy then
+                local okG, busyG = pcall(function()
+                    return soGarden.runner:update(now, s.standOutGarden, localX, localY, localZ)
+                end)
+                if okG then
+                    gardenBusy = busyG == true
+                else
+                    warn("Calcite StandOutGarden: " .. tostring(busyG))
+                end
+                ui.setStandOutGarden(soGarden.runner.harvested, soGarden.runner.statusText)
+            end
+        elseif soGarden.wasOn then
+            soGarden.wasOn = false
+            if soGarden.runner ~= nil then
+                soGarden.runner:stop()
+                ui.setStandOutGarden(soGarden.runner.harvested, "")
+            end
+        end
+
         -- Stand Out Auto Storyline (приоритет над Auto Quest / Auto Bounty / Mob Farming)
         local soQuest = handle._soQuest
-        local storyOn = s.standOutStory ~= nil and s.standOutStory.enabled and localAlive and soQuest.story ~= nil and not raidOn
+        local storyOn = s.standOutStory ~= nil and s.standOutStory.enabled and localAlive and soQuest.story ~= nil and not raidOn and not gardenBusy
         if storyOn then
             soQuest.wasStoryOn = true
             if not itemBusy then
@@ -8564,8 +8612,8 @@ function main.start(env)
             end
         end
 
-        -- Stand Out Auto Quest (уступает Auto Raid, Item farm и Auto Storyline)
-        local questOn = s.standOutQuests ~= nil and s.standOutQuests.enabled and localAlive and soQuest.runner ~= nil and not storyOn and not raidOn
+        -- Stand Out Auto Quest (уступает Auto Raid, Item farm, активному Auto Garden и Auto Storyline)
+        local questOn = s.standOutQuests ~= nil and s.standOutQuests.enabled and localAlive and soQuest.runner ~= nil and not storyOn and not raidOn and not gardenBusy
         if questOn then
             soQuest.wasQuestOn = true
             if not itemBusy then
@@ -8588,7 +8636,7 @@ function main.start(env)
         -- Stand Out Auto Bounty (включается вручную ИЛИ по запросу Auto Quest / Auto Storyline!)
         local soBounty = handle._soBounty
         local questWantsBounty = (storyOn and soQuest.story.wantsBounty) or (questOn and soQuest.runner.wantsBounty)
-        local bountyOn = localAlive and soBounty.runner ~= nil and not raidOn
+        local bountyOn = localAlive and soBounty.runner ~= nil and not raidOn and not gardenBusy
             and ((s.standOutBounty ~= nil and s.standOutBounty.enabled and not storyOn and not questOn) or questWantsBounty)
         if bountyOn then
             if not soBounty.wasOn then
@@ -8624,8 +8672,8 @@ function main.start(env)
             end
         end
 
-        -- Stand Out Mob Farming (уступает Auto Raid, Item farm, Auto Storyline, Auto Quest и Auto Bounty)
-        if s.standOutMobs ~= nil and s.standOutMobs.enabled and localAlive and soMob.farmer ~= nil and not raidOn and not bountyOn and not questOn and not storyOn then
+        -- Stand Out Mob Farming (уступает Auto Raid, Item farm, активному Auto Garden, Auto Storyline, Auto Quest и Auto Bounty)
+        if s.standOutMobs ~= nil and s.standOutMobs.enabled and localAlive and soMob.farmer ~= nil and not raidOn and not gardenBusy and not bountyOn and not questOn and not storyOn then
             if not soMob.wasOn then
                 local pNames = {}
                 for _, pl in Players:GetPlayers() do
@@ -9190,6 +9238,14 @@ function menu.create(deps)
     end
     soFarm.raidStatus = soFarm.raidGroup:AddLabel("Пройдено: 0")
 
+    soFarm.gardenGroup = farmTab:AddLeftGroupbox("Auto Garden")
+    toggle(soFarm.gardenGroup, "StandOutGardenEnabled", "Включить", settings.standOutGarden, "enabled")
+    toggle(soFarm.gardenGroup, "StandOutGardenDaily", "Дейлик Big Chop", settings.standOutGarden, "autoDaily")
+    toggle(soFarm.gardenGroup, "StandOutGardenBuy", "Автопокупка (горшок/земля/семена)", settings.standOutGarden, "autoBuy")
+    toggle(soFarm.gardenGroup, "StandOutGardenFertilize", "Автоудобрение", settings.standOutGarden, "autoFertilize")
+    toggle(soFarm.gardenGroup, "StandOutGardenSell", "Автопродажа урожая", settings.standOutGarden, "autoSell")
+    soFarm.gardenStatus = soFarm.gardenGroup:AddLabel("Собрано: 0")
+
     soFarm.storyGroup = soFarm.storyTab:AddLeftGroupbox("Auto Storyline")
     toggle(soFarm.storyGroup, "StandOutStoryEnabled", "Включить", settings.standOutStory, "enabled")
     soFarm.storyStatus = soFarm.storyGroup:AddLabel("Сюжет: 0/58")
@@ -9618,7 +9674,8 @@ function menu.create(deps)
         teleportTab:SetVisible(modes.has(mode, "Teleport"))
         farmTab:SetVisible(modes.has(mode, "AutoFarm") or modes.has(mode, "StandOutPickup")
             or modes.has(mode, "StandOutMobs") or modes.has(mode, "StandOutBounty")
-            or modes.has(mode, "StandOutQuests") or modes.has(mode, "StandOutRaid"))
+            or modes.has(mode, "StandOutQuests") or modes.has(mode, "StandOutRaid")
+            or modes.has(mode, "StandOutGarden"))
         farmGroup:SetVisible(modes.has(mode, "AutoFarm"))
         soFarm.itemGroup:SetVisible(modes.has(mode, "StandOutPickup"))
         soFarm.mobGroup:SetVisible(modes.has(mode, "StandOutMobs"))
@@ -9628,6 +9685,7 @@ function menu.create(deps)
         soFarm.howlerGroup:SetVisible(modes.has(mode, "StandOutPickup"))
         soFarm.questGroup:SetVisible(modes.has(mode, "StandOutQuests"))
         soFarm.raidGroup:SetVisible(modes.has(mode, "StandOutRaid"))
+        soFarm.gardenGroup:SetVisible(modes.has(mode, "StandOutGarden"))
         soFarm.storyTab:SetVisible(modes.has(mode, "StandOutQuests"))
         teamCheck:SetVisible(modes.has(mode, "TeamCheck"))
         throughWalls:SetVisible(modes.has(mode, "Wallbang"))
@@ -9739,6 +9797,17 @@ function menu.create(deps)
         if text ~= soFarm.shownRaid then
             soFarm.shownRaid = text
             soFarm.raidStatus:SetText(text)
+        end
+    end
+
+    function ui.setStandOutGarden(harvested, statusText)
+        local text = string.format("Собрано: %d", harvested or 0)
+        if statusText ~= nil and statusText ~= "" then
+            text = text .. " | " .. statusText
+        end
+        if text ~= soFarm.shownGarden then
+            soFarm.shownGarden = text
+            soFarm.gardenStatus:SetText(text)
         end
     end
 
@@ -9948,8 +10017,8 @@ local features = {
     ItemAsylum = { Players = true, Health = true, Aim = true, IaWeapon = true },
     -- Rivals: team shooter — пока основа (ESP с здоровьем + aim + team check)
     Rivals = { Players = true, Health = true, TeamCheck = true, Aim = true },
-    -- Stand Out: без команд; ESP игроков + автоподбор + фарм мобов + авто-баунти + авто-квесты/сюжетка + авто-рейды + WalkSpeed/JumpPower
-    StandOut = { Players = true, Health = true, StandOutInfo = true, StandOutPickup = true, StandOutMobs = true, StandOutBounty = true, StandOutQuests = true, StandOutRaid = true, CharMove = true },
+    -- Stand Out: без команд; ESP игроков + автоподбор + фарм мобов + авто-баунти + авто-квесты/сюжетка + авто-рейды + авто-сад + WalkSpeed/JumpPower
+    StandOut = { Players = true, Health = true, StandOutInfo = true, StandOutPickup = true, StandOutMobs = true, StandOutBounty = true, StandOutQuests = true, StandOutRaid = true, StandOutGarden = true, CharMove = true },
 }
 
 -- what a mode starts with set otherwise than the settings are written: fields of the table of settings.defaults
@@ -11242,6 +11311,14 @@ function settings.defaults(mode)
             raid = "All",         -- "All" | "Train" | "HighwayStar" | "Rings"
             difficulty = "Regular", -- "Regular" | "Hard"
         },
+        -- Stand Out Auto Garden: полный автомат сада + дейлик Big Chop (stand_out_garden.lua)
+        standOutGarden = {
+            enabled = false,
+            autoDaily = true,
+            autoBuy = true,
+            autoFertilize = false,
+            autoSell = false,
+        },
         -- Player WalkSpeed / JumpPower
         walkSpeed = {
             enabled = false,
@@ -11391,6 +11468,7 @@ function settings.inEffectInto(out, s, mode)
     local standOutQuests = copyInto(reusing and e.standOutQuests or nil, s.standOutQuests)
     local standOutStory = copyInto(reusing and e.standOutStory or nil, s.standOutStory)
     local standOutRaid = copyInto(reusing and e.standOutRaid or nil, s.standOutRaid)
+    local standOutGarden = copyInto(reusing and e.standOutGarden or nil, s.standOutGarden)
     local walkSpeed = copyInto(reusing and e.walkSpeed or nil, s.walkSpeed)
     local jumpPower = copyInto(reusing and e.jumpPower or nil, s.jumpPower)
     local watermark = copyInto(reusing and e.watermark or nil, s.watermark)
@@ -11432,6 +11510,7 @@ function settings.inEffectInto(out, s, mode)
     e.standOutQuests = standOutQuests
     e.standOutStory = standOutStory
     e.standOutRaid = standOutRaid
+    e.standOutGarden = standOutGarden
     e.walkSpeed = walkSpeed
     e.jumpPower = jumpPower
     e.watermark = watermark
@@ -11559,6 +11638,9 @@ function settings.inEffectInto(out, s, mode)
     end
     if not modes.has(mode, "StandOutRaid") then
         e.standOutRaid.enabled = false
+    end
+    if not modes.has(mode, "StandOutGarden") then
+        e.standOutGarden.enabled = false
     end
     if not modes.has(mode, "CharMove") then
         e.walkSpeed.enabled = false
@@ -14852,6 +14934,1121 @@ end
 return stand_out_bounty
 end
 
+__modules["stand_out_garden"] = function(require)
+-- Stand Out Auto Garden: полный автомат садоводства + дейлик Big Chop's daily garden.
+-- Поддерживает:
+--   • Все 4 этапа дейлика BIG_CHOP_DAILY_GARDEN (включая упаковку 1 свободного горшка если уже стоят 2/2!)
+--   • Авто-прохождение всех 3 мини-игр по серверному протоколу Remotes.Gardening ("GrowingInput"):
+--       - Dirt: PourStart -> 0.78с -> PourEnd(Vector2(0,0))
+--       - Seed: SeedDrop(Vector2(0,0)) -> Cover(1..4)
+--       - Harvest: ClipAll (мгновенный сбор всех плодов)
+--   • Авто-покупка Garden Pot (supply:pot), Dirt Bag (supply:dirt) и быстрых семян через Big Chop Shop
+--   • Авто-удобрение (Mysterious Fertilizer) и авто-продажа урожая (ShopSellAll)
+--   • Не блокирует фарм/квесты во время ожидания роста (busy = false, waitingForGrowth = true)
+-- Чистая логика поверх deps, проверяется tests/stand_out_garden_test.lua.
+local stand_out_interact = require("./stand_out_interact")
+local stand_out_quests = require("./stand_out_quests")
+
+local garden = {}
+
+garden.BIG_CHOP_POS = { X = -1759.7, Y = 30.3, Z = 805.6 }
+garden.MAX_POTS = 2
+garden.POUR_SECONDS = 0.78      -- Rules.PourSeconds = 0.65 + запас на пинг
+garden.STEP_SECONDS = 0.16      -- Rules.StepSeconds = 0.12 + запас
+garden.PROMPT_COOLDOWN = 0.75
+garden.SHOP_TIMEOUT = 5.0
+
+-- Самые быстрые не-Roka культуры в порядке возрастания времени роста (секунды из Gardening.Config.Crops)
+garden.FAST_SEEDS = {
+    "Apple Seed",        -- 144s
+    "Carrot Seed",       -- 197s
+    "Onion Seed",        -- 203s
+    "Tomato Seed",       -- 209s
+    "Cherry Seed",       -- 214s
+    "Potato Seed",       -- 222s
+    "Chili Pepper Seed", -- 231s
+    "Grapes Seed",       -- 250s
+    "Banana Seed",       -- 261s
+    "Lemon Seed",        -- 273s
+    "Peach Seed",        -- 282s
+    "Watermelon Seed",   -- 293s
+    "Pineapple Seed",    -- 308s
+    "Dragon Fruit Seed", -- 320s
+}
+
+local FAST_RANK = {}
+for idx, name in ipairs(garden.FAST_SEEDS) do
+    FAST_RANK[name] = idx
+end
+
+local ROKA_SEEDS = {
+    ["Rokaka Seed"] = true,
+    ["Emerald Roka Seed"] = true,
+    ["Sapphire Roka Seed"] = true,
+    ["Amethyst Roka Seed"] = true,
+    ["Opal Roka Seed"] = true,
+}
+
+local function dist3(ax, ay, az, bx, by, bz)
+    local dx = (ax or 0) - (bx or 0)
+    local dy = (ay or 0) - (by or 0)
+    local dz = (az or 0) - (bz or 0)
+    return math.sqrt(dx * dx + dy * dy + dz * dz)
+end
+
+function garden.formatClock(sec)
+    local s = math.max(0, math.ceil(tonumber(sec) or 0))
+    local h = math.floor(s / 3600)
+    local m = math.floor((s % 3600) / 60)
+    local rem = s % 60
+    if h > 0 then
+        return string.format("%d:%02d:%02d", h, m, rem)
+    end
+    return string.format("%d:%02d", m, rem)
+end
+
+function garden.isRokaSeed(name)
+    return ROKA_SEEDS[tostring(name or "")] == true
+end
+
+-- Считает в инвентаре (JSON или уже распарсенная таблица): горшки, землю, удобрение, быстрые семена, любые семена
+function garden.countSupplies(invRaw)
+    local out = {
+        pots = 0,
+        dirt = 0,
+        fertilizer = 0,
+        fastSeeds = 0,
+        anySeeds = 0,
+        produce = 0,
+    }
+    if type(invRaw) == "table" then
+        for _, item in ipairs(invRaw) do
+            if type(item) == "table" then
+                local nm = tostring(item.Name or "")
+                local amt = tonumber(item.Amount) or 1
+                if nm == "Garden Pot" then
+                    out.pots += amt
+                elseif nm == "Dirt Bag" then
+                    out.dirt += amt
+                elseif nm == "Mysterious Fertilizer" then
+                    out.fertilizer += amt
+                elseif FAST_RANK[nm] ~= nil then
+                    out.fastSeeds += amt
+                    out.anySeeds += amt
+                elseif ROKA_SEEDS[nm] then
+                    out.anySeeds += amt
+                elseif item.BaseItem ~= nil and not string.find(nm, "Roka", 1, true) then
+                    out.produce += amt
+                end
+            end
+        end
+        return out
+    end
+    if type(invRaw) ~= "string" or invRaw == "" then
+        return out
+    end
+    -- Лёгкий JSON-скан по объектам {...} без зависимости от HttpService (работает в unit-тестах)
+    for obj in string.gmatch(invRaw, "%b{}") do
+        local nm = string.match(obj, '"Name"%s*:%s*"([^"]+)"')
+        if nm ~= nil then
+            local amt = tonumber(string.match(obj, '"Amount"%s*:%s*(%d+)')) or 1
+            if nm == "Garden Pot" then
+                out.pots += amt
+            elseif nm == "Dirt Bag" then
+                out.dirt += amt
+            elseif nm == "Mysterious Fertilizer" then
+                out.fertilizer += amt
+            elseif FAST_RANK[nm] ~= nil then
+                out.fastSeeds += amt
+                out.anySeeds += amt
+            elseif ROKA_SEEDS[nm] then
+                out.anySeeds += amt
+            elseif string.find(obj, '"BaseItem"', 1, true) ~= nil and not string.find(nm, "Roka", 1, true) then
+                out.produce += amt
+            end
+        end
+    end
+    return out
+end
+
+-- Выбор самого быстрого доступного не-Roka семени среди офферов магазина Big Chop
+function garden.pickCheapestFastSeedOffer(offers, coins)
+    if type(offers) ~= "table" then return nil end
+    local best, bestScore = nil, 1e18
+    for _, o in ipairs(offers) do
+        if type(o) == "table" and o.Kind == "Seed" and not o.Owned and not garden.isRokaSeed(o.Name) then
+            local price = tonumber(o.Coins) or 0
+            if coins == nil or coins >= price then
+                local rank = FAST_RANK[o.Name] or 50
+                local score = rank * 100000 + price
+                if score < bestScore then
+                    best, bestScore = o, score
+                end
+            end
+        end
+    end
+    return best
+end
+
+function garden.findSupplyOffer(offers, supplyId)
+    if type(offers) ~= "table" then return nil end
+    for _, o in ipairs(offers) do
+        if type(o) == "table" and o.Id == supplyId and not o.Owned then
+            return o
+        end
+    end
+    return nil
+end
+
+-- Выбор горшка для упаковки (когда нужно освободить слот из 2/2 под квест Place personal pot):
+-- НИКОГДА не трогаем растущие растения (Growing) и готовый урожай (Ready — его сначала соберём).
+function garden.pickPotToPack(pots)
+    if type(pots) ~= "table" then return nil end
+    for _, stage in ipairs({ "Empty", "DirtReady" }) do
+        for _, p in ipairs(pots) do
+            if p.stage == stage and p.pickupPrompt ~= nil then
+                return p
+            end
+        end
+    end
+    return nil
+end
+
+function garden.findPotByStage(pots, stage)
+    if type(pots) ~= "table" then return nil end
+    for _, p in ipairs(pots) do
+        if p.stage == stage then
+            return p
+        end
+    end
+    return nil
+end
+
+function garden.pickNearestSpot(spots, myX, myY, myZ)
+    if type(spots) ~= "table" then return nil end
+    local best, bestD = nil, 1e18
+    for _, sp in ipairs(spots) do
+        if sp.available == true and sp.x ~= nil then
+            local d = dist3(myX, myY, myZ, sp.x, sp.y, sp.z)
+            if d < bestD then
+                best, bestD = sp, d
+            end
+        end
+    end
+    return best
+end
+
+-- === Решатель мини-игр GrowingInput ===
+-- Возвращает (actionTable | nil, statusText)
+function garden.decideMinigameAction(mg, solverState, now)
+    if type(mg) ~= "table" or mg.token == nil then
+        return nil, ""
+    end
+    if mg.closing then
+        return nil, "Сад: завершение..."
+    end
+
+    if solverState.token ~= mg.token then
+        solverState.token = mg.token
+        solverState.pourStartAt = nil
+        solverState.pourStartSent = false
+        solverState.pourEndSent = false
+        solverState.seedDropSent = false
+        solverState.clipAllSent = false
+        solverState.lastSendAt = -99
+        solverState.lastCoverAt = -99
+        solverState.lastCoverIdx = 0
+        solverState.lastSyncAt = now
+    end
+
+    local kind = mg.kind
+    local phase = mg.phase
+    local ver = tonumber(mg.version) or 0
+
+    -- 1) Засыпка земли: PourStart -> 0.78с -> PourEnd(Vector2(0,0))
+    if kind == "Dirt" and phase == "Pour" then
+        if not mg.pourStarted and not solverState.pourStartSent then
+            solverState.pourStartSent = true
+            solverState.pourStartAt = now
+            solverState.lastSendAt = now
+            return {
+                Action = "PourStart",
+                Token = mg.token,
+                Version = ver,
+            }, "Сад: засыпаем землю..."
+        end
+        if mg.pourStarted and solverState.pourStartAt == nil then
+            solverState.pourStartAt = now
+        end
+        local elapsed = (tonumber(mg.pourElapsed) or 0) + (solverState.pourStartAt and (now - solverState.pourStartAt) or 0)
+        if elapsed >= garden.POUR_SECONDS and (not solverState.pourEndSent or now - solverState.lastSendAt >= 0.45) then
+            solverState.pourEndSent = true
+            solverState.lastSendAt = now
+            return {
+                Action = "PourEnd",
+                Token = mg.token,
+                Version = ver,
+                Offset = { 0, 0 },
+            }, "Сад: завершаем засыпку..."
+        end
+        return nil, "Сад: сыплем землю..."
+    end
+
+    -- 2) Посадка семени: SeedDrop -> Cover(1..4)
+    if kind == "Seed" then
+        if phase == "Pour" then
+            if not solverState.seedDropSent or now - solverState.lastSendAt >= 0.55 then
+                solverState.seedDropSent = true
+                solverState.lastSendAt = now
+                return {
+                    Action = "SeedDrop",
+                    Token = mg.token,
+                    Version = ver,
+                    Offset = { 0, 0 },
+                }, "Сад: сажаем семя..."
+            end
+            return nil, "Сад: сажаем семя..."
+        elseif phase == "Cover" then
+            local covered = mg.covered or {}
+            local count = tonumber(mg.count) or 4
+            if now - solverState.lastCoverAt >= garden.STEP_SECONDS then
+                for i = 1, count do
+                    if covered[i] ~= true and covered[tostring(i)] ~= true then
+                        solverState.lastCoverAt = now
+                        solverState.lastSendAt = now
+                        solverState.lastCoverIdx = i
+                        return {
+                            Action = "Cover",
+                            Index = i,
+                            Token = mg.token,
+                            Version = ver,
+                        }, string.format("Сад: прикапываем (%d/%d)", i, count)
+                    end
+                end
+            end
+            return nil, "Сад: прикапываем..."
+        end
+    end
+
+    -- 3) Сбор урожая: один пакет ClipAll!
+    if kind == "Harvest" and phase == "Clip" then
+        if not solverState.clipAllSent or now - solverState.lastSendAt >= 0.65 then
+            solverState.clipAllSent = true
+            solverState.lastSendAt = now
+            return {
+                Action = "ClipAll",
+                Token = mg.token,
+                Version = ver,
+            }, "Сад: собираем урожай!"
+        end
+        return nil, "Сад: собираем урожай..."
+    end
+
+    -- Фолбэк Sync если застряли
+    if now - solverState.lastSyncAt >= 1.8 then
+        solverState.lastSyncAt = now
+        return {
+            Action = "Sync",
+            Token = mg.token,
+        }, "Сад: синхронизация..."
+    end
+    return nil, "Сад: работаем..."
+end
+
+-- === State Machine Runner ===
+local Runner = {}
+Runner.__index = Runner
+
+function garden.new(deps)
+    deps = deps or {}
+    return setmetatable({
+        deps = deps,
+        interact = stand_out_interact.new(deps),
+        harvested = 0,
+        statusText = "",
+        waitingForGrowth = false,
+        busy = false,
+        mgSolver = {},
+        shopSeq = 0,
+        shopOpenSentAt = -99,
+        shopActionSentAt = -99,
+        shopCloseSentAt = -99,
+        lastPromptAt = -99,
+        lastHarvestCountedToken = nil,
+        needSellAfterHarvest = false,
+        lastStepAt = -99,
+    }, Runner)
+end
+
+function Runner:stop()
+    self.statusText = ""
+    self.waitingForGrowth = false
+    self.busy = false
+    self.mgSolver = {}
+    self.needSellAfterHarvest = false
+    if self.interact ~= nil then
+        self.interact:stop()
+    end
+end
+
+local function toPromptInfo(p)
+    if p == nil then return nil end
+    if type(p) == "table" and p.obj ~= nil then
+        return p
+    end
+    return nil
+end
+
+function Runner:_interactPrompt(now, pInfo, myX, myY, myZ, label)
+    if pInfo == nil or pInfo.x == nil then
+        return false
+    end
+    local st = self.interact:interactPrompt(now, pInfo, myX, myY, myZ)
+    self.statusText = label .. (st == "holding" and " (держим)" or "")
+    self.busy = true
+    return true
+end
+
+function Runner:_stepShop(now, st, wantKind, wantId, myX, myY, myZ)
+    local d = self.deps
+    local bc = garden.BIG_CHOP_POS
+    local bx, by, bz = bc.X, bc.Y, bc.Z
+    if d.findNpc ~= nil then
+        local nx, ny, nz = d.findNpc("Big Chop")
+        if nx ~= nil then bx, by, bz = nx, ny, nz end
+    end
+
+    if myX == nil or dist3(myX, myY, myZ, bx, by, bz) > 10 then
+        if d.teleportTo ~= nil then
+            d.teleportTo(bx, by + 1.5, bz + 4.0, bx, by, bz)
+        end
+        self.statusText = "Сад: летим к Big Chop"
+        self.busy = true
+        return true
+    end
+
+    local shop = st.shop
+    if shop == nil or shop.token == nil then
+        if now - self.shopOpenSentAt >= 2.2 then
+            self.shopSeq += 1
+            self.shopOpenSentAt = now
+            if d.sendShopOpen ~= nil then
+                d.sendShopOpen("calcite_" .. tostring(self.shopSeq))
+            end
+        end
+        self.statusText = "Сад: открываем магазин Big Chop..."
+        self.busy = true
+        return true
+    end
+
+    local snap = shop.snapshot
+    if snap == nil then
+        self.statusText = "Сад: ждём каталог Big Chop..."
+        self.busy = true
+        return true
+    end
+
+    if wantKind == "sell" then
+        local sa = snap.SellAll
+        local cnt = type(sa) == "table" and (tonumber(sa.Count) or 0) or 0
+        if cnt < 1 then
+            self.needSellAfterHarvest = false
+            if d.sendShopClose ~= nil then d.sendShopClose(shop.token) end
+            return false
+        end
+        if now - self.shopActionSentAt >= 1.2 then
+            self.shopSeq += 1
+            self.shopActionSentAt = now
+            if d.sendShopSellAll ~= nil then
+                d.sendShopSellAll({
+                    Action = "ShopSellAll",
+                    Token = shop.token,
+                    RequestId = tostring(shop.token) .. ":" .. tostring(self.shopSeq),
+                    Expect = tonumber(sa.Coins) or 0,
+                    ExpectCount = cnt,
+                })
+            end
+        end
+        self.statusText = string.format("Сад: продаём урожай (%d шт)", cnt)
+        self.busy = true
+        return true
+    end
+
+    -- Покупка (supply:pot / supply:dirt / seed)
+    local offer = nil
+    if wantKind == "seed" then
+        offer = garden.pickCheapestFastSeedOffer(snap.Offers, st.coins)
+    else
+        offer = garden.findSupplyOffer(snap.Offers, wantId)
+    end
+    if offer == nil then
+        if d.sendShopClose ~= nil then d.sendShopClose(shop.token) end
+        self.statusText = wantKind == "seed" and "Сад: нет доступных семян в магазине" or ("Сад: не найден товар " .. tostring(wantId))
+        return false
+    end
+    local price = tonumber(offer.Coins) or 0
+    if st.coins ~= nil and st.coins < price then
+        if d.sendShopClose ~= nil then d.sendShopClose(shop.token) end
+        self.statusText = string.format("Сад: мало монет (%d/%d)", st.coins, price)
+        return false
+    end
+
+    if now - self.shopActionSentAt >= 1.2 then
+        self.shopSeq += 1
+        self.shopActionSentAt = now
+        if d.sendShopBuy ~= nil then
+            d.sendShopBuy({
+                Action = "ShopBuy",
+                Token = shop.token,
+                RequestId = tostring(shop.token) .. ":" .. tostring(self.shopSeq),
+                Id = offer.Id,
+                Rotation = snap.Rotation,
+                Amount = 1,
+            })
+        end
+    end
+    self.statusText = "Сад: покупаем " .. tostring(offer.Name or wantId)
+    self.busy = true
+    return true
+end
+
+function Runner:_talkBigChop(now, myX, myY, myZ)
+    local d = self.deps
+    local snap = d.readDialogueSnap ~= nil and d.readDialogueSnap() or { isOpen = false, options = {}, glyphCount = 0 }
+    local isOpen = self.interact:stepDialogue(now, snap, function(opts)
+        return stand_out_quests.pickDialogueOption(opts, "bigchop_accept")
+    end)
+    if isOpen then
+        self.statusText = "Сад: берём дейлик у Big Chop"
+        self.busy = true
+        return true
+    end
+    local bc = garden.BIG_CHOP_POS
+    local nx, ny, nz, prompt = bc.X, bc.Y, bc.Z, nil
+    if d.findNpc ~= nil then
+        local fx, fy, fz, fp = d.findNpc("Big Chop")
+        if fx ~= nil then nx, ny, nz, prompt = fx, fy, fz, fp end
+    end
+    if prompt ~= nil then
+        self:_interactPrompt(now, toPromptInfo(prompt), myX, myY, myZ, "Сад: говорим с Big Chop")
+        return true
+    end
+    if myX == nil or dist3(myX, myY, myZ, nx, ny, nz) > 10 then
+        if d.teleportTo ~= nil then
+            d.teleportTo(nx, ny + 1.5, nz + 4.0, nx, ny, nz)
+        end
+    end
+    self.statusText = "Сад: идём к Big Chop"
+    self.busy = true
+    return true
+end
+
+-- Основной тик. Возвращает true если Auto Garden активно занят действием (не ждёт роста).
+function Runner:update(now, cfg, myX, myY, myZ)
+    local d = self.deps
+    cfg = cfg or {}
+    local autoBuy = cfg.autoBuy ~= false
+    local autoDaily = cfg.autoDaily ~= false
+    local autoFertilize = cfg.autoFertilize == true
+    local autoSell = cfg.autoSell == true
+    local dailyOnly = cfg.dailyOnly == true
+
+    local st = d.readState ~= nil and d.readState() or {}
+
+    -- 1. Активная мини-игра (Dirt / Seed / Harvest) — решаем КАЖДЫЙ тик без задержек!
+    if st.minigame ~= nil and st.minigame.token ~= nil then
+        self.waitingForGrowth = false
+        self.busy = true
+        if st.minigame.closing and st.minigame.kind == "Harvest" and self.lastHarvestCountedToken ~= st.minigame.token then
+            self.lastHarvestCountedToken = st.minigame.token
+            self.harvested += 1
+            if autoSell then
+                self.needSellAfterHarvest = true
+            end
+        end
+        local pkt, status = garden.decideMinigameAction(st.minigame, self.mgSolver, now)
+        self.statusText = status
+        if pkt ~= nil and d.sendGrowingInput ~= nil then
+            d.sendGrowingInput(pkt)
+        end
+        return true
+    end
+
+    -- 2. Если держим промпт (например, 2с Pack up pot) — продолжаем без троттлинга
+    local holding = self.interact ~= nil and self.interact.holdingPrompt ~= nil
+    if not holding and now - self.lastStepAt < 0.18 then
+        return self.busy
+    end
+    self.lastStepAt = now
+    self.waitingForGrowth = false
+    self.busy = false
+
+    local pots = st.pots or {}
+    local spots = st.spots or {}
+    local inv = garden.countSupplies(st.inventoryRaw)
+    local activeSet = stand_out_quests.parseCompletedSet(st.activeQuest or "")
+    local hasDaily = activeSet["BIG_CHOP_DAILY_GARDEN"] == true
+    local dailyDoneToday = stand_out_quests.isDailyDoneToday(st.dailyJson, "BIG_CHOP_DAILY_GARDEN", st.todayDay)
+    local objs = stand_out_quests.parseObjectives(st.objectivesRaw, st.objectivesTotalRaw)
+    local function objDone(id)
+        local o = objs[id]
+        return o ~= nil and (o.cur or 0) >= (o.total or 1)
+    end
+
+    -- 3. Если включён autoDaily и дейлик ещё не взят и доступен сегодня -> берём у Big Chop
+    if autoDaily and not hasDaily and not dailyDoneToday then
+        if st.shop ~= nil and st.shop.token ~= nil and d.sendShopClose ~= nil then
+            d.sendShopClose(st.shop.token)
+        end
+        return self:_talkBigChop(now, myX, myY, myZ)
+    end
+
+    -- 4. Сначала всегда собираем любой созревший (Ready) горшок — это и прогресс Harvest, и освобождает место!
+    local readyPot = garden.findPotByStage(pots, "Ready")
+    if readyPot ~= nil and readyPot.workPrompt ~= nil then
+        if st.shop ~= nil and st.shop.token ~= nil and d.sendShopClose ~= nil then
+            d.sendShopClose(st.shop.token)
+        end
+        return self:_interactPrompt(now, readyPot.workPrompt, myX, myY, myZ, "Сад: собираем " .. tostring(readyPot.crop or "урожай"))
+    end
+
+    -- 5. Если включена автопродажа и только что собрали урожай -> продаём Big Chop
+    if autoSell and self.needSellAfterHarvest and inv.produce > 0 then
+        if self:_stepShop(now, st, "sell", nil, myX, myY, myZ) then
+            return true
+        end
+    end
+
+    -- 6. СПЕЦИАЛЬНЫЙ ПОТОК ДЛЯ ДЕЙЛИКА BIG_CHOP_DAILY_GARDEN:
+    -- Place (0/1) -> Dirt (0/1) -> Seed (0/1) -> Harvest (0/1)
+    if hasDaily then
+        -- 6а) Place a personal pot 0/1
+        if not objDone("GardenDaily_Place") then
+            if #pots >= garden.MAX_POTS then
+                local packPot = garden.pickPotToPack(pots)
+                if packPot ~= nil then
+                    return self:_interactPrompt(now, packPot.pickupPrompt, myX, myY, myZ, "Сад: пакуем горшок под дейлик")
+                end
+                -- Оба горшка сейчас растут — ждём созревания, не ломаем чужой/Roka рост!
+                return self:_waitForGrowth(pots, autoFertilize, inv, now, myX, myY, myZ, "дейлик ждёт слот")
+            end
+            if inv.pots < 1 then
+                if autoBuy then
+                    return self:_stepShop(now, st, "supply", "supply:pot", myX, myY, myZ)
+                end
+                self.statusText = "Сад: нет Garden Pot в инвентаре"
+                return false
+            end
+            if st.shop ~= nil and st.shop.token ~= nil and d.sendShopClose ~= nil then
+                d.sendShopClose(st.shop.token)
+            end
+            local spot = garden.pickNearestSpot(spots, myX, myY, myZ)
+            if spot ~= nil and spot.prompt ~= nil then
+                return self:_interactPrompt(now, spot.prompt, myX, myY, myZ, "Сад: ставим горшок")
+            end
+            self.statusText = "Сад: нет свободных грядок"
+            return false
+        end
+
+        -- 6б) Fill your pot with dirt 0/1
+        if not objDone("GardenDaily_Dirt") then
+            local emptyPot = garden.findPotByStage(pots, "Empty")
+            if emptyPot == nil then
+                -- Нужен пустой горшок! Если стоит < 2 -> ставим новый; если 2 -> пакуем свободный DirtReady
+                if #pots >= garden.MAX_POTS then
+                    local packPot = garden.pickPotToPack(pots)
+                    if packPot ~= nil then
+                        return self:_interactPrompt(now, packPot.pickupPrompt, myX, myY, myZ, "Сад: пакуем горшок для земли")
+                    end
+                    return self:_waitForGrowth(pots, autoFertilize, inv, now, myX, myY, myZ, "дейлик ждёт горшок")
+                end
+                if inv.pots < 1 then
+                    if autoBuy then
+                        return self:_stepShop(now, st, "supply", "supply:pot", myX, myY, myZ)
+                    end
+                    self.statusText = "Сад: нужен Garden Pot"
+                    return false
+                end
+                local spot = garden.pickNearestSpot(spots, myX, myY, myZ)
+                if spot ~= nil and spot.prompt ~= nil then
+                    return self:_interactPrompt(now, spot.prompt, myX, myY, myZ, "Сад: ставим горшок для земли")
+                end
+                return false
+            end
+            if inv.dirt < 1 then
+                if autoBuy then
+                    return self:_stepShop(now, st, "supply", "supply:dirt", myX, myY, myZ)
+                end
+                self.statusText = "Сад: нет Dirt Bag в инвентаре"
+                return false
+            end
+            if st.shop ~= nil and st.shop.token ~= nil and d.sendShopClose ~= nil then
+                d.sendShopClose(st.shop.token)
+            end
+            return self:_interactPrompt(now, emptyPot.workPrompt, myX, myY, myZ, "Сад: сыплем землю")
+        end
+
+        -- 6в) Plant a seed in your pot 0/1
+        if not objDone("GardenDaily_Seed") then
+            local dirtPot = garden.findPotByStage(pots, "DirtReady")
+            if dirtPot ~= nil and dirtPot.workPrompt ~= nil then
+                if inv.fastSeeds < 1 then
+                    if autoBuy then
+                        return self:_stepShop(now, st, "seed", nil, myX, myY, myZ)
+                    end
+                    if inv.anySeeds < 1 then
+                        self.statusText = "Сад: нет семян в инвентаре"
+                        return false
+                    end
+                end
+                if st.shop ~= nil and st.shop.token ~= nil and d.sendShopClose ~= nil then
+                    d.sendShopClose(st.shop.token)
+                end
+                return self:_interactPrompt(now, dirtPot.workPrompt, myX, myY, myZ, "Сад: сажаем семя")
+            end
+        end
+
+        -- 6г) Grow and harvest your plant 0/1 (если dailyOnly и уже растёт -> ждём)
+        if dailyOnly then
+            return self:_waitForGrowth(pots, autoFertilize, inv, now, myX, myY, myZ, nil)
+        end
+    end
+
+    -- Если вызвано в режиме dailyOnly и дейлик уже закрыт сегодня
+    if dailyOnly then
+        self.statusText = "Garden: дейлик выполнен"
+        return false
+    end
+
+    -- 7. ПОСТОЯННЫЙ AUTO GARDEN (держим оба горшка засаженными 24/7):
+    -- 7а) Пустые горшки -> сыплем землю
+    local emptyPot = garden.findPotByStage(pots, "Empty")
+    if emptyPot ~= nil and emptyPot.workPrompt ~= nil then
+        if inv.dirt < 1 then
+            if autoBuy then
+                return self:_stepShop(now, st, "supply", "supply:dirt", myX, myY, myZ)
+            end
+            self.statusText = "Сад: нет Dirt Bag"
+            return false
+        end
+        if st.shop ~= nil and st.shop.token ~= nil and d.sendShopClose ~= nil then
+            d.sendShopClose(st.shop.token)
+        end
+        return self:_interactPrompt(now, emptyPot.workPrompt, myX, myY, myZ, "Сад: сыплем землю")
+    end
+
+    -- 7б) Горшки с землёй -> сажаем семя
+    local dirtPot = garden.findPotByStage(pots, "DirtReady")
+    if dirtPot ~= nil and dirtPot.workPrompt ~= nil then
+        if inv.fastSeeds < 1 then
+            if autoBuy then
+                return self:_stepShop(now, st, "seed", nil, myX, myY, myZ)
+            end
+            if inv.anySeeds < 1 then
+                self.statusText = "Сад: нет семян"
+                return false
+            end
+        end
+        if st.shop ~= nil and st.shop.token ~= nil and d.sendShopClose ~= nil then
+            d.sendShopClose(st.shop.token)
+        end
+        return self:_interactPrompt(now, dirtPot.workPrompt, myX, myY, myZ, "Сад: сажаем семя")
+    end
+
+    -- 7в) Стоит меньше 2 горшков -> ставим ещё горшок
+    if #pots < garden.MAX_POTS then
+        if inv.pots < 1 then
+            if autoBuy then
+                return self:_stepShop(now, st, "supply", "supply:pot", myX, myY, myZ)
+            end
+        else
+            if st.shop ~= nil and st.shop.token ~= nil and d.sendShopClose ~= nil then
+                d.sendShopClose(st.shop.token)
+            end
+            local spot = garden.pickNearestSpot(spots, myX, myY, myZ)
+            if spot ~= nil and spot.prompt ~= nil then
+                return self:_interactPrompt(now, spot.prompt, myX, myY, myZ, "Сад: ставим горшок")
+            end
+        end
+    end
+
+    -- Закрываем магазин если остался открытым
+    if st.shop ~= nil and st.shop.token ~= nil and d.sendShopClose ~= nil then
+        d.sendShopClose(st.shop.token)
+    end
+
+    -- 8. Все горшки растут -> удобрение (если включено) + ожидание без блокировки фарма!
+    return self:_waitForGrowth(pots, autoFertilize, inv, now, myX, myY, myZ, nil)
+end
+
+function Runner:_waitForGrowth(pots, autoFertilize, inv, now, myX, myY, myZ, note)
+    -- Если включено удобрение и есть Mysterious Fertilizer — удобряем растущий горшок без удобрения
+    if autoFertilize and inv.fertilizer > 0 then
+        for _, p in ipairs(pots) do
+            if p.stage == "Growing" and (tonumber(p.growthRate) or 1) <= 1.01 and p.workPrompt ~= nil then
+                return self:_interactPrompt(now, p.workPrompt, myX, myY, myZ, "Сад: удобряем " .. tostring(p.crop or "растение"))
+            end
+        end
+    end
+
+    -- Находим ближайшее к созреванию растение для красивого статуса
+    local soonest = nil
+    for _, p in ipairs(pots) do
+        if p.stage == "Growing" then
+            if soonest == nil or (tonumber(p.remaining) or 1e9) < (tonumber(soonest.remaining) or 1e9) then
+                soonest = p
+            end
+        end
+    end
+
+    self.waitingForGrowth = true
+    self.busy = false
+    if soonest ~= nil then
+        local pct = math.floor(tonumber(soonest.growth) or 0)
+        local left = garden.formatClock(soonest.remaining)
+        local base = string.format("%s %d%% (%s)", tostring(soonest.crop or "Растёт"), pct, left)
+        self.statusText = note and (base .. " | " .. note) or base
+    else
+        self.statusText = note or "Сад: ожидание..."
+    end
+    return false
+end
+
+return garden
+end
+
+__modules["stand_out_garden_bridge"] = function(require)
+-- Stand Out Auto Garden Bridge: связка stand_out_garden.lua с Roblox API и Remotes.Gardening.
+local stand_out_bounty = require("./stand_out_bounty")
+
+local bridge = {}
+
+local function safePos(obj)
+    if obj == nil then return nil, nil, nil end
+    local ok, p = pcall(function()
+        if obj:IsA("BasePart") then return obj.Position end
+        if obj:IsA("Model") then
+            local pp = obj.PrimaryPart or obj:FindFirstChild("HumanoidRootPart") or obj:FindFirstChild("Dirt", true) or obj:FindFirstChildWhichIsA("BasePart", true)
+            if pp ~= nil then return pp.Position end
+            return obj:GetPivot().Position
+        end
+        return nil
+    end)
+    if ok and p ~= nil then
+        return p.X, p.Y, p.Z
+    end
+    return nil, nil, nil
+end
+
+local function wrapPrompt(pp)
+    if pp == nil then return nil end
+    local x, y, z = stand_out_bounty.promptPosition(pp)
+    local hold, maxDist, act, objTxt, en = 0, 10, "", "", true
+    pcall(function()
+        hold = tonumber(pp.HoldDuration) or 0
+        maxDist = tonumber(pp.MaxActivationDistance) or 10
+        act = tostring(pp.ActionText or "")
+        objTxt = tostring(pp.ObjectText or "")
+        en = pp.Enabled == true
+    end)
+    return {
+        obj = pp,
+        name = pp.Name,
+        action = act,
+        objectText = objTxt,
+        hold = hold,
+        maxDist = maxDist,
+        enabled = en,
+        x = x,
+        y = y,
+        z = z,
+    }
+end
+
+function bridge.create(ctx)
+    local game = ctx.game
+    local workspace = ctx.workspace
+    local localPlayer = ctx.localPlayer
+    local env = ctx.env
+    local connections = ctx.connections
+    local qDeps = ctx.questDeps
+
+    local live = {
+        minigame = nil,
+        shop = nil,
+        remote = nil,
+        conn = nil,
+    }
+
+    local function ensureRemote()
+        if live.remote ~= nil then
+            return live.remote
+        end
+        pcall(function()
+            local rs = game:GetService("ReplicatedStorage")
+            local rems = rs and rs:FindFirstChild("Remotes")
+            local r = rems and rems:FindFirstChild("Gardening")
+            if r ~= nil then
+                live.remote = r
+                live.conn = r.OnClientEvent:Connect(function(kind, payload)
+                    if type(payload) ~= "table" then
+                        return
+                    end
+                    if kind == "GrowingStart" then
+                        live.minigame = {
+                            token = payload.Token,
+                            kind = payload.Kind,
+                            phase = payload.Phase,
+                            version = tonumber(payload.Version) or 0,
+                            count = tonumber(payload.Count) or 4,
+                            pourStarted = payload.PourStarted == true,
+                            pourElapsed = tonumber(payload.PourElapsed) or 0,
+                            covered = payload.Covered or {},
+                            clipped = payload.Clipped or {},
+                            closing = false,
+                            offer = false,
+                        }
+                    elseif kind == "GrowingUpdate" then
+                        if live.minigame ~= nil and payload.Token == live.minigame.token then
+                            local mg = live.minigame
+                            if tonumber(payload.Version) == nil or tonumber(payload.Version) >= mg.version then
+                                mg.phase = payload.Phase or mg.phase
+                                mg.version = tonumber(payload.Version) or mg.version
+                                mg.count = tonumber(payload.Count) or mg.count
+                                mg.pourStarted = payload.PourStarted == true
+                                mg.pourElapsed = tonumber(payload.PourElapsed) or mg.pourElapsed
+                                if type(payload.Covered) == "table" then mg.covered = payload.Covered end
+                                if type(payload.Clipped) == "table" then mg.clipped = payload.Clipped end
+                            end
+                        end
+                    elseif kind == "GrowingComplete" then
+                        if live.minigame ~= nil and payload.Token == live.minigame.token then
+                            live.minigame.closing = true
+                            live.minigame.offer = type(payload.Again) == "table"
+                        end
+                    elseif kind == "GrowingClosed" then
+                        if live.minigame ~= nil and (payload.Token == nil or payload.Token == live.minigame.token) then
+                            live.minigame = nil
+                        end
+                    elseif kind == "ShopOpened" then
+                        live.shop = {
+                            token = payload.Token,
+                            requestId = payload.RequestId,
+                            snapshot = payload.Snapshot,
+                        }
+                    elseif kind == "ShopSnapshot" then
+                        if live.shop ~= nil and (payload.Token == nil or payload.Token == live.shop.token) then
+                            live.shop.snapshot = payload
+                        end
+                    elseif kind == "ShopSaleSnapshot" then
+                        if live.shop ~= nil and live.shop.snapshot ~= nil and (payload.Token == nil or payload.Token == live.shop.token) then
+                            local merged = {}
+                            for _, o in ipairs(live.shop.snapshot.Offers or {}) do
+                                if o.Kind ~= "Sell" then table.insert(merged, o) end
+                            end
+                            for _, o in ipairs(payload.Offers or {}) do
+                                table.insert(merged, o)
+                            end
+                            live.shop.snapshot.Offers = merged
+                        end
+                    elseif kind == "ShopClosed" then
+                        if live.shop ~= nil and (payload.Token == nil or payload.Token == live.shop.token) then
+                            live.shop = nil
+                        end
+                    end
+                end)
+                if connections ~= nil and live.conn ~= nil then
+                    table.insert(connections, live.conn)
+                end
+            end
+        end)
+        return live.remote
+    end
+
+    -- Подписываемся сразу (если Gardening remote уже есть)
+    ensureRemote()
+
+    local function serverNow()
+        local ok, t = pcall(function() return workspace:GetServerTimeNow() end)
+        if ok and type(t) == "number" then return t end
+        return os.time()
+    end
+
+    local function readPots()
+        local out = {}
+        local uid = localPlayer and localPlayer.UserId
+        local gf = workspace:FindFirstChild("Game")
+        local g = gf and gf:FindFirstChild("Gardening")
+        local potsFolder = g and g:FindFirstChild("Pots")
+        if potsFolder == nil then return out end
+        local sNow = serverNow()
+        for _, model in ipairs(potsFolder:GetChildren()) do
+            local owner = nil
+            pcall(function() owner = model:GetAttribute("OwnerUserId") end)
+            if owner == uid then
+                local stage, contains, growth, rem, endsAt, rate, potId = "Empty", "", 0, 0, nil, 1, nil
+                pcall(function()
+                    stage = tostring(model:GetAttribute("Stage") or "Empty")
+                    contains = tostring(model:GetAttribute("Contains") or "")
+                    growth = tonumber(model:GetAttribute("Growth")) or 0
+                    rem = tonumber(model:GetAttribute("GrowthRemaining")) or 0
+                    endsAt = model:GetAttribute("GrowthEndsAt")
+                    rate = tonumber(model:GetAttribute("GrowthRate")) or 1
+                    potId = model:GetAttribute("PotId")
+                end)
+                if type(endsAt) == "number" then
+                    rem = math.max(0, endsAt - sNow)
+                end
+                local workPp = model:FindFirstChild("GardenWork", true)
+                local pickupPp = model:FindFirstChild("GardenPickup", true)
+                local px, py, pz = safePos(model)
+                local crop = string.gsub(contains, " Seed$", "")
+                table.insert(out, {
+                    id = potId,
+                    model = model,
+                    stage = stage,
+                    contains = contains,
+                    crop = crop ~= "" and crop or nil,
+                    growth = growth,
+                    remaining = rem,
+                    growthRate = rate,
+                    x = px,
+                    y = py,
+                    z = pz,
+                    workPrompt = wrapPrompt(workPp),
+                    pickupPrompt = wrapPrompt(pickupPp),
+                })
+            end
+        end
+        return out
+    end
+
+    local function readSpots()
+        local out = {}
+        local gf = workspace:FindFirstChild("Game")
+        local g = gf and gf:FindFirstChild("Gardening")
+        if g == nil then return out end
+        for _, ch in ipairs(g:GetChildren()) do
+            if ch.Name == "GardenSpot" then
+                local pp = ch:FindFirstChild("GardenPlace", true)
+                if pp ~= nil then
+                    local avail = false
+                    pcall(function() avail = pp:GetAttribute("StoryPromptAvailable") == true end)
+                    if avail then
+                        local pInfo = wrapPrompt(pp)
+                        if pInfo ~= nil and pInfo.x ~= nil then
+                            table.insert(out, {
+                                available = true,
+                                x = pInfo.x,
+                                y = pInfo.y,
+                                z = pInfo.z,
+                                prompt = pInfo,
+                            })
+                        end
+                    end
+                end
+            end
+        end
+        return out
+    end
+
+    return {
+        readState = function()
+            ensureRemote()
+            -- Если мини-игра уже закрылась по GUI/атрибуту (а пакет GrowingClosed был пропущен), чистим live.minigame
+            if live.minigame ~= nil then
+                local locked = false
+                pcall(function()
+                    locked = localPlayer:GetAttribute("GrowingInputOwner") ~= nil
+                        or localPlayer:GetAttribute("GardeningInputLocked") == true
+                end)
+                if not locked and live.minigame.closing then
+                    live.minigame = nil
+                end
+            end
+
+            local qState = qDeps and qDeps.readState and qDeps.readState() or {}
+            local coins = nil
+            pcall(function()
+                local c = localPlayer.Data.Stats:FindFirstChild("Coins")
+                if c ~= nil then coins = tonumber(c.Value) end
+            end)
+
+            return {
+                minigame = live.minigame,
+                shop = live.shop,
+                pots = readPots(),
+                spots = readSpots(),
+                coins = coins,
+                inventoryRaw = qState.inventoryJson or "",
+                activeQuest = qState.activeQuest or "",
+                dailyJson = qState.dailyJson or "",
+                todayDay = qState.todayDay or 0,
+                objectivesRaw = qState.objectivesRaw or "",
+                objectivesTotalRaw = qState.objectivesTotalRaw or "",
+            }
+        end,
+
+        sendGrowingInput = function(pkt)
+            local r = ensureRemote()
+            if r == nil or type(pkt) ~= "table" then return end
+            local outPkt = {}
+            for k, v in pairs(pkt) do
+                if k == "Offset" and type(v) == "table" and env.Vector2 ~= nil then
+                    outPkt[k] = env.Vector2.new(v[1] or 0, v[2] or 0)
+                else
+                    outPkt[k] = v
+                end
+            end
+            pcall(function() r:FireServer("GrowingInput", outPkt) end)
+        end,
+
+        sendShopOpen = function(requestId)
+            local r = ensureRemote()
+            if r == nil then return end
+            pcall(function()
+                r:FireServer("ShopOpen", { RequestId = requestId })
+            end)
+        end,
+
+        sendShopBuy = function(req)
+            local r = ensureRemote()
+            if r == nil then return end
+            pcall(function() r:FireServer("ShopBuy", req) end)
+        end,
+
+        sendShopSellAll = function(req)
+            local r = ensureRemote()
+            if r == nil then return end
+            pcall(function() r:FireServer("ShopSellAll", req) end)
+        end,
+
+        sendShopClose = function(token)
+            local r = ensureRemote()
+            if r == nil then return end
+            pcall(function()
+                r:FireServer("ShopClose", { Token = token })
+            end)
+            live.shop = nil
+        end,
+
+        -- Переиспользуем проверенные хелперы телепорта/промптов/диалогов из quest bridge
+        teleportTo = qDeps and qDeps.teleportTo,
+        firePrompt = qDeps and qDeps.firePrompt,
+        fireClick = qDeps and qDeps.fireClick,
+        holdPromptBegin = qDeps and qDeps.holdPromptBegin,
+        holdPromptEnd = qDeps and qDeps.holdPromptEnd,
+        pulsePrompt = qDeps and qDeps.pulsePrompt,
+        findNpc = qDeps and qDeps.findNpc,
+        readDialogueSnap = qDeps and qDeps.readDialogueSnap,
+        clickDialogue = qDeps and qDeps.clickDialogue,
+        closeDialogue = qDeps and qDeps.closeDialogue,
+    }
+end
+
+return bridge
+end
+
 __modules["stand_out_howler"] = function(require)
 -- Stand Out Howler's Cases: автосбор всех 10 кейсов Howler (case_01..case_10) на карте.
 -- Факты игры из Modules.HowlerCases / standout_probe_howler2.lua:
@@ -17240,6 +18437,22 @@ function bridge.create(ctx)
                     break
                 end
             end
+            if not st.gardenHasReadyPot then
+                pcall(function()
+                    local uid = localPlayer and localPlayer.UserId
+                    local gf = workspace:FindFirstChild("Game")
+                    local g = gf and gf:FindFirstChild("Gardening")
+                    local pf = g and g:FindFirstChild("Pots")
+                    if pf ~= nil then
+                        for _, m in ipairs(pf:GetChildren()) do
+                            if m:GetAttribute("OwnerUserId") == uid and m:GetAttribute("Stage") == "Ready" then
+                                st.gardenHasReadyPot = true
+                                break
+                            end
+                        end
+                    end
+                end)
+            end
 
             pcall(function()
                 local gf = workspace:FindFirstChild("Game")
@@ -17631,6 +18844,27 @@ function bridge.create(ctx)
                 end
             end
             return pts
+        end,
+
+        stepGarden = function(now, lx, ly, lz)
+            local sg = handle._soGarden
+            if sg == nil or sg.runner == nil then
+                return false, "Garden: не инициализирован"
+            end
+            local gCfg = ctx.getGardenConfig ~= nil and ctx.getGardenConfig() or {}
+            sg.runner:update(now, {
+                autoDaily = true,
+                autoBuy = gCfg.autoBuy ~= false,
+                autoFertilize = gCfg.autoFertilize == true,
+                autoSell = gCfg.autoSell == true,
+                dailyOnly = true,
+            }, lx, ly, lz)
+            return sg.runner.waitingForGrowth == true, sg.runner.statusText
+        end,
+
+        isGardenActive = function()
+            local sg = handle._soGarden
+            return sg ~= nil and sg.runner ~= nil and sg.runner.busy == true
         end,
 
         findGardenPrompt = function(actionKind)
@@ -18871,6 +20105,13 @@ end
 
 function Runner:_stepGarden(now, state, lx, ly, lz)
     local d = self.deps
+    -- Если подключён полноценный Auto Garden (stand_out_garden.lua) — делегируем ему весь цикл дейлика и мини-игр!
+    if d.stepGarden ~= nil then
+        local waiting, st = d.stepGarden(now, lx, ly, lz)
+        self.gardenWaiting = waiting == true
+        self.statusText = st or "Garden: работаем..."
+        return
+    end
     if not hasQuest(state, "BIG_CHOP_DAILY_GARDEN") then
         if stand_out_quests.isDailyDoneToday(state.dailyJson, "BIG_CHOP_DAILY_GARDEN", state.todayDay) then
             self.statusText = "Garden: дейлик выполнен"
@@ -19090,6 +20331,10 @@ function Runner:update(now, cfg, lx, ly, lz)
         -- Во время боя удерживаем позицию (Over/Below/Behind) КАЖДЫЙ кадр, иначе за 0.28с персонаж падает на моба!
         if self.combatMob ~= nil and d.fightMob ~= nil then
             d.fightMob(self.combatMob, now)
+        elseif d.isGardenActive ~= nil and d.isGardenActive() and d.stepGarden ~= nil then
+            local waiting, st = d.stepGarden(now, lx, ly, lz)
+            self.gardenWaiting = waiting == true
+            if st ~= nil and st ~= "" then self.statusText = st end
         end
         return
     end
