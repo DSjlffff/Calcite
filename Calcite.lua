@@ -16729,6 +16729,11 @@ local function dist3(ax, ay, az, bx, by, bz)
     return math.sqrt(dx * dx + dy * dy + dz * dz)
 end
 
+local function distXZ(ax, az, bx, bz)
+    local dx, dz = ax - bx, az - bz
+    return math.sqrt(dx * dx + dz * dz)
+end
+
 -- Оптимальная дистанция подхода к промпту с учётом MaxActivationDistance (всегда с запасом 1.5 ст).
 function stand_out_interact.approachDistance(maxActivationDist)
     local d = tonumber(maxActivationDist)
@@ -16738,9 +16743,10 @@ function stand_out_interact.approachDistance(maxActivationDist)
     return math.max(2.2, math.min(d - 1.5, stand_out_interact.approach_cap))
 end
 
--- Вычисляет безопасную точку рядом с объектом (3.2 ст вбок по Z, чтобы не застревать внутри NPC/детали и не ломать LOS).
+-- Вычисляет безопасную точку рядом с объектом (<=2.0 ст вбок по Z, чтобы не застревать внутри NPC/детали,
+-- не перепрыгивать на соседнюю грядку и оставаться строго внутри радиуса даже для напольных промптов).
 function stand_out_interact.approachPoint(tx, ty, tz, maxActivationDist)
-    local r = math.min(3.2, stand_out_interact.approachDistance(maxActivationDist) * 0.75)
+    local r = math.min(2.0, stand_out_interact.approachDistance(maxActivationDist) * 0.55)
     return tx, ty + 1.2, tz + r
 end
 
@@ -16868,8 +16874,19 @@ function Controller:interactPrompt(now, promptInfo, lx, ly, lz)
     local tx, ty, tz = promptInfo.x, promptInfo.y, promptInfo.z
     local maxRange = stand_out_interact.approachDistance(promptInfo.maxDist)
 
-    -- 1) Подходим достаточно близко (с учётом MaxActivationDistance конкретного промпта!)
-    if tx ~= nil and (lx == nil or dist3(lx, ly, lz, tx, ty, tz) > maxRange) then
+    -- 1) Подходим достаточно близко (горизонталь <= maxRange и вертикаль <= 5.5 ст:
+    -- HumanoidRootPart стоящего персонажа всегда на ~3.2 ст выше напольных промптов вроде GardenSpot!)
+    local tooFar = false
+    if tx ~= nil then
+        if lx == nil or ly == nil or lz == nil then
+            tooFar = true
+        else
+            local hDist = distXZ(lx, lz, tx, tz)
+            local vDist = math.abs(ly - ty)
+            tooFar = hDist > maxRange or vDist > math.max(5.5, maxRange)
+        end
+    end
+    if tooFar then
         self:releaseHold()
         local ax, ay, az = stand_out_interact.approachPoint(tx, ty, tz, promptInfo.maxDist)
         if d.teleportTo ~= nil then
