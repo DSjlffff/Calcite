@@ -3418,6 +3418,7 @@ local pairs = {
     ["Остальные предметы"] = "Other items", ["Не из каталога"] = "Not in catalog",
     ["Сюжет"] = "Story", ["Тренеры"] = "Trainers", ["Магазины"] = "Shops", ["Прочее"] = "Other",
     ["Квест"] = "Quest", ["Все доступные"] = "All Available",
+    ["Рейд"] = "Raid", ["Сложность"] = "Difficulty",
     ["Сюжетная линия Part 9"] = "Part 9 Storyline", ["Этапы Part 9"] = "Part 9 Chapters",
     [" ст/с"] = " st/s", [" мс"] = " ms", [" ст"] = " st",
 }
@@ -4174,6 +4175,8 @@ local stand_out_howler = require("./stand_out_howler")
 local stand_out_quests = require("./stand_out_quests")
 local stand_out_story = require("./stand_out_story")
 local stand_out_quest_bridge = require("./stand_out_quest_bridge")
+local stand_out_raid = require("./stand_out_raid")
+local stand_out_raid_bridge = require("./stand_out_raid_bridge")
 local glider = require("./glider")
 local yba_npcs = require("./yba_npcs")
 local yba_waypoints = require("./yba_waypoints")
@@ -4364,6 +4367,7 @@ function main.start(env)
         _inEffect = nil,
         _soHowler = { collector = nil, remote = nil, conn = nil, tried = false },
         _soQuest = { runner = nil, story = nil, wasQuestOn = false, wasStoryOn = false, mod = nil, modTried = false, mobCache = nil, mobCacheAt = -99 },
+        _soRaid = { runner = nil, wasOn = false },
         _charMove = { savedWs = nil, savedJp = nil, savedUseJp = nil, wasWs = false, wasJp = false, lastChar = nil },
     }
 
@@ -5172,6 +5176,11 @@ function main.start(env)
         if handle._soQuest.story ~= nil then
             pcall(function()
                 handle._soQuest.story:stop()
+            end)
+        end
+        if handle._soRaid.runner ~= nil then
+            pcall(function()
+                handle._soRaid.runner:stop()
             end)
         end
         if handle._soHowler.conn ~= nil then
@@ -7250,6 +7259,21 @@ function main.start(env)
             handle._soQuest.runner = stand_out_quests.new(qDeps)
             handle._soQuest.story = stand_out_story.new(qDeps)
         end
+        do
+            local rDeps = stand_out_raid_bridge.create({
+                game = game,
+                workspace = workspace,
+                Players = Players,
+                localPlayer = localPlayer,
+                env = env,
+                handle = handle,
+                connections = connections,
+                getMobConfig = function()
+                    return current and current.standOutMobs or s.standOutMobs
+                end,
+            })
+            handle._soRaid.runner = stand_out_raid.new(rDeps)
+        end
     end
 
     -- what follows listens to Steal an Egg and looks through its plots: in any other game there is nothing of it
@@ -8461,9 +8485,11 @@ function main.start(env)
             ui.setStandOutHowler(handle._soHowler.collector.statusText)
         end
 
-        -- Stand Out Auto Pick Up: телепорт к ближайшему мировому предмету / закопанному припасу и подбор
+        -- Stand Out Auto Pick Up: телепорт к ближайшему мировому предмету / закопанному припасу и подбор (пауза внутри рейда)
+        local inRaidNow = false
+        pcall(function() inRaidNow = localPlayer:GetAttribute("TrainRaidActive") == true end)
         local soPick = handle._soPick
-        if not howlerBusy and s.standOutPickup ~= nil and s.standOutPickup.enabled and haveLocal and soPick.picker ~= nil then
+        if not howlerBusy and not inRaidNow and s.standOutPickup ~= nil and s.standOutPickup.enabled and haveLocal and soPick.picker ~= nil then
             if not soPick.wasOn then
                 soPick.entries = stand_out_pickup.scan(workspace, s.standOutPickup)
                 soPick.wasOn = true
@@ -8495,9 +8521,30 @@ function main.start(env)
         end
         local itemBusy = howlerBusy or (s.standOutPickup ~= nil and s.standOutPickup.enabled
             and soPick.picker ~= nil and soPick.picker.target ~= nil)
+        -- Stand Out Auto Raid (приоритет над Storyline / Quest / Bounty / Mob Farming; внутри рейда игнорирует Item farm)
+        local raidOn = s.standOutRaid ~= nil and s.standOutRaid.enabled and localAlive and handle._soRaid.runner ~= nil
+        if raidOn then
+            handle._soRaid.wasOn = true
+            if inRaidNow or not itemBusy then
+                local okR, errR = pcall(function()
+                    handle._soRaid.runner:update(now, s.standOutRaid, localX, localY, localZ)
+                end)
+                if not okR then
+                    warn("Calcite StandOutRaid: " .. tostring(errR))
+                end
+                ui.setStandOutRaid(handle._soRaid.runner.clears, handle._soRaid.runner.statusText)
+            end
+        elseif handle._soRaid.wasOn then
+            handle._soRaid.wasOn = false
+            if handle._soRaid.runner ~= nil then
+                handle._soRaid.runner:stop()
+                ui.setStandOutRaid(handle._soRaid.runner.clears, "")
+            end
+        end
+
         -- Stand Out Auto Storyline (приоритет над Auto Quest / Auto Bounty / Mob Farming)
         local soQuest = handle._soQuest
-        local storyOn = s.standOutStory ~= nil and s.standOutStory.enabled and localAlive and soQuest.story ~= nil
+        local storyOn = s.standOutStory ~= nil and s.standOutStory.enabled and localAlive and soQuest.story ~= nil and not raidOn
         if storyOn then
             soQuest.wasStoryOn = true
             if not itemBusy then
@@ -8517,8 +8564,8 @@ function main.start(env)
             end
         end
 
-        -- Stand Out Auto Quest (уступает Item farm и Auto Storyline)
-        local questOn = s.standOutQuests ~= nil and s.standOutQuests.enabled and localAlive and soQuest.runner ~= nil and not storyOn
+        -- Stand Out Auto Quest (уступает Auto Raid, Item farm и Auto Storyline)
+        local questOn = s.standOutQuests ~= nil and s.standOutQuests.enabled and localAlive and soQuest.runner ~= nil and not storyOn and not raidOn
         if questOn then
             soQuest.wasQuestOn = true
             if not itemBusy then
@@ -8541,7 +8588,7 @@ function main.start(env)
         -- Stand Out Auto Bounty (включается вручную ИЛИ по запросу Auto Quest / Auto Storyline!)
         local soBounty = handle._soBounty
         local questWantsBounty = (storyOn and soQuest.story.wantsBounty) or (questOn and soQuest.runner.wantsBounty)
-        local bountyOn = localAlive and soBounty.runner ~= nil
+        local bountyOn = localAlive and soBounty.runner ~= nil and not raidOn
             and ((s.standOutBounty ~= nil and s.standOutBounty.enabled and not storyOn and not questOn) or questWantsBounty)
         if bountyOn then
             if not soBounty.wasOn then
@@ -8577,8 +8624,8 @@ function main.start(env)
             end
         end
 
-        -- Stand Out Mob Farming (уступает Item farm, Auto Storyline, Auto Quest и Auto Bounty)
-        if s.standOutMobs ~= nil and s.standOutMobs.enabled and localAlive and soMob.farmer ~= nil and not bountyOn and not questOn and not storyOn then
+        -- Stand Out Mob Farming (уступает Auto Raid, Item farm, Auto Storyline, Auto Quest и Auto Bounty)
+        if s.standOutMobs ~= nil and s.standOutMobs.enabled and localAlive and soMob.farmer ~= nil and not raidOn and not bountyOn and not questOn and not storyOn then
             if not soMob.wasOn then
                 local pNames = {}
                 for _, pl in Players:GetPlayers() do
@@ -9115,6 +9162,34 @@ function menu.create(deps)
     end
     soFarm.questStatus = soFarm.questGroup:AddLabel("Завершено: 0")
 
+    soFarm.raidGroup = farmTab:AddRightGroupbox("Auto Raid")
+    toggle(soFarm.raidGroup, "StandOutRaidEnabled", "Включить", settings.standOutRaid, "enabled")
+    do
+        local rLabels = { "Все доступные", "The Train (Lv 20+)", "Highway Star (Lv 30+)", "77 Rings (Lv 40+)" }
+        local rIds = { "All", "Train", "HighwayStar", "Rings" }
+        local rOf = {}
+        for i, lbl in rLabels do
+            rOf[lbl] = rIds[i]
+        end
+        local rDef = table.find(rIds, settings.standOutRaid.raid) or 1
+        soFarm.raidGroup:AddDropdown("StandOutRaidChoice", {
+            Text = "Рейд", Values = rLabels, Default = rDef,
+        })
+        Options.StandOutRaidChoice:OnChanged(function()
+            settings.standOutRaid.raid = rOf[Options.StandOutRaidChoice.Value] or "All"
+        end)
+
+        local dVals = { "Regular", "Hard" }
+        local dDef = table.find(dVals, settings.standOutRaid.difficulty) or 1
+        soFarm.raidGroup:AddDropdown("StandOutRaidDiff", {
+            Text = "Сложность", Values = dVals, Default = dDef,
+        })
+        Options.StandOutRaidDiff:OnChanged(function()
+            settings.standOutRaid.difficulty = Options.StandOutRaidDiff.Value or "Regular"
+        end)
+    end
+    soFarm.raidStatus = soFarm.raidGroup:AddLabel("Пройдено: 0")
+
     soFarm.storyGroup = soFarm.storyTab:AddLeftGroupbox("Auto Storyline")
     toggle(soFarm.storyGroup, "StandOutStoryEnabled", "Включить", settings.standOutStory, "enabled")
     soFarm.storyStatus = soFarm.storyGroup:AddLabel("Сюжет: 0/58")
@@ -9543,15 +9618,16 @@ function menu.create(deps)
         teleportTab:SetVisible(modes.has(mode, "Teleport"))
         farmTab:SetVisible(modes.has(mode, "AutoFarm") or modes.has(mode, "StandOutPickup")
             or modes.has(mode, "StandOutMobs") or modes.has(mode, "StandOutBounty")
-            or modes.has(mode, "StandOutQuests"))
+            or modes.has(mode, "StandOutQuests") or modes.has(mode, "StandOutRaid"))
         farmGroup:SetVisible(modes.has(mode, "AutoFarm"))
         soFarm.itemGroup:SetVisible(modes.has(mode, "StandOutPickup"))
         soFarm.mobGroup:SetVisible(modes.has(mode, "StandOutMobs"))
         soFarm.cfgGroup:SetVisible(modes.has(mode, "StandOutMobs") or modes.has(mode, "StandOutBounty")
-            or modes.has(mode, "StandOutQuests"))
+            or modes.has(mode, "StandOutQuests") or modes.has(mode, "StandOutRaid"))
         soFarm.bountyGroup:SetVisible(modes.has(mode, "StandOutBounty"))
         soFarm.howlerGroup:SetVisible(modes.has(mode, "StandOutPickup"))
         soFarm.questGroup:SetVisible(modes.has(mode, "StandOutQuests"))
+        soFarm.raidGroup:SetVisible(modes.has(mode, "StandOutRaid"))
         soFarm.storyTab:SetVisible(modes.has(mode, "StandOutQuests"))
         teamCheck:SetVisible(modes.has(mode, "TeamCheck"))
         throughWalls:SetVisible(modes.has(mode, "Wallbang"))
@@ -9652,6 +9728,17 @@ function menu.create(deps)
         if text ~= soFarm.shownStory then
             soFarm.shownStory = text
             soFarm.storyStatus:SetText(text)
+        end
+    end
+
+    function ui.setStandOutRaid(clears, statusText)
+        local text = string.format("Пройдено: %d", clears or 0)
+        if statusText ~= nil and statusText ~= "" then
+            text = text .. " | " .. statusText
+        end
+        if text ~= soFarm.shownRaid then
+            soFarm.shownRaid = text
+            soFarm.raidStatus:SetText(text)
         end
     end
 
@@ -9861,8 +9948,8 @@ local features = {
     ItemAsylum = { Players = true, Health = true, Aim = true, IaWeapon = true },
     -- Rivals: team shooter — пока основа (ESP с здоровьем + aim + team check)
     Rivals = { Players = true, Health = true, TeamCheck = true, Aim = true },
-    -- Stand Out: без команд; ESP игроков + автоподбор + фарм мобов + авто-баунти + авто-квесты/сюжетка + WalkSpeed/JumpPower
-    StandOut = { Players = true, Health = true, StandOutInfo = true, StandOutPickup = true, StandOutMobs = true, StandOutBounty = true, StandOutQuests = true, CharMove = true },
+    -- Stand Out: без команд; ESP игроков + автоподбор + фарм мобов + авто-баунти + авто-квесты/сюжетка + авто-рейды + WalkSpeed/JumpPower
+    StandOut = { Players = true, Health = true, StandOutInfo = true, StandOutPickup = true, StandOutMobs = true, StandOutBounty = true, StandOutQuests = true, StandOutRaid = true, CharMove = true },
 }
 
 -- what a mode starts with set otherwise than the settings are written: fields of the table of settings.defaults
@@ -11149,6 +11236,12 @@ function settings.defaults(mode)
         standOutStory = {
             enabled = false,
         },
+        -- Stand Out Auto Raid: Bizarre Adventures — The Train / Highway Star / 77 Rings (stand_out_raid.lua)
+        standOutRaid = {
+            enabled = false,
+            raid = "All",         -- "All" | "Train" | "HighwayStar" | "Rings"
+            difficulty = "Regular", -- "Regular" | "Hard"
+        },
         -- Player WalkSpeed / JumpPower
         walkSpeed = {
             enabled = false,
@@ -11297,6 +11390,7 @@ function settings.inEffectInto(out, s, mode)
     local standOutBounty = copyInto(reusing and e.standOutBounty or nil, s.standOutBounty)
     local standOutQuests = copyInto(reusing and e.standOutQuests or nil, s.standOutQuests)
     local standOutStory = copyInto(reusing and e.standOutStory or nil, s.standOutStory)
+    local standOutRaid = copyInto(reusing and e.standOutRaid or nil, s.standOutRaid)
     local walkSpeed = copyInto(reusing and e.walkSpeed or nil, s.walkSpeed)
     local jumpPower = copyInto(reusing and e.jumpPower or nil, s.jumpPower)
     local watermark = copyInto(reusing and e.watermark or nil, s.watermark)
@@ -11337,6 +11431,7 @@ function settings.inEffectInto(out, s, mode)
     e.standOutBounty = standOutBounty
     e.standOutQuests = standOutQuests
     e.standOutStory = standOutStory
+    e.standOutRaid = standOutRaid
     e.walkSpeed = walkSpeed
     e.jumpPower = jumpPower
     e.watermark = watermark
@@ -11461,6 +11556,9 @@ function settings.inEffectInto(out, s, mode)
     if not modes.has(mode, "StandOutQuests") then
         e.standOutQuests.enabled = false
         e.standOutStory.enabled = false
+    end
+    if not modes.has(mode, "StandOutRaid") then
+        e.standOutRaid.enabled = false
     end
     if not modes.has(mode, "CharMove") then
         e.walkSpeed.enabled = false
@@ -18871,6 +18969,1916 @@ function Runner:update(now, cfg, lx, ly, lz)
 end
 
 return stand_out_quests
+end
+
+__modules["stand_out_raid"] = function(require)
+-- Stand Out Auto Raid: pure state machine for The Train, Highway Star, and 77 Rings.
+-- No direct Roblox globals — tested headlessly by tests/stand_out_raid_test.lua.
+local stand_out_interact = require("./stand_out_interact")
+
+local raid = {}
+
+raid.ORDER = { "Train", "HighwayStar", "Rings" }
+
+raid.META = {
+    Train = {
+        key = "Train",
+        label = "The Train",
+        minLevel = 20,
+        cdRegular = "Regular",
+        cdHard = "Hard",
+    },
+    HighwayStar = {
+        key = "HighwayStar",
+        label = "Highway Star",
+        minLevel = 30,
+        cdRegular = "HighwayStarRegular",
+        cdHard = "HighwayStarHard",
+    },
+    Rings = {
+        key = "Rings",
+        label = "77 Rings",
+        minLevel = 40,
+        cdRegular = "RingsRegular",
+        cdHard = "RingsHard",
+    },
+}
+
+raid.DONATELLO_POS = { X = -526.6, Y = 19.4, Z = 1995.9 }
+
+-- Highway Star Stage 1 tunnel progression waypoints (relative to spawn near X=0, Z=20000)
+local TUNNEL_WAYPOINTS = {
+    { dx = 115, dy = 0, dz = -5 },
+    { dx = 185, dy = 0, dz = -12 },
+    { dx = 214, dy = 0.5, dz = -61 },
+}
+
+-- Lockpicking sweep angles (degrees) before fine hill-climb
+local LOCKPICK_SWEEP = { 0, -45, 45, -75, 75, -22, 22, -62, 62 }
+
+local function dist3(ax, ay, az, bx, by, bz)
+    local dx, dy, dz = ax - bx, ay - by, az - bz
+    return math.sqrt(dx * dx + dy * dy + dz * dz)
+end
+
+-- Parses TrainRaidCooldowns JSON string into { [key] = timestamp }.
+function raid.parseCooldowns(jsonStr)
+    local out = {}
+    if type(jsonStr) ~= "string" or jsonStr == "" then
+        return out
+    end
+    for k, v in string.gmatch(jsonStr, '"([^"]+)"%s*:%s*(%-?%d+%.?%d*)') do
+        local num = tonumber(v)
+        if num ~= nil then
+            out[k] = num
+        end
+    end
+    return out
+end
+
+-- Formats remaining seconds as M:SS.
+function raid.formatCooldown(sec)
+    local s = math.max(0, math.ceil(tonumber(sec) or 0))
+    return string.format("%d:%02d", math.floor(s / 60), s % 60)
+end
+
+-- Resolves which raid key to start given config ("All" | "Train" | "HighwayStar" | "Rings"),
+-- difficulty ("Regular" | "Hard"), player level, and boardCooldowns ({ [raidKey] = { Regular = sec, Hard = sec } }).
+-- Returns: chosenKey (or nil), reasonText (or nil).
+function raid.pickRaidToStart(cfgRaid, difficulty, level, hasAccess, boardCooldowns)
+    if hasAccess == false then
+        return nil, "нет доступа к рейдам"
+    end
+    local diff = (difficulty == "Hard") and "Hard" or "Regular"
+    local lv = tonumber(level) or 0
+
+    local function cdOf(rk)
+        local t = boardCooldowns and boardCooldowns[rk]
+        if type(t) == "table" then
+            return tonumber(t[diff]) or 0
+        end
+        return 0
+    end
+
+    if cfgRaid ~= nil and cfgRaid ~= "All" and raid.META[cfgRaid] ~= nil then
+        local m = raid.META[cfgRaid]
+        if lv > 0 and lv < m.minLevel then
+            return nil, string.format("%s: нужен Lv %d", m.label, m.minLevel)
+        end
+        local rem = cdOf(cfgRaid)
+        if rem > 1 then
+            return nil, string.format("%s КД %s", m.label, raid.formatCooldown(rem))
+        end
+        return cfgRaid, nil
+    end
+
+    -- "All" mode: pick first eligible raid off cooldown
+    local bestCd, bestCdLabel = nil, nil
+    local anyLevelOk = false
+    for _, rk in ipairs(raid.ORDER) do
+        local m = raid.META[rk]
+        if lv == 0 or lv >= m.minLevel then
+            anyLevelOk = true
+            local rem = cdOf(rk)
+            if rem <= 1 then
+                return rk, nil
+            end
+            if bestCd == nil or rem < bestCd then
+                bestCd = rem
+                bestCdLabel = m.label
+            end
+        end
+    end
+    if not anyLevelOk then
+        return nil, "нужен Lv 20+"
+    end
+    if bestCd ~= nil then
+        return nil, string.format("КД %s %s", bestCdLabel or "Raid", raid.formatCooldown(bestCd))
+    end
+    return "Train", nil
+end
+
+-- Chooses the safest Z lane for Highway Star Stage 2 chase driving (+X direction, centered on originZ).
+-- obstacles: array of { x, z, radius } (other cars + potholes).
+-- Returns: targetZ, steer (-1 left / 0 straight / +1 right).
+function raid.chooseChaseSteering(carX, carZ, lookZ, originZ, obstacles)
+    local oz = originZ or carZ
+    local bestLaneZ = oz
+    local bestScore = -1e18
+
+    -- 9 candidate lanes across road width [-14 .. +14] around originZ
+    for i = -4, 4 do
+        local laneZ = oz + i * 3.5
+        -- Small preference for staying near current Z and center of road to avoid wild swerving
+        local score = -math.abs(laneZ - carZ) * 0.65 - math.abs(laneZ - oz) * 0.15
+
+        if type(obstacles) == "table" then
+            for _, obs in ipairs(obstacles) do
+                local dx = (obs.x or 0) - carX
+                if dx >= -6 and dx <= 150 then
+                    local dz = math.abs((obs.z or oz) - laneZ)
+                    local rad = (obs.radius or 5.5) + 2.8
+                    if dz < rad then
+                        -- Urgent collision penalty inversely weighted by forward distance
+                        local urgency = 180 / math.max(8, dx + 14)
+                        local overlap = (rad - dz) / rad
+                        score = score - urgency * (1 + overlap * 4) * 25
+                    elseif dz < rad + 4 then
+                        local urgency = 45 / math.max(12, dx + 20)
+                        score = score - urgency * 4
+                    end
+                end
+            end
+        end
+
+        if score > bestScore then
+            bestScore = score
+            bestLaneZ = laneZ
+        end
+    end
+
+    -- Car faces +X: positive Z is to the RIGHT, negative Z is to the LEFT.
+    -- Predict Z slightly ahead using lookZ (lateral heading component) for damped steering.
+    local predictedZ = carZ + (lookZ or 0) * 14
+    local err = bestLaneZ - predictedZ
+    local steer = 0
+    if err > 1.35 then
+        steer = 1
+    elseif err < -1.35 then
+        steer = -1
+    end
+    return bestLaneZ, steer
+end
+
+-- Checks if any Train roof hazard is about to sweep over (myX, myY, myZ).
+-- Returns true + safeZ offset if we should dodge, false otherwise.
+function raid.checkRoofHazard(hazards, myX, myY, myZ, serverNow)
+    if type(hazards) ~= "table" or #hazards == 0 then
+        return false, nil
+    end
+    local t = serverNow or 0
+    for _, h in ipairs(hazards) do
+        local startX = tonumber(h.StartX)
+        local speed = tonumber(h.Speed)
+        local startsAt = tonumber(h.StartsAt)
+        local bottom = tonumber(h.Bottom)
+        local height = tonumber(h.Height or h.Thickness) or 6
+        local hz = tonumber(h.Z)
+        local span = tonumber(h.Span) or 18
+        if startX and speed and startsAt and bottom and hz then
+            local hx = startX - math.max(0, t - startsAt) * speed
+            local dx = hx - myX
+            -- Hazard moves in -X direction: danger when hx is just ahead (+X) or overlapping us
+            if dx >= -8 and dx <= 32 then
+                if myY >= bottom - 4 and myY <= bottom + height + 5 then
+                    if math.abs(myZ - hz) <= span * 0.5 + 3 then
+                        if h.Kind == "Side" then
+                            local safeZ = (myZ >= hz) and (hz - span * 0.5 - 5) or (hz + span * 0.5 + 5)
+                            return true, safeZ
+                        end
+                        return true, nil
+                    end
+                end
+            end
+        end
+    end
+    return false, nil
+end
+
+-- Checks if any 77 Rings falling ice circle threatens (myX, myZ).
+-- Returns true, dodgeX, dodgeZ if we need to step aside.
+function raid.checkIcefallHazard(icefalls, myX, myZ, now)
+    if type(icefalls) ~= "table" then
+        return false, nil, nil
+    end
+    for _, ice in ipairs(icefalls) do
+        if (ice.at or 0) >= now - 0.15 and (ice.at or 0) <= now + 1.6 then
+            local dx = myX - (ice.x or 0)
+            local dz = myZ - (ice.z or 0)
+            local d = math.sqrt(dx * dx + dz * dz)
+            local rad = (ice.size or 9) * 0.65 + 2
+            if d < rad then
+                local nx, nz = 1, 0
+                if d > 0.1 then
+                    nx, nz = dx / d, dz / d
+                end
+                return true, (ice.x or 0) + nx * (rad + 4), (ice.z or 0) + nz * (rad + 4)
+            end
+        end
+    end
+    return false, nil, nil
+end
+
+-- Scores a Passione suspect's dialogue payload to detect suspicious/impostor clues.
+function raid.scoreSuspect(payload)
+    if type(payload) ~= "table" or payload.NoAccuse then
+        return -100
+    end
+    local score = 0
+    local texts = { tostring(payload.Line or ""), tostring(payload.Note or "") }
+    if type(payload.Questions) == "table" then
+        for _, q in ipairs(payload.Questions) do
+            if type(q) == "table" then
+                table.insert(texts, tostring(q.Answer or ""))
+            end
+        end
+    end
+    local blob = string.lower(table.concat(texts, " "))
+    local redFlags = {
+        "passione", "boss", "capo", "gang", "bucciarati", "prosciutto", "pesci",
+        "stand", "mission", "target", "job", "hide", "shut up", "none of your business",
+        "stop asking", "leave me alone", "nervous", "sweat", "ticket", "wrong stop",
+        "forgot", "uh", "um", "don't know", "no idea", "nothing",
+    }
+    for _, kw in ipairs(redFlags) do
+        if string.find(blob, kw, 1, true) ~= nil then
+            score += 2
+        end
+    end
+    return score
+end
+
+-- Picks the best raid prompt to interact with given raid kind, objective text, player pos, and tried set.
+function raid.pickPrompt(prompts, raidKind, objective, myX, myY, myZ, triedMap, now)
+    if type(prompts) ~= "table" or #prompts == 0 then
+        return nil
+    end
+    local obj = string.lower(tostring(objective or ""))
+    local best, bestScore = nil, -1e18
+
+    for _, p in ipairs(prompts) do
+        if p.enabled ~= false and p.claimed ~= true and p.x ~= nil then
+            local key = p.key or p.name or ""
+            local triedAt = triedMap and triedMap[key]
+            local recentlyTried = triedAt ~= nil and (now - triedAt) < 18
+            local blob = string.lower(tostring(p.name or "") .. " " .. tostring(p.action or "") .. " " .. tostring(p.objectText or "") .. " " .. tostring(p.path or ""))
+            local score = 0
+
+            if recentlyTried then
+                score -= 200
+            end
+
+            -- Objective-driven priorities
+            if string.find(obj, "elevator", 1, true) ~= nil then
+                if string.find(blob, "elev", 1, true) ~= nil or string.find(blob, "lift", 1, true) ~= nil or string.find(blob, "up", 1, true) ~= nil then
+                    score += 120
+                end
+            elseif string.find(obj, "room", 1, true) ~= nil or string.find(obj, "door", 1, true) ~= nil then
+                if p.hasSound then
+                    score += 180
+                end
+                if string.find(blob, "open", 1, true) ~= nil or string.find(blob, "enter", 1, true) ~= nil or string.find(blob, "door", 1, true) ~= nil then
+                    score += 80
+                elseif string.find(blob, "listen", 1, true) ~= nil then
+                    score += 25
+                end
+            elseif string.find(obj, "purse", 1, true) ~= nil or string.find(obj, "clip", 1, true) ~= nil or string.find(obj, "lock", 1, true) ~= nil then
+                if string.find(blob, "purse", 1, true) ~= nil or string.find(blob, "bag", 1, true) ~= nil or string.find(blob, "search", 1, true) ~= nil then
+                    score += 140
+                elseif string.find(blob, "lock", 1, true) ~= nil or string.find(blob, "pick", 1, true) ~= nil then
+                    score += 120
+                end
+            elseif string.find(obj, "passione", 1, true) ~= nil or string.find(obj, "suspect", 1, true) ~= nil or string.find(obj, "passenger", 1, true) ~= nil or string.find(obj, "impostor", 1, true) ~= nil then
+                if string.find(blob, "talk", 1, true) ~= nil or string.find(blob, "question", 1, true) ~= nil or string.find(blob, "passenger", 1, true) ~= nil then
+                    score += 110
+                end
+            elseif raidKind == "Rings" then
+                if string.find(blob, "ring", 1, true) ~= nil or string.find(blob, "lever", 1, true) ~= nil or string.find(blob, "gate", 1, true) ~= nil or string.find(blob, "door", 1, true) ~= nil then
+                    score += 90
+                end
+            end
+
+            -- Generic progression prompts
+            if string.find(blob, "next", 1, true) ~= nil or string.find(blob, "car", 1, true) ~= nil or string.find(blob, "door", 1, true) ~= nil or string.find(blob, "exit", 1, true) ~= nil or string.find(blob, "advance", 1, true) ~= nil or string.find(blob, "portal", 1, true) ~= nil then
+                score += 45
+            end
+            if string.find(blob, "talk", 1, true) ~= nil or string.find(blob, "search", 1, true) ~= nil or string.find(blob, "open", 1, true) ~= nil or string.find(blob, "unlock", 1, true) ~= nil then
+                score += 20
+            end
+
+            -- Mild distance tie-breaker
+            local d = dist3(myX, myY, myZ, p.x, p.y, p.z)
+            score -= math.min(60, d * 0.15)
+
+            if score > bestScore then
+                bestScore = score
+                best = p
+            end
+        end
+    end
+
+    if best ~= nil and bestScore < -150 then
+        return nil
+    end
+    return best
+end
+
+-- Creates a new Auto Raid runner.
+-- deps:
+--   readRaidState() -> { inRaid, raidKind, raidId, stage, car, cars, objective, progress, carTitle,
+--                        boss, chase, encounterTargets, roofHazards, dead, lives, hasAccess, level,
+--                        cooldownsJson, boardCooldowns, readyPending, results, latch, purse, suspect,
+--                        chainActive, climbGuide, icefalls, coldRatio, lockpick, serverNow }
+--   requestBoard(raidKey)
+--   requestStart(raidKey, difficulty)
+--   sendReady(accept)
+--   playAction(action, payload)
+--   fastAction(action, payload)
+--   fireTrainRaid(cmd, payload)
+--   lockpickTurn(id, angle)
+--   lockpickRelease(id)
+--   teleportTo(x, y, z, lx, ly, lz)
+--   findNpc(name) -> x, y, z, promptInfo
+--   findRaidMobs(raidId) -> { { model, name, x, y, z, hp, maxHp, isBoss }, ... }
+--   findRaidPrompts(raidKind, raidId) -> { { obj, key, name, action, objectText, path, x, y, z, enabled, hold, maxDist, hasSound, claimed }, ... }
+--   findRaidPart(raidKind, raidId, keywords) -> x, y, z
+--   findRaidCar(raidId) -> { model, x, y, z, lookZ, seatPrompt, seatedInDriver, seatedInAny }
+--   findChaseObstacles(raidId, carModel) -> { { x, z, radius }, ... }
+--   findNearestFire(raidId, myX, myY, myZ) -> x, y, z
+--   driveChase(carModel, throttle, steer)
+--   releaseDrive()
+--   exitVehicle()
+--   fightMob(mob, now)
+--   stopCombat()
+--   closeDialogue()
+--   firePrompt / holdPromptBegin / holdPromptEnd / pulsePrompt / fireClick (for stand_out_interact)
+function raid.new(deps)
+    local self = {
+        deps = deps,
+        clears = 0,
+        statusText = "",
+        activeRaidId = nil,
+        countedResults = {},
+        lastStartAt = -99,
+        lastBoardAt = -99,
+        lastReadyAt = -99,
+        lastStruggleAt = -99,
+        lastKnockBeginAt = -99,
+        knockDueAt = nil,
+        purseToken = nil,
+        purseOpenedAt = nil,
+        lastPurseFireAt = -99,
+        guideSentId = nil,
+        tunnelOrigin = nil,
+        tunnelWpIdx = 1,
+        tunnelWpAt = 0,
+        triedPrompts = {},
+        suspectScores = {},
+        suspectLastToken = nil,
+        lockpickState = nil,
+        warmingUp = false,
+        drivingActive = false,
+        interact = stand_out_interact.new(deps),
+    }
+
+    local function resetRunState()
+        self.tunnelOrigin = nil
+        self.tunnelWpIdx = 1
+        self.tunnelWpAt = 0
+        self.triedPrompts = {}
+        self.suspectScores = {}
+        self.suspectLastToken = nil
+        self.knockDueAt = nil
+        self.purseToken = nil
+        self.purseOpenedAt = nil
+        self.lockpickState = nil
+        self.warmingUp = false
+        self.interact:stop()
+        if self.drivingActive then
+            self.drivingActive = false
+            if self.deps.releaseDrive then self.deps.releaseDrive() end
+        end
+    end
+
+    function self:stop()
+        self.statusText = ""
+        self.interact:stop()
+        if self.drivingActive then
+            self.drivingActive = false
+            if self.deps.releaseDrive then self.deps.releaseDrive() end
+        end
+        if self.deps.stopCombat then
+            self.deps.stopCombat()
+        end
+    end
+
+    -- Handles real-time raid sub-mechanics (feet shake, chain struggle, purse, lockpicking, climb guide).
+    -- Returns true if an exclusive modal minigame (purse / lockpicking / suspect) took over this tick.
+    local function handleReactions(st, now)
+        local d = self.deps
+
+        -- 1. Ready check (party)
+        if st.readyPending and now - self.lastReadyAt >= 1.0 then
+            self.lastReadyAt = now
+            if d.sendReady then d.sendReady(true) end
+        end
+
+        -- 2. 77 Rings climb guide dismiss
+        if st.raidKind == "Rings" and st.raidId ~= nil and st.climbGuide and self.guideSentId ~= st.raidId then
+            self.guideSentId = st.raidId
+            if d.playAction then
+                d.playAction("RingsGuideSeen", { RunId = st.raidId })
+            end
+        end
+
+        -- 3. Highway Star feet latched on player
+        if type(st.latch) == "table" and (tonumber(st.latch.count) or 0) > 0 then
+            local hold = tonumber(st.latch.hold) or 0.6
+            if self.knockDueAt == nil then
+                if now - self.lastKnockBeginAt >= 0.35 then
+                    self.lastKnockBeginAt = now
+                    self.knockDueAt = now + hold + 0.06
+                    if d.playAction then d.playAction("KnockBegin") end
+                end
+            elseif now >= self.knockDueAt then
+                self.knockDueAt = nil
+                if d.playAction then d.playAction("Knock") end
+            end
+        else
+            self.knockDueAt = nil
+        end
+
+        -- 4. 77 Rings Tarkus chain struggle
+        if st.chainActive and now - self.lastStruggleAt >= 0.21 then
+            self.lastStruggleAt = now
+            if d.fastAction then d.fastAction("Struggle", {}) end
+        end
+
+        -- 5. The Train purse search minigame (auto-take clip after 3.35s server minimum)
+        if type(st.purse) == "table" and type(st.purse.token) == "string" and st.purse.token ~= "" then
+            if self.purseToken ~= st.purse.token then
+                self.purseToken = st.purse.token
+                self.purseOpenedAt = now
+                self.lastPurseFireAt = -99
+            end
+            local elapsed = now - (self.purseOpenedAt or now)
+            if elapsed >= 3.35 and now - self.lastPurseFireAt >= 0.65 then
+                self.lastPurseFireAt = now
+                if d.fireTrainRaid then
+                    d.fireTrainRaid("Purse", { Step = "Take", Token = self.purseToken })
+                end
+            end
+            self.statusText = string.format("Train: Сумка (%.1fs)", math.max(0, 3.35 - elapsed))
+            return true
+        else
+            self.purseToken = nil
+            self.purseOpenedAt = nil
+        end
+
+        -- 6. The Train Lockpicking QTE (smart allowance hill-climb)
+        if type(st.lockpick) == "table" and st.lockpick.active and st.lockpick.id ~= nil then
+            local lp = st.lockpick
+            local ls = self.lockpickState
+            if ls == nil or ls.id ~= lp.id then
+                ls = {
+                    id = lp.id,
+                    phase = "idle",
+                    sweepIdx = 1,
+                    curAngle = LOCKPICK_SWEEP[1],
+                    bestAngle = 0,
+                    bestAllowance = -1,
+                    step = 14,
+                    dir = 1,
+                    turnAt = -99,
+                    nextAt = now + 0.15,
+                }
+                self.lockpickState = ls
+            end
+            if ls.phase == "turning" then
+                local allow = lp.allowance
+                if allow ~= nil then
+                    if allow >= 0.99 then
+                        -- Hold to finish opening!
+                        self.statusText = "Train: Взлом замка (открыто!)"
+                        return true
+                    end
+                    -- Release immediately before pick breaks
+                    if d.lockpickRelease then d.lockpickRelease(lp.id) end
+                    ls.phase = "idle"
+                    ls.nextAt = now + 0.28
+                    if allow > ls.bestAllowance then
+                        ls.bestAllowance = allow
+                        ls.bestAngle = ls.curAngle
+                    end
+                    -- Pick next angle: sweep first until we see a hit (> 0.18), then refine
+                    if ls.bestAllowance < 0.18 and ls.sweepIdx < #LOCKPICK_SWEEP then
+                        ls.sweepIdx += 1
+                        ls.curAngle = LOCKPICK_SWEEP[ls.sweepIdx]
+                    else
+                        if allow < ls.bestAllowance then
+                            ls.dir = -ls.dir
+                            ls.step = math.max(2, ls.step * 0.55)
+                        end
+                        ls.curAngle = math.clamp(ls.bestAngle + ls.dir * ls.step, -85, 85)
+                    end
+                elseif now - ls.turnAt >= 0.55 then
+                    if d.lockpickRelease then d.lockpickRelease(lp.id) end
+                    ls.phase = "idle"
+                    ls.nextAt = now + 0.25
+                end
+            elseif now >= ls.nextAt then
+                ls.phase = "turning"
+                ls.turnAt = now
+                if d.lockpickTurn then d.lockpickTurn(lp.id, ls.curAngle) end
+            end
+            self.statusText = string.format("Train: Взлом замка (%d°)", math.floor(ls.curAngle))
+            return true
+        else
+            self.lockpickState = nil
+        end
+
+        -- 7. The Train Passione suspect investigation
+        if type(st.suspect) == "table" and st.suspect.token ~= nil then
+            local susp = st.suspect
+            local key = tostring(susp.token) .. ":" .. tostring(susp.index or 0)
+            if self.suspectLastToken ~= key then
+                self.suspectLastToken = key
+                local score = raid.scoreSuspect(susp)
+                self.suspectScores[susp.index or key] = {
+                    index = susp.index,
+                    token = susp.token,
+                    score = score,
+                }
+                if not susp.noAccuse and score >= 4 then
+                    if d.fireTrainRaid then
+                        d.fireTrainRaid("Accuse", { Index = susp.index, Token = susp.token })
+                    end
+                    if d.closeDialogue then d.closeDialogue() end
+                    self.statusText = "Train: Обвиняем Passione!"
+                    return true
+                else
+                    if d.closeDialogue then d.closeDialogue() end
+                end
+            end
+            self.statusText = "Train: Опрос пассажира"
+            return true
+        end
+
+        return false
+    end
+
+    local function pickBestMob(mobs, myX, myY, myZ)
+        if type(mobs) ~= "table" or #mobs == 0 then
+            return nil
+        end
+        local best, bestScore = nil, -1e18
+        for _, m in ipairs(mobs) do
+            if (m.hp == nil or m.hp > 0) and m.x ~= nil then
+                local d = dist3(myX, myY, myZ, m.x, m.y, m.z)
+                local score = (m.isBoss and 500 or 0) - d
+                if score > bestScore then
+                    bestScore = score
+                    best = m
+                end
+            end
+        end
+        return best
+    end
+
+    local function interactWithPrompt(p, now, myX, myY, myZ, label)
+        local d = self.deps
+        if d.stopCombat then d.stopCombat() end
+        local pInfo = {
+            obj = p.obj,
+            isClick = p.isClick == true,
+            name = p.name,
+            action = p.action,
+            objectText = p.objectText,
+            enabled = p.enabled ~= false,
+            available = true,
+            hold = tonumber(p.hold) or 0,
+            maxDist = tonumber(p.maxDist) or 8,
+            x = p.x,
+            y = p.y,
+            z = p.z,
+        }
+        local status = self.interact:interactPrompt(now, pInfo, myX, myY, myZ)
+        if status == "triggered" or status == "missing" then
+            self.triedPrompts[p.key or p.name or ""] = now
+            self.interact:stop()
+        end
+        self.statusText = label or ("Взаимодействие: " .. tostring(p.action ~= "" and p.action or p.name))
+    end
+
+    function self:update(now, cfg, myX, myY, myZ)
+        local d = self.deps
+        local st = d.readRaidState and d.readRaidState() or {}
+        local serverNow = st.serverNow or now
+
+        -- Count cleared raid once per run id
+        if type(st.results) == "table" and st.results.cleared == true then
+            local rk = tostring(st.results.id or st.raidId or st.results.time or "clear")
+            if not self.countedResults[rk] then
+                self.countedResults[rk] = true
+                self.clears += 1
+            end
+        end
+
+        -- Reset per-run memory on raid transition
+        if st.inRaid then
+            if st.raidId ~= nil and st.raidId ~= self.activeRaidId then
+                self.activeRaidId = st.raidId
+                resetRunState()
+            end
+        else
+            if self.activeRaidId ~= nil then
+                self.activeRaidId = nil
+                resetRunState()
+            end
+        end
+
+        -- Always run reactions (Ready check works in lobby too!)
+        if handleReactions(st, now) then
+            return
+        end
+
+        -- ======================== LOBBY MODE ========================
+        if not st.inRaid then
+            if self.drivingActive then
+                self.drivingActive = false
+                if d.releaseDrive then d.releaseDrive() end
+            end
+            if d.stopCombat then d.stopCombat() end
+
+            local cfgRaid = cfg and cfg.raid or "All"
+            local cfgDiff = cfg and cfg.difficulty or "Regular"
+
+            -- Periodically refresh Board data so we have exact cooldowns
+            if now - self.lastBoardAt >= 6.0 and d.requestBoard then
+                self.lastBoardAt = now
+                local qKey = (cfgRaid ~= "All" and raid.META[cfgRaid]) and cfgRaid or "Train"
+                d.requestBoard(qKey)
+            end
+
+            local targetRaid, reason = raid.pickRaidToStart(cfgRaid, cfgDiff, st.level, st.hasAccess, st.boardCooldowns)
+            if targetRaid == nil then
+                self.statusText = reason or "Ожидание рейда"
+                return
+            end
+
+            -- Stand near Donatello before firing Start (in case server checks NPC proximity)
+            local dx, dy, dz = raid.DONATELLO_POS.X, raid.DONATELLO_POS.Y, raid.DONATELLO_POS.Z
+            if d.findNpc then
+                local nx, ny, nz = d.findNpc("Donatello")
+                if nx ~= nil then dx, dy, dz = nx, ny, nz end
+            end
+            if dist3(myX, myY, myZ, dx, dy, dz) > 12 then
+                if d.teleportTo then
+                    d.teleportTo(dx, dy + 1.5, dz + 4.5, dx, dy, dz)
+                end
+                self.statusText = "Идём к Donatello"
+                return
+            end
+
+            if now - self.lastStartAt >= 4.0 then
+                self.lastStartAt = now
+                if d.requestStart then
+                    d.requestStart(targetRaid, cfgDiff)
+                end
+            end
+            local meta = raid.META[targetRaid]
+            self.statusText = string.format("Вход: %s (%s)", meta and meta.label or targetRaid, cfgDiff)
+            return
+        end
+
+        -- ======================== INSIDE RAID ========================
+        if st.dead then
+            if self.drivingActive then
+                self.drivingActive = false
+                if d.releaseDrive then d.releaseDrive() end
+            end
+            if d.stopCombat then d.stopCombat() end
+            self.statusText = "Ожидание возрождения..."
+            return
+        end
+
+        local raidKind = st.raidKind or "Train"
+        local raidId = st.raidId
+        local obj = string.lower(tostring(st.objective or ""))
+        local stageTag = string.format("%s %d/%d",
+            (raid.META[raidKind] and raid.META[raidKind].label) or raidKind,
+            tonumber(st.stage or st.car) or 1,
+            tonumber(st.cars) or 3)
+
+        -- -------- HIGHWAY STAR STAGE 2: CHASE DRIVING --------
+        if raidKind == "HighwayStar" and (st.chase ~= nil or string.find(obj, "get away", 1, true) ~= nil) then
+            if d.stopCombat then d.stopCombat() end
+            local car = d.findRaidCar and d.findRaidCar(raidId) or nil
+            if car == nil then
+                self.statusText = stageTag .. " | ждём машину"
+                return
+            end
+            if not car.seatedInDriver then
+                if self.drivingActive then
+                    self.drivingActive = false
+                    if d.releaseDrive then d.releaseDrive() end
+                end
+                if car.seatedInAny and d.exitVehicle then
+                    d.exitVehicle()
+                elseif car.seatPrompt ~= nil then
+                    interactWithPrompt(car.seatPrompt, now, myX, myY, myZ, stageTag .. " | садимся за руль")
+                elseif d.teleportTo and car.x ~= nil then
+                    d.teleportTo(car.x, car.y + 2, car.z)
+                end
+                return
+            end
+
+            local originZ = (st.chase and st.chase.originZ) or 30000
+            local obstacles = d.findChaseObstacles and d.findChaseObstacles(raidId, car.model) or {}
+            local _, steer = raid.chooseChaseSteering(car.x, car.z, car.lookZ or 0, originZ, obstacles)
+            self.drivingActive = true
+            if d.driveChase then
+                d.driveChase(car.model, 1, steer)
+            end
+            local pct = 0
+            if st.chase and st.chase.start and st.chase.duration and st.chase.duration > 0 then
+                pct = math.clamp(math.floor(((serverNow - st.chase.start - (st.chase.setback or 0)) / st.chase.duration) * 100), 0, 100)
+            end
+            self.statusText = string.format("%s | Погоня %d%%", stageTag, pct)
+            return
+        end
+
+        -- Release driving keys whenever not in chase
+        if self.drivingActive then
+            self.drivingActive = false
+            if d.releaseDrive then d.releaseDrive() end
+        end
+
+        -- -------- HIGHWAY STAR: GET BACK TO CAR --------
+        if raidKind == "HighwayStar" and string.find(obj, "back to the car", 1, true) ~= nil then
+            if d.stopCombat then d.stopCombat() end
+            local car = d.findRaidCar and d.findRaidCar(raidId) or nil
+            if car ~= nil then
+                if car.seatedInDriver then
+                    self.statusText = stageTag .. " | в машине..."
+                    return
+                end
+                if car.seatedInAny and d.exitVehicle then
+                    d.exitVehicle()
+                    return
+                end
+                if car.seatPrompt ~= nil then
+                    interactWithPrompt(car.seatPrompt, now, myX, myY, myZ, stageTag .. " | к машине")
+                    return
+                end
+                if d.teleportTo and car.x ~= nil then
+                    d.teleportTo(car.x, car.y + 2, car.z)
+                end
+            end
+            self.statusText = stageTag .. " | к машине"
+            return
+        end
+
+        -- -------- 77 RINGS: COLD WARM-UP AT CAMPFIRE --------
+        if raidKind == "Rings" and type(st.coldRatio) == "number" then
+            if st.coldRatio >= 0.72 then
+                self.warmingUp = true
+            elseif st.coldRatio <= 0.25 then
+                self.warmingUp = false
+            end
+            if self.warmingUp and d.findNearestFire then
+                local fx, fy, fz = d.findNearestFire(raidId, myX, myY, myZ)
+                if fx ~= nil then
+                    if d.stopCombat then d.stopCombat() end
+                    if dist3(myX, myY, myZ, fx, fy, fz) > 6 and d.teleportTo then
+                        d.teleportTo(fx, fy + 2.2, fz + 2.5, fx, fy, fz)
+                    end
+                    self.statusText = string.format("%s | греемся (%d%%)", stageTag, math.floor(st.coldRatio * 100))
+                    return
+                end
+            end
+        end
+
+        -- -------- HIGHWAY STAR: HOSPITAL ELEVATOR --------
+        if raidKind == "HighwayStar" and string.find(obj, "elevator", 1, true) ~= nil then
+            local prompts = d.findRaidPrompts and d.findRaidPrompts(raidKind, raidId) or {}
+            local chosen = raid.pickPrompt(prompts, raidKind, st.objective, myX, myY, myZ, self.triedPrompts, now)
+            if chosen ~= nil then
+                interactWithPrompt(chosen, now, myX, myY, myZ, stageTag .. " | лифт")
+                return
+            end
+            if d.findRaidPart then
+                local ex, ey, ez = d.findRaidPart(raidKind, raidId, { "elevator", "lift" })
+                if ex ~= nil and d.teleportTo then
+                    if d.stopCombat then d.stopCombat() end
+                    d.teleportTo(ex, ey + 2.5, ez)
+                    self.statusText = stageTag .. " | к лифту"
+                    return
+                end
+            end
+        end
+
+        -- -------- HIGHWAY STAR: HOSPITAL FIND USER'S ROOM (DOORS BEFORE RANDOM FANS) --------
+        if raidKind == "HighwayStar" and string.find(obj, "user's room", 1, true) ~= nil then
+            local prompts = d.findRaidPrompts and d.findRaidPrompts(raidKind, raidId) or {}
+            local chosen = raid.pickPrompt(prompts, raidKind, st.objective, myX, myY, myZ, self.triedPrompts, now)
+            if chosen ~= nil then
+                interactWithPrompt(chosen, now, myX, myY, myZ, stageTag .. " | дверь комнаты")
+                return
+            end
+        end
+
+        -- -------- COMBAT: FIGHT ACTIVE RAID MOBS --------
+        local mobs = d.findRaidMobs and d.findRaidMobs(raidId) or {}
+        local targetMob = pickBestMob(mobs, myX, myY, myZ)
+        if targetMob ~= nil then
+            -- Train roof gantry dodge
+            if raidKind == "Train" and st.roofHazards ~= nil then
+                local danger, safeZ = raid.checkRoofHazard(st.roofHazards, myX, myY, myZ, serverNow)
+                if danger and d.teleportTo then
+                    if d.stopCombat then d.stopCombat() end
+                    d.teleportTo(myX, safeZ ~= nil and myY or (myY - 4.5), safeZ or myZ)
+                    self.statusText = stageTag .. " | уворот от балки"
+                    return
+                end
+            end
+            -- 77 Rings falling ice dodge
+            if raidKind == "Rings" and st.icefalls ~= nil then
+                local iceDanger, ix, iz = raid.checkIcefallHazard(st.icefalls, myX, myZ, serverNow)
+                if iceDanger and d.teleportTo then
+                    if d.stopCombat then d.stopCombat() end
+                    d.teleportTo(ix, myY, iz)
+                    self.statusText = stageTag .. " | уворот от льда"
+                    return
+                end
+            end
+
+            self.interact:stop()
+            if d.fightMob then
+                d.fightMob(targetMob, now)
+            end
+            local hpStr = targetMob.hp and string.format(" (%.0f HP)", targetMob.hp) or ""
+            self.statusText = string.format("%s | бой: %s%s", stageTag, tostring(targetMob.name or "mob"), hpStr)
+            return
+        end
+
+        if d.stopCombat then d.stopCombat() end
+
+        -- -------- 77 RINGS: MOVE TO UNSTREAMED ENCOUNTER TARGETS --------
+        if raidKind == "Rings" and type(st.encounterTargets) == "table" and #st.encounterTargets > 0 then
+            local bestT, bestD = nil, 1e18
+            for _, et in ipairs(st.encounterTargets) do
+                if et.x ~= nil then
+                    local dd = dist3(myX, myY, myZ, et.x, et.y, et.z)
+                    if dd < bestD then
+                        bestD = dd
+                        bestT = et
+                    end
+                end
+            end
+            if bestT ~= nil and d.teleportTo then
+                d.teleportTo(bestT.x, bestT.y + 3, bestT.z)
+                self.statusText = stageTag .. " | к рыцарю " .. tostring(bestT.name or "")
+                return
+            end
+        end
+
+        -- -------- INTERACT WITH PROGRESSION PROMPTS (DOORS / PURSE / PASSENGERS / RINGS) --------
+        local prompts = d.findRaidPrompts and d.findRaidPrompts(raidKind, raidId) or {}
+        local chosen = raid.pickPrompt(prompts, raidKind, st.objective, myX, myY, myZ, self.triedPrompts, now)
+        if chosen ~= nil then
+            interactWithPrompt(chosen, now, myX, myY, myZ, stageTag .. " | " .. tostring(chosen.action ~= "" and chosen.action or chosen.name))
+            return
+        end
+
+        -- -------- HIGHWAY STAR STAGE 1: TUNNEL WALK-IN TRIGGER --------
+        if raidKind == "HighwayStar" and (string.find(obj, "tunnel", 1, true) ~= nil or string.find(obj, "civilian", 1, true) ~= nil) then
+            -- Exit car if seated so we can TP straight to tunnel wall / hidden room
+            local car = d.findRaidCar and d.findRaidCar(raidId) or nil
+            if car ~= nil and car.seatedInAny and d.exitVehicle then
+                d.exitVehicle()
+                self.statusText = stageTag .. " | выходим из машины"
+                return
+            end
+            if d.findRaidPart then
+                local rx, ry, rz = d.findRaidPart(raidKind, raidId, { "civilian", "room", "door", "trigger" })
+                if rx ~= nil and d.teleportTo then
+                    d.teleportTo(rx, ry + 2.5, rz)
+                    self.statusText = stageTag .. " | к комнате в туннеле"
+                    return
+                end
+            end
+            -- Waypoint sweep relative to initial tunnel spawn
+            if self.tunnelOrigin == nil then
+                self.tunnelOrigin = { x = myX, y = myY, z = myZ }
+                self.tunnelWpIdx = 1
+                self.tunnelWpAt = now
+            end
+            local wp = TUNNEL_WAYPOINTS[self.tunnelWpIdx]
+            if wp ~= nil and d.teleportTo then
+                local tx = self.tunnelOrigin.x + wp.dx
+                local ty = self.tunnelOrigin.y + wp.dy
+                local tz = self.tunnelOrigin.z + wp.dz
+                d.teleportTo(tx, ty, tz)
+                if now - self.tunnelWpAt >= 1.6 then
+                    self.tunnelWpAt = now
+                    self.tunnelWpIdx = (self.tunnelWpIdx % #TUNNEL_WAYPOINTS) + 1
+                end
+            end
+            self.statusText = stageTag .. " | поиск комнаты в туннеле"
+            return
+        end
+
+        -- -------- GENERIC FALLBACK: ADVANCE TO GATE / EXIT / NEXT ZONE --------
+        if d.findRaidPart then
+            local gx, gy, gz = d.findRaidPart(raidKind, raidId, { "next", "exit", "portal", "gate", "door", "goal", "finish", "checkpoint" })
+            if gx ~= nil and dist3(myX, myY, myZ, gx, gy, gz) > 8 and d.teleportTo then
+                d.teleportTo(gx, gy + 2.5, gz)
+                self.statusText = stageTag .. " | переход"
+                return
+            end
+        end
+
+        self.statusText = stageTag .. (st.objective ~= "" and (" | " .. tostring(st.objective)) or " | ожидание")
+    end
+
+    return self
+end
+
+return raid
+end
+
+__modules["stand_out_raid_bridge"] = function(require)
+-- Roblox runtime adapter for stand_out_raid.
+-- Subscribes passively to TrainRaid / Lockpicking remotes and bridges workspace/VIM/combat
+-- without adding locals to main.start().
+local stand_out_bounty = require("./stand_out_bounty")
+local stand_out_mobs = require("./stand_out_mobs")
+
+local bridge = {}
+
+local function safePos(obj)
+    if obj == nil then return nil, nil, nil end
+    local ok, p = pcall(function()
+        if obj:IsA("BasePart") then return obj.Position end
+        if obj:IsA("Model") then
+            local hrp = obj:FindFirstChild("HumanoidRootPart") or obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart", true)
+            return hrp and hrp.Position or nil
+        end
+        local bp = obj:FindFirstChildWhichIsA("BasePart", true)
+        return bp and bp.Position or nil
+    end)
+    if ok and p ~= nil then
+        return p.X, p.Y, p.Z
+    end
+    return nil, nil, nil
+end
+
+local function findRaidContainer(workspace, raidKind, raidId)
+    local gf = workspace:FindFirstChild("Game")
+    local map = gf and gf:FindFirstChild("Map")
+    if map == nil then return nil end
+
+    if type(raidId) == "string" and raidId ~= "" then
+        local prefixes = {
+            HighwayStar = "HighwayStarRaid_",
+            Rings = "RingsRaid_",
+            Train = "TrainRaid_",
+        }
+        local pref = prefixes[raidKind]
+        if pref ~= nil then
+            local exact = map:FindFirstChild(pref .. raidId)
+            if exact ~= nil then return exact end
+        end
+        for _, ch in map:GetChildren() do
+            if string.find(ch.Name, raidId, 1, true) ~= nil then
+                return ch
+            end
+        end
+    end
+
+    for _, ch in map:GetChildren() do
+        local nl = string.lower(ch.Name)
+        if string.find(nl, "raid_", 1, true) ~= nil then
+            return ch
+        end
+    end
+    return nil
+end
+
+local function modelHasPlayingSound(parent)
+    if parent == nil then return false end
+    local cur = parent
+    for _ = 1, 3 do
+        if cur == nil then break end
+        local ok, found = pcall(function()
+            for _, d in cur:GetDescendants() do
+                if d:IsA("Sound") and d.IsPlaying then
+                    return true
+                end
+            end
+            return false
+        end)
+        if ok and found then return true end
+        cur = cur.Parent
+    end
+    return false
+end
+
+function bridge.create(ctx)
+    local game = ctx.game
+    local workspace = ctx.workspace
+    local Players = ctx.Players
+    local localPlayer = ctx.localPlayer
+    local env = ctx.env
+    local handle = ctx.handle
+    local connections = ctx.connections
+
+    -- Live remote state captured from passive OnClientEvent listeners
+    local live = {
+        active = false,
+        raidId = nil,
+        raidKind = nil,
+        stage = 1,
+        car = 1,
+        cars = 3,
+        carTitle = "",
+        objective = "",
+        progress = "",
+        boss = nil,
+        chase = nil,
+        encounterTargets = nil,
+        roofHazards = nil,
+        dead = false,
+        lives = nil,
+        boardCooldowns = {},
+        readyPending = false,
+        readyExpires = 0,
+        results = nil,
+        latch = nil,
+        purse = nil,
+        suspect = nil,
+        chainActive = false,
+        climbGuide = false,
+        icefalls = {},
+        lockpick = nil,
+    }
+
+    local trainRem = nil
+    local fastRem = nil
+    local lockRem = nil
+
+    local function resolveRemotes()
+        local rs = game:GetService("ReplicatedStorage")
+        local rems = rs and rs:FindFirstChild("Remotes")
+        if rems == nil then return end
+        if trainRem == nil then trainRem = rems:FindFirstChild("TrainRaid") end
+        if fastRem == nil then fastRem = rems:FindFirstChild("TrainRaidFast") end
+        if lockRem == nil then lockRem = rems:FindFirstChild("Lockpicking") end
+    end
+
+    local function serverNow()
+        local ok, t = pcall(function() return workspace:GetServerTimeNow() end)
+        if ok and type(t) == "number" then
+            return t
+        end
+        return os.time()
+    end
+
+    -- Passive listener for TrainRaid & Lockpicking server events
+    local function attachListeners()
+        resolveRemotes()
+        if trainRem ~= nil and trainRem.OnClientEvent ~= nil then
+            pcall(function()
+                local conn = trainRem.OnClientEvent:Connect(function(cmd, payload)
+                    if cmd == "State" and type(payload) == "table" then
+                        live.active = payload.Active == true
+                        live.raidId = payload.Id
+                        live.raidKind = payload.Raid or live.raidKind
+                        live.stage = payload.Stage or payload.Car or 1
+                        live.car = payload.Car or payload.Stage or 1
+                        live.cars = payload.Cars or 3
+                        live.carTitle = tostring(payload.CarTitle or "")
+                        live.objective = tostring(payload.Objective or "")
+                        live.progress = tostring(payload.Progress or "")
+                        live.boss = payload.Boss
+                        live.dead = payload.Dead == true
+                        live.lives = payload.Lives
+                        live.roofHazards = payload.RoofHazards
+                        live.climbGuide = type(payload.ClimbGuide) == "table" and payload.ClimbGuide.Seen ~= true
+                        if type(payload.Chase) == "table" and payload.Chase.Start ~= nil then
+                            live.chase = {
+                                start = payload.Chase.Start,
+                                duration = payload.Chase.Duration or 71,
+                                setback = payload.Chase.Setback or 0,
+                                originZ = payload.Chase.Origin and payload.Chase.Origin.Z or 30000,
+                                car = payload.Chase.Car,
+                            }
+                        elseif not live.active or (payload.Stage ~= 2 and payload.Chase == nil) then
+                            live.chase = nil
+                        end
+                        if type(payload.EncounterTargets) == "table" then
+                            local list = {}
+                            for _, t in ipairs(payload.EncounterTargets) do
+                                if type(t) == "table" and t.Position ~= nil then
+                                    table.insert(list, {
+                                        name = t.Name,
+                                        x = t.Position.X,
+                                        y = t.Position.Y,
+                                        z = t.Position.Z,
+                                    })
+                                end
+                            end
+                            live.encounterTargets = list
+                        else
+                            live.encounterTargets = nil
+                        end
+                        if not live.active then
+                            live.latch = nil
+                            live.purse = nil
+                            live.suspect = nil
+                            live.chainActive = false
+                            live.chase = nil
+                            live.icefalls = {}
+                        end
+                    elseif cmd == "Board" and type(payload) == "table" then
+                        local uid = localPlayer and localPlayer.UserId
+                        if type(payload.Members) == "table" then
+                            for _, m in ipairs(payload.Members) do
+                                if type(m) == "table" and (uid == nil or m.UserId == uid) then
+                                    if type(m.Cooldowns) == "table" then
+                                        for rk, cds in pairs(m.Cooldowns) do
+                                            if type(cds) == "table" then
+                                                live.boardCooldowns[rk] = {
+                                                    Regular = tonumber(cds.Regular) or 0,
+                                                    Hard = tonumber(cds.Hard) or 0,
+                                                }
+                                            end
+                                        end
+                                    elseif type(payload.Raid) == "string" then
+                                        live.boardCooldowns[payload.Raid] = {
+                                            Regular = tonumber(m.Regular) or 0,
+                                            Hard = tonumber(m.Hard) or 0,
+                                        }
+                                    end
+                                end
+                            end
+                        end
+                    elseif cmd == "Ready" and type(payload) == "table" then
+                        live.readyPending = true
+                        live.readyExpires = tonumber(payload.Expires) or (serverNow() + 15)
+                    elseif cmd == "Results" and type(payload) == "table" then
+                        live.results = {
+                            cleared = payload.Cleared == true,
+                            raid = payload.Raid,
+                            difficulty = payload.Difficulty,
+                            time = payload.Time,
+                            id = live.raidId or tostring(payload.Time or os.time()),
+                        }
+                        live.active = false
+                    elseif cmd == "Latch" and type(payload) == "table" then
+                        local cnt = tonumber(payload.Count) or 0
+                        if cnt > 0 then
+                            live.latch = { count = cnt, hold = tonumber(payload.Hold) or 0.6 }
+                        else
+                            live.latch = nil
+                        end
+                    elseif cmd == "ChaseStart" and type(payload) == "table" then
+                        live.chase = {
+                            start = payload.Start or serverNow(),
+                            duration = payload.Duration or 71,
+                            setback = payload.Setback or 0,
+                            originZ = payload.Origin and payload.Origin.Z or 30000,
+                            car = payload.Car,
+                        }
+                    elseif cmd == "ChaseEnd" then
+                        live.chase = nil
+                    elseif (cmd == "Crash" or cmd == "Bump") and type(payload) == "table" and live.chase ~= nil then
+                        if payload.Setback ~= nil then
+                            live.chase.setback = tonumber(payload.Setback) or live.chase.setback
+                        end
+                    elseif cmd == "Purse" and type(payload) == "table" and type(payload.Token) == "string" then
+                        live.purse = { token = payload.Token }
+                    elseif cmd == "PurseResult" then
+                        live.purse = nil
+                    elseif cmd == "Suspect" and type(payload) == "table" then
+                        live.suspect = {
+                            index = payload.Index,
+                            token = payload.Token,
+                            title = payload.Title,
+                            line = payload.Line,
+                            note = payload.Note,
+                            questions = payload.Questions,
+                            noAccuse = payload.NoAccuse == true,
+                        }
+                    elseif cmd == "CloseInvestigation" then
+                        live.suspect = nil
+                    elseif cmd == "RingsChain" and type(payload) == "table" then
+                        live.chainActive = payload.On == true
+                    elseif cmd == "RingsIcefall" and type(payload) == "table" and payload.Position ~= nil then
+                        local at = tonumber(payload.At)
+                        if at ~= nil then
+                            table.insert(live.icefalls, {
+                                x = payload.Position.X,
+                                y = payload.Position.Y,
+                                z = payload.Position.Z,
+                                size = tonumber(payload.Size) or 9,
+                                at = at,
+                            })
+                            if #live.icefalls > 24 then
+                                table.remove(live.icefalls, 1)
+                            end
+                        end
+                    end
+                end)
+                if connections ~= nil then
+                    table.insert(connections, conn)
+                end
+            end)
+        end
+
+        if lockRem ~= nil and lockRem.OnClientEvent ~= nil then
+            pcall(function()
+                local conn = lockRem.OnClientEvent:Connect(function(cmd, a, b)
+                    if cmd == "Start" and type(a) == "table" then
+                        live.lockpick = { active = true, id = a.Id, allowance = nil }
+                    elseif (cmd == "Turn" or cmd == "Allowance") and live.lockpick ~= nil then
+                        local allow = type(a) == "number" and a or (type(b) == "number" and b or (type(a) == "table" and tonumber(a.Allowance)))
+                        if allow ~= nil then
+                            live.lockpick.allowance = allow
+                        end
+                    elseif cmd == "Opened" or cmd == "End" or cmd == "Stop" or cmd == "Failed" or cmd == "Close" then
+                        live.lockpick = nil
+                    end
+                end)
+                if connections ~= nil then
+                    table.insert(connections, conn)
+                end
+            end)
+        end
+    end
+
+    attachListeners()
+    -- Request initial state if already inside a raid when script loads
+    pcall(function()
+        if trainRem ~= nil then
+            trainRem:FireServer("State", nil)
+        end
+    end)
+
+    -- Driving key state (for Highway Star Stage 2 chase)
+    local heldDrive = { W = false, A = false, D = false }
+    local function setDriveKey(keyName, down)
+        if heldDrive[keyName] == down then return end
+        heldDrive[keyName] = down
+        local vim = env.virtualInputManager
+        local kc = env.Enum and env.Enum.KeyCode and env.Enum.KeyCode[keyName]
+        if vim ~= nil and kc ~= nil then
+            pcall(function() vim:SendKeyEvent(down, kc, false, game) end)
+        end
+    end
+
+    local function releaseDrive()
+        setDriveKey("W", false)
+        setDriveKey("A", false)
+        setDriveKey("D", false)
+    end
+
+    local function promptKeyCode(prompt)
+        local kc = nil
+        pcall(function() kc = prompt.KeyboardKeyCode end)
+        if kc == nil and env.Enum and env.Enum.KeyCode then
+            kc = env.Enum.KeyCode.H
+        end
+        return kc
+    end
+
+    local function fireClick(cd)
+        if cd ~= nil and type(env.fireclickdetector) == "function" then
+            pcall(env.fireclickdetector, cd)
+        end
+    end
+
+    local function fireAnyPrompt(prompt)
+        if prompt == nil then return end
+        local isCd = false
+        pcall(function() isCd = prompt:IsA("ClickDetector") end)
+        if isCd then
+            fireClick(prompt)
+            return
+        end
+        pcall(function() prompt.RequiresLineOfSight = false end)
+        if type(env.fireproximityprompt) == "function" then
+            pcall(env.fireproximityprompt, prompt)
+        end
+    end
+
+    local function holdPromptBegin(prompt, _)
+        if prompt == nil then return end
+        pcall(function() prompt.RequiresLineOfSight = false end)
+        pcall(function() prompt:InputHoldBegin() end)
+        local vim = env.virtualInputManager
+        local kc = promptKeyCode(prompt)
+        if vim ~= nil and kc ~= nil then
+            pcall(function() vim:SendKeyEvent(true, kc, false, game) end)
+        end
+    end
+
+    local function holdPromptEnd(prompt)
+        if prompt == nil then return end
+        pcall(function() prompt:InputHoldEnd() end)
+        local vim = env.virtualInputManager
+        local kc = promptKeyCode(prompt)
+        if vim ~= nil and kc ~= nil then
+            pcall(function() vim:SendKeyEvent(false, kc, false, game) end)
+        end
+    end
+
+    local function pulsePrompt(prompt)
+        if prompt == nil then return end
+        holdPromptBegin(prompt, 0)
+        if env.task and env.task.delay then
+            env.task.delay(0.08, function()
+                holdPromptEnd(prompt)
+            end)
+        else
+            holdPromptEnd(prompt)
+        end
+    end
+
+    return {
+        readRaidState = function()
+            local attrActive = false
+            local attrKind = nil
+            local hasAccess = true
+            local level = 0
+            local cdJson = ""
+            local coldRatio = nil
+
+            pcall(function()
+                attrActive = localPlayer:GetAttribute("TrainRaidActive") == true
+                attrKind = localPlayer:GetAttribute("TrainRaidKind")
+                local acc = localPlayer:GetAttribute("HasTrainRaidAccess")
+                if acc ~= nil then hasAccess = acc == true end
+                local data = localPlayer:FindFirstChild("Data")
+                local stats = data and data:FindFirstChild("Stats")
+                local lv = stats and stats:FindFirstChild("Level")
+                if lv ~= nil then level = tonumber(lv.Value) or 0 end
+                local cd = stats and stats:FindFirstChild("TrainRaidCooldowns")
+                if cd ~= nil then cdJson = tostring(cd.Value or "") end
+            end)
+
+            -- Read cold meter attribute (77 Rings) if present on player or character
+            pcall(function()
+                local targets = { localPlayer, localPlayer.Character }
+                for _, obj in ipairs(targets) do
+                    if obj ~= nil then
+                        for k, v in pairs(obj:GetAttributes()) do
+                            if type(v) == "number" then
+                                local kl = string.lower(k)
+                                if string.find(kl, "cold", 1, true) ~= nil or string.find(kl, "frost", 1, true) ~= nil or string.find(kl, "chill", 1, true) ~= nil then
+                                    coldRatio = (v > 1.5) and (v / 100) or v
+                                    break
+                                end
+                            end
+                        end
+                    end
+                    if coldRatio ~= nil then break end
+                end
+            end)
+
+            -- Fallback: read objective text from PlayerGui.TrainRaid.Tracker if State packet hasn't arrived yet
+            local objective = live.objective
+            if attrActive and (objective == nil or objective == "") then
+                pcall(function()
+                    local pg = localPlayer:FindFirstChildOfClass("PlayerGui")
+                    local tr = pg and pg:FindFirstChild("TrainRaid")
+                    local trk = tr and tr:FindFirstChild("Tracker")
+                    local alt = trk and trk:FindFirstChild("TitleAlt")
+                    local lbl = alt and alt:FindFirstChildWhichIsA("TextLabel", true)
+                    if lbl ~= nil and type(lbl.Text) == "string" then
+                        objective = lbl.Text
+                    end
+                end)
+            end
+
+            -- Expire readyPending after timer
+            local sNow = serverNow()
+            if live.readyPending and sNow > live.readyExpires then
+                live.readyPending = false
+            end
+
+            -- Prune expired icefalls
+            if #live.icefalls > 0 then
+                for i = #live.icefalls, 1, -1 do
+                    if live.icefalls[i].at < sNow - 0.5 then
+                        table.remove(live.icefalls, i)
+                    end
+                end
+            end
+
+            -- Clear lockpick if GUI disappeared
+            if live.lockpick ~= nil then
+                local lpGui = nil
+                pcall(function()
+                    local pg = localPlayer:FindFirstChildOfClass("PlayerGui")
+                    lpGui = pg and pg:FindFirstChild("Lockpicking")
+                end)
+                if lpGui == nil then
+                    live.lockpick = nil
+                end
+            end
+
+            return {
+                inRaid = live.active or attrActive,
+                raidKind = live.raidKind or attrKind,
+                raidId = live.raidId,
+                stage = live.stage,
+                car = live.car,
+                cars = live.cars,
+                carTitle = live.carTitle,
+                objective = objective or "",
+                progress = live.progress,
+                boss = live.boss,
+                chase = live.chase,
+                encounterTargets = live.encounterTargets,
+                roofHazards = live.roofHazards,
+                dead = live.dead,
+                lives = live.lives,
+                hasAccess = hasAccess,
+                level = level,
+                cooldownsJson = cdJson,
+                boardCooldowns = live.boardCooldowns,
+                readyPending = live.readyPending,
+                results = live.results,
+                latch = live.latch,
+                purse = live.purse,
+                suspect = live.suspect,
+                chainActive = live.chainActive,
+                climbGuide = live.climbGuide,
+                icefalls = live.icefalls,
+                coldRatio = coldRatio,
+                lockpick = live.lockpick,
+                serverNow = sNow,
+            }
+        end,
+
+        requestBoard = function(raidKey)
+            resolveRemotes()
+            if trainRem ~= nil then
+                pcall(function() trainRem:FireServer("OpenBoard", { Raid = raidKey }) end)
+            end
+        end,
+
+        requestStart = function(raidKey, difficulty)
+            resolveRemotes()
+            if trainRem ~= nil then
+                pcall(function()
+                    trainRem:FireServer("Start", { Raid = raidKey, Difficulty = difficulty or "Regular" })
+                end)
+            end
+        end,
+
+        sendReady = function(accept)
+            live.readyPending = false
+            resolveRemotes()
+            if trainRem ~= nil then
+                pcall(function() trainRem:FireServer("Ready", { Accept = accept == true }) end)
+            end
+        end,
+
+        playAction = function(action, payload)
+            resolveRemotes()
+            if trainRem ~= nil then
+                local body = type(payload) == "table" and table.clone(payload) or {}
+                body.Action = action
+                pcall(function() trainRem:FireServer("Play", body) end)
+            end
+        end,
+
+        fastAction = function(action, payload)
+            resolveRemotes()
+            if fastRem ~= nil then
+                pcall(function() fastRem:FireServer(action, payload or {}) end)
+            end
+        end,
+
+        fireTrainRaid = function(cmd, payload)
+            resolveRemotes()
+            if trainRem ~= nil then
+                pcall(function() trainRem:FireServer(cmd, payload) end)
+            end
+        end,
+
+        lockpickTurn = function(id, angle)
+            resolveRemotes()
+            if live.lockpick ~= nil then
+                live.lockpick.allowance = nil
+            end
+            if lockRem ~= nil then
+                pcall(function() lockRem:FireServer("Turn", id, angle) end)
+            end
+        end,
+
+        lockpickRelease = function(id)
+            resolveRemotes()
+            if lockRem ~= nil then
+                pcall(function() lockRem:FireServer("Release", id) end)
+            end
+        end,
+
+        teleportTo = function(x, y, z, lookX, lookY, lookZ)
+            local ch = localPlayer and localPlayer.Character
+            local root = ch and ch:FindFirstChild("HumanoidRootPart")
+            if root ~= nil then
+                if lookX ~= nil and lookY ~= nil and lookZ ~= nil and env.CFrame.lookAt ~= nil then
+                    local pos = env.Vector3.new(x, y, z)
+                    local flat = env.Vector3.new(lookX, y, lookZ)
+                    if (flat - pos).Magnitude > 0.05 then
+                        root.CFrame = env.CFrame.lookAt(pos, flat)
+                    else
+                        root.CFrame = env.CFrame.new(x, y, z)
+                    end
+                else
+                    root.CFrame = env.CFrame.new(x, y, z)
+                end
+                root.AssemblyLinearVelocity = env.Vector3.new(0, 0, 0)
+            end
+        end,
+
+        findNpc = function(name)
+            local gf = workspace:FindFirstChild("Game")
+            local npcs = gf and gf:FindFirstChild("NPCs")
+            local npc = npcs and npcs:FindFirstChild(name)
+            if npc == nil then return nil, nil, nil end
+            return safePos(npc)
+        end,
+
+        findRaidMobs = function(raidId)
+            local out = {}
+            local gf = workspace:FindFirstChild("Game")
+            local pf = gf and gf:FindFirstChild("Players")
+            if pf == nil then return out end
+            local pNames = {}
+            for _, pl in Players:GetPlayers() do
+                pNames[pl.Name] = true
+            end
+            for _, m in pf:GetChildren() do
+                if not pNames[m.Name] and m:IsA("Model") then
+                    local ok, entry = pcall(function()
+                        if m:GetAttribute("FightableNPC") ~= true then return nil end
+                        if m:GetAttribute("TrainRaidDormant") == true then return nil end
+                        local rNpc = m:GetAttribute("TrainRaidNPC")
+                        if raidId ~= nil and rNpc ~= nil and rNpc ~= raidId then return nil end
+                        local hrp = m:FindFirstChild("HumanoidRootPart") or m.PrimaryPart
+                        if hrp == nil then return nil end
+                        if rNpc == nil and hrp.Position.Y < 5000 then return nil end
+                        local hum = m:FindFirstChildOfClass("Humanoid")
+                        if hum == nil or hum.Health <= 0 then return nil end
+                        -- Skip mobs frozen at StoryHealthFloor while waiting
+                        if m:GetAttribute("StoryCombatWaiting") == true and hum.Health <= (tonumber(m:GetAttribute("StoryHealthFloor")) or 1) + 0.5 then
+                            return nil
+                        end
+                        local p = hrp.Position
+                        return {
+                            model = m,
+                            name = m.Name,
+                            x = p.X,
+                            y = p.Y,
+                            z = p.Z,
+                            hp = hum.Health,
+                            maxHp = hum.MaxHealth,
+                            isBoss = m:GetAttribute("TrainRaidBoss") == true or m:GetAttribute("BossNPC") == true,
+                        }
+                    end)
+                    if ok and entry ~= nil then
+                        table.insert(out, entry)
+                    end
+                end
+            end
+            return out
+        end,
+
+        findRaidPrompts = function(raidKind, raidId)
+            local out = {}
+            local container = findRaidContainer(workspace, raidKind, raidId)
+            if container == nil then return out end
+            local uidKey = "Claimed_" .. tostring(localPlayer and localPlayer.UserId or 0)
+            pcall(function()
+                for _, d in container:GetDescendants() do
+                    if d:IsA("ProximityPrompt") and d.Enabled == true then
+                        local claimed = false
+                        local cur = d.Parent
+                        for _ = 1, 3 do
+                            if cur == nil then break end
+                            if cur:GetAttribute(uidKey) == true then
+                                claimed = true
+                                break
+                            end
+                            cur = cur.Parent
+                        end
+                        local x, y, z = stand_out_bounty.promptPosition(d)
+                        if x ~= nil then
+                            table.insert(out, {
+                                obj = d,
+                                key = d:GetFullName(),
+                                name = d.Name,
+                                action = tostring(d.ActionText or ""),
+                                objectText = tostring(d.ObjectText or ""),
+                                path = d:GetFullName(),
+                                x = x,
+                                y = y,
+                                z = z,
+                                enabled = true,
+                                hold = tonumber(d.HoldDuration) or 0,
+                                maxDist = tonumber(d.MaxActivationDistance) or 8,
+                                hasSound = modelHasPlayingSound(d.Parent),
+                                claimed = claimed,
+                            })
+                        end
+                    end
+                end
+            end)
+            return out
+        end,
+
+        findRaidPart = function(raidKind, raidId, keywords)
+            local container = findRaidContainer(workspace, raidKind, raidId)
+            if container == nil or type(keywords) ~= "table" then return nil, nil, nil end
+            local foundX, foundY, foundZ = nil, nil, nil
+            pcall(function()
+                for _, d in container:GetDescendants() do
+                    if d:IsA("BasePart") or d:IsA("Model") then
+                        local nl = string.lower(d.Name)
+                        for _, kw in ipairs(keywords) do
+                            if string.find(nl, kw, 1, true) ~= nil then
+                                local x, y, z = safePos(d)
+                                if x ~= nil then
+                                    foundX, foundY, foundZ = x, y, z
+                                    return
+                                end
+                            end
+                        end
+                    end
+                end
+            end)
+            return foundX, foundY, foundZ
+        end,
+
+        findRaidCar = function(raidId)
+            local gf = workspace:FindFirstChild("Game")
+            local vf = gf and gf:FindFirstChild("Vehicles")
+            if vf == nil then return nil end
+
+            local ch = localPlayer and localPlayer.Character
+            local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+            local curSeat = hum and hum.SeatPart or nil
+
+            local car = live.chase and live.chase.car or nil
+            if car == nil or car.Parent == nil then
+                car = nil
+                for _, v in vf:GetChildren() do
+                    local okAttr, attr = pcall(function() return v:GetAttribute("HighwayRaidCar") end)
+                    if okAttr and attr ~= nil and (raidId == nil or attr == raidId) then
+                        car = v
+                        break
+                    end
+                end
+            end
+            if car == nil then return nil end
+
+            local x, y, z = safePos(car)
+            local lookZ = 0
+            pcall(function()
+                local pp = car.PrimaryPart or car:FindFirstChildWhichIsA("BasePart", true)
+                if pp ~= nil then
+                    lookZ = pp.CFrame.LookVector.Z
+                end
+            end)
+
+            local seatPrompt = nil
+            local driverSeat = car:FindFirstChild("DriverSeat", true) or car:FindFirstChildWhichIsA("VehicleSeat", true)
+            if driverSeat ~= nil then
+                pcall(function()
+                    for _, d in driverSeat:GetDescendants() do
+                        if d:IsA("ProximityPrompt") and d.Enabled then
+                            local px, py, pz = stand_out_bounty.promptPosition(d)
+                            seatPrompt = {
+                                obj = d,
+                                key = d:GetFullName(),
+                                name = d.Name,
+                                action = tostring(d.ActionText or "Drive"),
+                                objectText = tostring(d.ObjectText or ""),
+                                x = px or x,
+                                y = py or y,
+                                z = pz or z,
+                                enabled = true,
+                                hold = tonumber(d.HoldDuration) or 0.25,
+                                maxDist = tonumber(d.MaxActivationDistance) or 10,
+                            }
+                            break
+                        end
+                    end
+                end)
+            end
+            if seatPrompt == nil then
+                pcall(function()
+                    for _, d in car:GetDescendants() do
+                        if d:IsA("ProximityPrompt") and d.Enabled then
+                            local px, py, pz = stand_out_bounty.promptPosition(d)
+                            seatPrompt = {
+                                obj = d,
+                                key = d:GetFullName(),
+                                name = d.Name,
+                                action = tostring(d.ActionText or ""),
+                                objectText = tostring(d.ObjectText or ""),
+                                x = px or x,
+                                y = py or y,
+                                z = pz or z,
+                                enabled = true,
+                                hold = tonumber(d.HoldDuration) or 0.25,
+                                maxDist = tonumber(d.MaxActivationDistance) or 10,
+                            }
+                            break
+                        end
+                    end
+                end)
+            end
+
+            return {
+                model = car,
+                x = x,
+                y = y,
+                z = z,
+                lookZ = lookZ,
+                seatPrompt = seatPrompt,
+                seatedInDriver = curSeat ~= nil and curSeat == driverSeat,
+                seatedInAny = curSeat ~= nil and curSeat:IsDescendantOf(car),
+            }
+        end,
+
+        findChaseObstacles = function(raidId, carModel)
+            local obs = {}
+            local gf = workspace:FindFirstChild("Game")
+            local vf = gf and gf:FindFirstChild("Vehicles")
+            if vf ~= nil then
+                for _, v in vf:GetChildren() do
+                    if v ~= carModel then
+                        local x, y, z = safePos(v)
+                        if x ~= nil and y > 20000 then
+                            table.insert(obs, { x = x, z = z, radius = 6.2 })
+                        end
+                    end
+                end
+            end
+            local container = findRaidContainer(workspace, "HighwayStar", raidId)
+            if container ~= nil then
+                pcall(function()
+                    for _, d in container:GetDescendants() do
+                        if d:IsA("BasePart") then
+                            local nl = string.lower(d.Name)
+                            if string.find(nl, "pothole", 1, true) ~= nil or string.find(nl, "hole", 1, true) ~= nil or string.find(nl, "cone", 1, true) ~= nil or string.find(nl, "barrier", 1, true) ~= nil then
+                                local p = d.Position
+                                table.insert(obs, {
+                                    x = p.X,
+                                    z = p.Z,
+                                    radius = math.max(d.Size.X, d.Size.Z) * 0.5 + 1.5,
+                                })
+                            end
+                        end
+                    end
+                end)
+            end
+            return obs
+        end,
+
+        findNearestFire = function(raidId, myX, myY, myZ)
+            local container = findRaidContainer(workspace, "Rings", raidId)
+            if container == nil then return nil, nil, nil end
+            local bx, by, bz, bestD = nil, nil, nil, 1e18
+            pcall(function()
+                for _, d in container:GetDescendants() do
+                    if d.Name == "Campfire" or d.Name == "Brazier" then
+                        local x, y, z = safePos(d)
+                        if x ~= nil then
+                            local dd = math.sqrt((x - myX) ^ 2 + (y - myY) ^ 2 + (z - myZ) ^ 2)
+                            if dd < bestD then
+                                bx, by, bz, bestD = x, y, z, dd
+                            end
+                        end
+                    end
+                end
+            end)
+            return bx, by, bz
+        end,
+
+        driveChase = function(_, throttle, steer)
+            setDriveKey("W", (throttle or 0) > 0)
+            setDriveKey("A", (steer or 0) < 0)
+            setDriveKey("D", (steer or 0) > 0)
+        end,
+
+        releaseDrive = releaseDrive,
+
+        exitVehicle = function()
+            local ch = localPlayer and localPlayer.Character
+            local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+            if hum ~= nil then
+                pcall(function()
+                    hum.Sit = false
+                    hum.Jump = true
+                end)
+            end
+        end,
+
+        fightMob = function(mob, now)
+            local soMob = handle._soMob
+            local cfg = ctx.getMobConfig ~= nil and ctx.getMobConfig() or nil
+            if soMob.farmer == nil or mob == nil or cfg == nil then return end
+            local ch = localPlayer and localPlayer.Character
+            local root = ch and ch:FindFirstChild("HumanoidRootPart")
+            local lx, ly, lz = 0, 0, 0
+            if root ~= nil then
+                local p = root.Position
+                lx, ly, lz = p.X, p.Y, p.Z
+            end
+            -- Wrap raid mob into stand_out_mobs entry format
+            local entry = {
+                model = mob.model,
+                name = mob.name,
+                boss = mob.isBoss == true,
+            }
+            soMob.farmer:update(now, { entry }, cfg, lx, ly, lz)
+        end,
+
+        stopCombat = function()
+            if handle._soMob.farmer ~= nil then
+                pcall(function() handle._soMob.farmer:stop() end)
+            end
+        end,
+
+        closeDialogue = function()
+            local gReq = env.gameRequire
+            if type(gReq) ~= "function" then return end
+            local run = function()
+                pcall(function()
+                    local rs = game:GetService("ReplicatedStorage")
+                    local mods = rs and rs:FindFirstChild("Modules")
+                    local dm = mods and mods:FindFirstChild("Dialogue")
+                    if dm ~= nil then
+                        local m = gReq(dm)
+                        if type(m) == "table" and type(m.closeDialogue) == "function" then
+                            m.closeDialogue()
+                        end
+                    end
+                end)
+            end
+            if env.task and env.task.spawn then
+                env.task.spawn(run)
+            else
+                run()
+            end
+        end,
+
+        firePrompt = fireAnyPrompt,
+        fireClick = fireClick,
+        holdPromptBegin = holdPromptBegin,
+        holdPromptEnd = holdPromptEnd,
+        pulsePrompt = pulsePrompt,
+    }
+end
+
+return bridge
 end
 
 __modules["stand_out_story"] = function(require)
