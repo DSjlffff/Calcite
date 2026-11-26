@@ -21714,10 +21714,28 @@ function raid.new(deps)
         local raidKind = st.raidKind or "Train"
         local raidId = st.raidId
         local obj = string.lower(tostring(st.objective or ""))
+        local stageNum = tonumber(st.stage or st.car) or 1
         local stageTag = string.format("%s %d/%d",
             (raid.META[raidKind] and raid.META[raidKind].label) or raidKind,
-            tonumber(st.stage or st.car) or 1,
+            stageNum,
             tonumber(st.cars) or 3)
+
+        -- Scope Highway Star map queries strictly to the active stage zone so Stage 1 (Tunnel)
+        -- NEVER touches Stage 3 Hospital doors/elevator (Interiors), and vice versa.
+        local hsZone = nil
+        if raidKind == "HighwayStar" then
+            if stageNum == 1
+                or string.find(obj, "tunnel", 1, true) ~= nil
+                or string.find(obj, "civilian", 1, true) ~= nil then
+                hsZone = "Tunnel"
+            elseif stageNum >= 3
+                or string.find(obj, "elevator", 1, true) ~= nil
+                or string.find(obj, "hospital", 1, true) ~= nil
+                or string.find(obj, "room", 1, true) ~= nil
+                or string.find(obj, "yuya", 1, true) ~= nil then
+                hsZone = "Interiors"
+            end
+        end
 
         -- -------- HIGHWAY STAR STAGE 2: CHASE DRIVING --------
         if raidKind == "HighwayStar" and (st.chase ~= nil or string.find(obj, "get away", 1, true) ~= nil) then
@@ -21810,14 +21828,14 @@ function raid.new(deps)
 
         -- -------- HIGHWAY STAR: HOSPITAL ELEVATOR --------
         if raidKind == "HighwayStar" and string.find(obj, "elevator", 1, true) ~= nil then
-            local prompts = d.findRaidPrompts and d.findRaidPrompts(raidKind, raidId) or {}
+            local prompts = d.findRaidPrompts and d.findRaidPrompts(raidKind, raidId, "Interiors") or {}
             local chosen = raid.pickPrompt(prompts, raidKind, st.objective, myX, myY, myZ, self.triedPrompts, now)
             if chosen ~= nil then
                 interactWithPrompt(chosen, now, myX, myY, myZ, stageTag .. " | лифт")
                 return
             end
             if d.findRaidPart then
-                local ex, ey, ez = d.findRaidPart(raidKind, raidId, { "elevator", "lift" })
+                local ex, ey, ez = d.findRaidPart(raidKind, raidId, { "lobbyprompt", "elevator", "lift" }, "Interiors")
                 if ex ~= nil and d.teleportTo then
                     if d.stopCombat then d.stopCombat() end
                     d.teleportTo(ex, ey + 2.5, ez)
@@ -21828,8 +21846,8 @@ function raid.new(deps)
         end
 
         -- -------- HIGHWAY STAR: HOSPITAL FIND USER'S ROOM (DOORS BEFORE RANDOM FANS) --------
-        if raidKind == "HighwayStar" and string.find(obj, "user's room", 1, true) ~= nil then
-            local prompts = d.findRaidPrompts and d.findRaidPrompts(raidKind, raidId) or {}
+        if raidKind == "HighwayStar" and (string.find(obj, "user's room", 1, true) ~= nil or string.find(obj, "find the room", 1, true) ~= nil or string.find(obj, "check the room", 1, true) ~= nil) then
+            local prompts = d.findRaidPrompts and d.findRaidPrompts(raidKind, raidId, "Interiors") or {}
             local chosen = raid.pickPrompt(prompts, raidKind, st.objective, myX, myY, myZ, self.triedPrompts, now)
             if chosen ~= nil then
                 interactWithPrompt(chosen, now, myX, myY, myZ, stageTag .. " | дверь комнаты")
@@ -21893,31 +21911,49 @@ function raid.new(deps)
         end
 
         -- -------- INTERACT WITH PROGRESSION PROMPTS (DOORS / PURSE / PASSENGERS / RINGS) --------
-        local prompts = d.findRaidPrompts and d.findRaidPrompts(raidKind, raidId) or {}
+        local prompts = d.findRaidPrompts and d.findRaidPrompts(raidKind, raidId, hsZone) or {}
         local chosen = raid.pickPrompt(prompts, raidKind, st.objective, myX, myY, myZ, self.triedPrompts, now)
         if chosen ~= nil then
             interactWithPrompt(chosen, now, myX, myY, myZ, stageTag .. " | " .. tostring(chosen.action ~= "" and chosen.action or chosen.name))
             return
         end
 
-        -- -------- HIGHWAY STAR STAGE 1: TUNNEL WALK-IN TRIGGER --------
-        if raidKind == "HighwayStar" and (string.find(obj, "tunnel", 1, true) ~= nil or string.find(obj, "civilian", 1, true) ~= nil) then
-            -- Exit car if seated so we can TP straight to tunnel wall / hidden room
+        -- -------- HIGHWAY STAR STAGE 1: TUNNEL WALK-IN & HIDDEN ROOM DOOR --------
+        if raidKind == "HighwayStar" and hsZone == "Tunnel" then
+            -- Exit car if seated so we can move through the tunnel and open the hidden room door
             local car = d.findRaidCar and d.findRaidCar(raidId) or nil
             if car ~= nil and car.seatedInAny and d.exitVehicle then
                 d.exitVehicle()
                 self.statusText = stageTag .. " | выходим из машины"
                 return
             end
+            -- Anchor waypoints directly to Tunnel.Model.Model.door (never Interiors.hallway.Room308Door!)
+            local doorX, doorY, doorZ = nil, nil, nil
             if d.findRaidPart then
-                local rx, ry, rz = d.findRaidPart(raidKind, raidId, { "civilian", "room", "door", "trigger" })
-                if rx ~= nil and d.teleportTo then
-                    d.teleportTo(rx, ry + 2.5, rz)
-                    self.statusText = stageTag .. " | к комнате в туннеле"
-                    return
-                end
+                doorX, doorY, doorZ = d.findRaidPart(raidKind, raidId, { "door" }, "Tunnel")
             end
-            -- Waypoint sweep relative to initial tunnel spawn
+            if doorX ~= nil and d.teleportTo then
+                local doorSpots = {
+                    { x = doorX - 115, y = doorY - 3.5, z = doorZ + 20, label = "идём по туннелю" },
+                    { x = doorX - 45,  y = doorY - 3.5, z = doorZ + 16, label = "подходим к комнате" },
+                    { x = doorX,       y = doorY - 3.5, z = doorZ + 6.5, lx = doorX, ly = doorY, lz = doorZ, label = "у двери в туннеле" },
+                    { x = doorX,       y = doorY - 3.5, z = doorZ - 22,  label = "в комнате туннеля" },
+                }
+                if self.tunnelWpAt == 0 then
+                    self.tunnelWpIdx = 1
+                    self.tunnelWpAt = now
+                elseif now - self.tunnelWpAt >= 1.35 then
+                    self.tunnelWpAt = now
+                    self.tunnelWpIdx = (self.tunnelWpIdx % #doorSpots) + 1
+                end
+                local sp = doorSpots[self.tunnelWpIdx] or doorSpots[1]
+                if dist3(myX, myY, myZ, sp.x, sp.y, sp.z) > 4 then
+                    d.teleportTo(sp.x, sp.y, sp.z, sp.lx, sp.ly, sp.lz)
+                end
+                self.statusText = stageTag .. " | " .. sp.label
+                return
+            end
+            -- Fallback waypoint sweep relative to initial tunnel spawn
             if self.tunnelOrigin == nil then
                 self.tunnelOrigin = { x = myX, y = myY, z = myZ }
                 self.tunnelWpIdx = 1
@@ -21939,7 +21975,7 @@ function raid.new(deps)
         end
 
         -- -------- GENERIC FALLBACK: ADVANCE TO GATE / EXIT / NEXT ZONE --------
-        if d.findRaidPart then
+        if d.findRaidPart and raidKind ~= "HighwayStar" then
             local gx, gy, gz = d.findRaidPart(raidKind, raidId, { "next", "exit", "portal", "gate", "door", "goal", "finish", "checkpoint" })
             if gx ~= nil and dist3(myX, myY, myZ, gx, gy, gz) > 8 and d.teleportTo then
                 d.teleportTo(gx, gy + 2.5, gz)
@@ -21983,11 +22019,12 @@ local function safePos(obj)
     return nil, nil, nil
 end
 
-local function findRaidContainer(workspace, raidKind, raidId)
+local function findRaidContainer(workspace, raidKind, raidId, subZone)
     local gf = workspace:FindFirstChild("Game")
     local map = gf and gf:FindFirstChild("Map")
     if map == nil then return nil end
 
+    local container = nil
     if type(raidId) == "string" and raidId ~= "" then
         local prefixes = {
             HighwayStar = "HighwayStarRaid_",
@@ -21996,23 +22033,35 @@ local function findRaidContainer(workspace, raidKind, raidId)
         }
         local pref = prefixes[raidKind]
         if pref ~= nil then
-            local exact = map:FindFirstChild(pref .. raidId)
-            if exact ~= nil then return exact end
+            container = map:FindFirstChild(pref .. raidId)
         end
-        for _, ch in map:GetChildren() do
-            if string.find(ch.Name, raidId, 1, true) ~= nil then
-                return ch
+        if container == nil then
+            for _, ch in map:GetChildren() do
+                if string.find(ch.Name, raidId, 1, true) ~= nil then
+                    container = ch
+                    break
+                end
             end
         end
     end
 
-    for _, ch in map:GetChildren() do
-        local nl = string.lower(ch.Name)
-        if string.find(nl, "raid_", 1, true) ~= nil then
-            return ch
+    if container == nil then
+        for _, ch in map:GetChildren() do
+            local nl = string.lower(ch.Name)
+            if string.find(nl, "raid_", 1, true) ~= nil then
+                container = ch
+                break
+            end
         end
     end
-    return nil
+
+    if container == nil then
+        return nil
+    end
+    if type(subZone) == "string" and subZone ~= "" then
+        return container:FindFirstChild(subZone)
+    end
+    return container
 end
 
 local function modelHasPlayingSound(parent)
@@ -22608,9 +22657,9 @@ function bridge.create(ctx)
             return out
         end,
 
-        findRaidPrompts = function(raidKind, raidId)
+        findRaidPrompts = function(raidKind, raidId, subZone)
             local out = {}
-            local container = findRaidContainer(workspace, raidKind, raidId)
+            local container = findRaidContainer(workspace, raidKind, raidId, subZone)
             if container == nil then return out end
             local uidKey = "Claimed_" .. tostring(localPlayer and localPlayer.UserId or 0)
             pcall(function()
@@ -22628,13 +22677,15 @@ function bridge.create(ctx)
                         end
                         local x, y, z = stand_out_bounty.promptPosition(d)
                         if x ~= nil then
+                            local full = d:GetFullName()
+                            local objText = tostring(d.ObjectText or "")
                             table.insert(out, {
                                 obj = d,
-                                key = d:GetFullName(),
+                                key = string.format("%s|%s|%.0f,%.0f", full, objText, x, z),
                                 name = d.Name,
                                 action = tostring(d.ActionText or ""),
-                                objectText = tostring(d.ObjectText or ""),
-                                path = d:GetFullName(),
+                                objectText = objText,
+                                path = full,
                                 x = x,
                                 y = y,
                                 z = z,
@@ -22651,8 +22702,8 @@ function bridge.create(ctx)
             return out
         end,
 
-        findRaidPart = function(raidKind, raidId, keywords)
-            local container = findRaidContainer(workspace, raidKind, raidId)
+        findRaidPart = function(raidKind, raidId, keywords, subZone)
+            local container = findRaidContainer(workspace, raidKind, raidId, subZone)
             if container == nil or type(keywords) ~= "table" then return nil, nil, nil end
             local foundX, foundY, foundZ = nil, nil, nil
             pcall(function()
