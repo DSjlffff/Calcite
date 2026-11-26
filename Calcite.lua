@@ -18645,6 +18645,13 @@ function bridge.create(ctx)
         readState = function()
             local data = localPlayer and localPlayer:FindFirstChild("Data")
             local stats = data and data:FindFirstChild("Stats")
+            local srvTime = os.time()
+            pcall(function()
+                if workspace ~= nil and workspace.GetServerTimeNow ~= nil then
+                    local t = workspace:GetServerTimeNow()
+                    if type(t) == "number" and t > 1e8 then srvTime = t end
+                end
+            end)
             local st = {
                 activeQuest = readStrVal(stats, "ActiveQuest"),
                 trackerTitle = "",
@@ -18659,8 +18666,8 @@ function bridge.create(ctx)
                 objectivesRaw = readStrVal(stats, "QuestObjectives"),
                 objectivesTotalRaw = readStrVal(stats, "QuestObjectivesTotal"),
                 level = readNumVal(stats, "Level"),
-                nowUnix = os.time(),
-                todayDay = math.floor(os.time() / 86400),
+                nowUnix = srvTime,
+                todayDay = math.floor(srvTime / 86400),
                 weather = "",
                 bossAlive = false,
                 gardenHasReadyPot = false,
@@ -19710,8 +19717,10 @@ function stand_out_quests.pickDialogueOption(options, context)
         local hit = findMatch({ "wash that key", "hold on", "where?!", "..." })
         if hit ~= nil then return hit, "turned_in" end
     elseif context == "bigchop_accept" then
-        local hit = findMatch({ "daily gardening quest", "see you later", "thanks" })
+        local hit = findMatch({ "daily gardening quest", "sure", "i'll do it" })
         if hit ~= nil then return hit, "accepted" end
+        local done = findMatch({ "see you later", "thanks", "maybe later" })
+        if done ~= nil then return done, "done_today" end
     elseif context == "meryl_testdrive_accept" then
         local hit = findMatch({ "take it for a test drive", "test drive", "practice driving" })
         if hit ~= nil then return hit, "accepted" end
@@ -19849,6 +19858,7 @@ function stand_out_quests.selectTarget(choice, state)
 
     local function lettuceReady()
         if level < 15 then return false end
+        if state.lettuceOnCooldown then return false end
         if not stand_out_quests.isWeatherClear(state.weather) then return false end
         return stand_out_quests.cooldownLeft(cooldowns, "LETTUCE_TRADER", 240, nowUnix) <= 0
     end
@@ -19965,6 +19975,7 @@ function stand_out_quests.new(deps)
         gardenWaiting = false,
         crouching = false,
         combatMob = nil,
+        lettuceCooldownUntil = 0,
     }, Runner)
 end
 
@@ -20237,12 +20248,18 @@ function Runner:_stepLettuce(now, state, lx, ly, lz)
             return
         end
         local rem = stand_out_quests.cooldownLeft(state.cooldowns, "LETTUCE_TRADER", 240, state.nowUnix)
+        local softRem = (self.lettuceCooldownUntil or 0) - now
+        if softRem > rem then rem = softRem end
         if rem > 0 then
             self.statusText = string.format("Lettuce: кд %dс", math.ceil(rem))
             return
         end
         self.statusText = "Lettuce: берём квест"
-        self:_talkToNpc(now, "Lettuce Trader", "lettuce_accept", lx, ly, lz)
+        local tag = self:_talkToNpc(now, "Lettuce Trader", "lettuce_accept", lx, ly, lz)
+        if tag == "cooldown" then
+            self.lettuceCooldownUntil = now + 45
+            self.statusText = "Lettuce: на кд (пауза 45с)"
+        end
         return
     end
 
@@ -20623,6 +20640,9 @@ function Runner:update(now, cfg, lx, ly, lz)
     state.cooldowns = state.cooldowns or stand_out_quests.parseCooldowns(state.cooldownsRaw)
     state.objectives = state.objectives or stand_out_quests.parseObjectives(state.objectivesRaw, state.objectivesTotalRaw)
     state.gardenWaiting = self.gardenWaiting
+    if now < (self.lettuceCooldownUntil or 0) then
+        state.lettuceOnCooldown = true
+    end
     if self.angeloDoneDay == (state.todayDay or 0)
         or stand_out_quests.isAnyAngeloDoneToday(state.dailyJson, state.todayDay) then
         state.angeloDoneToday = true
