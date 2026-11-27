@@ -3422,6 +3422,7 @@ local pairs = {
     ["Квест"] = "Quest", ["Все доступные"] = "All Available",
     ["Рейд"] = "Raid", ["Сложность"] = "Difficulty",
     ["Дейлик Big Chop"] = "Big Chop Daily",
+    ["Тир семян"] = "Seed Tier",
     ["Автопокупка (горшок/земля/семена)"] = "Auto Buy (pot/dirt/seeds)",
     ["Автоудобрение"] = "Auto Fertilize",
     ["Автопродажа урожая"] = "Auto Sell Harvest",
@@ -9304,6 +9305,16 @@ function menu.create(deps)
 
     soFarm.gardenGroup = farmTab:AddLeftGroupbox("Auto Garden")
     toggle(soFarm.gardenGroup, "StandOutGardenEnabled", "Включить", settings.standOutGarden, "enabled")
+    do
+        local tierVals = { "Best Tier", "A", "B", "C", "D", "E", "F", "Lowest Tier" }
+        local tierDef = table.find(tierVals, settings.standOutGarden.seedTier) or 1
+        soFarm.gardenGroup:AddDropdown("StandOutGardenSeedTier", {
+            Text = "Тир семян", Values = tierVals, Default = tierDef,
+        })
+        Options.StandOutGardenSeedTier:OnChanged(function()
+            settings.standOutGarden.seedTier = Options.StandOutGardenSeedTier.Value or "Best Tier"
+        end)
+    end
     toggle(soFarm.gardenGroup, "StandOutGardenDaily", "Дейлик Big Chop", settings.standOutGarden, "autoDaily")
     toggle(soFarm.gardenGroup, "StandOutGardenBuy", "Автопокупка (горшок/земля/семена)", settings.standOutGarden, "autoBuy")
     toggle(soFarm.gardenGroup, "StandOutGardenFertilize", "Автоудобрение", settings.standOutGarden, "autoFertilize")
@@ -11420,6 +11431,7 @@ function settings.defaults(mode)
         -- Stand Out Auto Garden: полный автомат сада + дейлик Big Chop (stand_out_garden.lua)
         standOutGarden = {
             enabled = false,
+            seedTier = "Best Tier", -- "Best Tier" | "A" | "B" | "C" | "D" | "E" | "F" | "Lowest Tier"
             autoDaily = true,
             autoBuy = true,
             autoFertilize = false,
@@ -15212,6 +15224,29 @@ local ROKA_SEEDS = {
     ["Opal Roka Seed"] = true,
 }
 
+garden.SEED_TIERS = { "Best Tier", "A", "B", "C", "D", "E", "F", "Lowest Tier" }
+
+-- Порядок грейдов семян в Stand Out (Modules.Gardening.Seeds.Grades)
+garden.GRADE_RANK = {
+    F = 1,
+    E = 2,
+    D = 3,
+    C = 4,
+    B = 5,
+    A = 6,
+    S = 7,
+    SS = 8,
+    SSS = 9,
+}
+
+local function normalizeGrade(q)
+    local up = string.upper(tostring(q or "F"))
+    if garden.GRADE_RANK[up] ~= nil then
+        return up
+    end
+    return "F"
+end
+
 local function dist3(ax, ay, az, bx, by, bz)
     local dx = (ax or 0) - (bx or 0)
     local dy = (ay or 0) - (by or 0)
@@ -15232,6 +15267,106 @@ end
 
 function garden.isRokaSeed(name)
     return ROKA_SEEDS[tostring(name or "")] == true
+end
+
+-- Парсит все стаки семян из инвентаря (таблица или JSON-строка) с учётом Quality (F..SSS) и ID.
+function garden.parseSeeds(invRaw)
+    local out = {}
+    if type(invRaw) == "table" then
+        for _, item in ipairs(invRaw) do
+            if type(item) == "table" then
+                local nm = tostring(item.Name or "")
+                local amt = tonumber(item.Amount) or 1
+                if amt >= 1 and (FAST_RANK[nm] ~= nil or ROKA_SEEDS[nm]) then
+                    table.insert(out, {
+                        name = nm,
+                        crop = string.gsub(nm, " Seed$", ""),
+                        quality = normalizeGrade(item.Quality),
+                        amount = amt,
+                        id = item.ID,
+                        bound = item.Bound == true,
+                        isRoka = ROKA_SEEDS[nm] == true,
+                    })
+                end
+            end
+        end
+        return out
+    end
+    if type(invRaw) ~= "string" or invRaw == "" then
+        return out
+    end
+    for obj in string.gmatch(invRaw, "%b{}") do
+        local nm = string.match(obj, '"Name"%s*:%s*"([^"]+)"')
+        if nm ~= nil and (FAST_RANK[nm] ~= nil or ROKA_SEEDS[nm]) then
+            local amt = tonumber(string.match(obj, '"Amount"%s*:%s*(%d+)')) or 1
+            if amt >= 1 then
+                local qual = string.match(obj, '"Quality"%s*:%s*"([^"]+)"')
+                local id = string.match(obj, '"ID"%s*:%s*"([^"]+)"')
+                if id == nil then
+                    local idNum = string.match(obj, '"ID"%s*:%s*(%-?%d+)')
+                    if idNum ~= nil then
+                        id = tonumber(idNum)
+                    end
+                end
+                local bound = string.match(obj, '"Bound"%s*:%s*true') ~= nil
+                table.insert(out, {
+                    name = nm,
+                    crop = string.gsub(nm, " Seed$", ""),
+                    quality = normalizeGrade(qual),
+                    amount = amt,
+                    id = id,
+                    bound = bound,
+                    isRoka = ROKA_SEEDS[nm] == true,
+                })
+            end
+        end
+    end
+    return out
+end
+
+-- Выбирает стак не-Roka семени для посадки по режиму seedTier ("Best Tier" | "A".."F" | "Lowest Tier").
+-- При allowFallback=true (например для дейлика) и отсутствии точного тира берёт самый быстрый доступный.
+function garden.pickSeedForTier(seeds, seedTier, allowFallback)
+    if type(seeds) ~= "table" or #seeds == 0 then
+        return nil
+    end
+    local mode = tostring(seedTier or "Best Tier")
+    local exactRank = garden.GRADE_RANK[string.upper(mode)]
+    local best, bestScore = nil, 1e18
+
+    local function consider(s, preferHigh)
+        local gRank = garden.GRADE_RANK[s.quality] or 1
+        local fRank = FAST_RANK[s.name] or 50
+        local primary = preferHigh and (20 - gRank) or gRank
+        local score = primary * 1000 + fRank * 10 + (s.bound and 1 or 0)
+        if score < bestScore then
+            best, bestScore = s, score
+        end
+    end
+
+    for _, s in ipairs(seeds) do
+        if not s.isRoka and (tonumber(s.amount) or 0) >= 1 then
+            if exactRank ~= nil then
+                if (garden.GRADE_RANK[s.quality] or 1) == exactRank then
+                    consider(s, false)
+                end
+            elseif mode == "Lowest Tier" then
+                consider(s, false)
+            else
+                -- "Best Tier" (по умолчанию)
+                consider(s, true)
+            end
+        end
+    end
+
+    if best == nil and exactRank ~= nil and allowFallback == true then
+        for _, s in ipairs(seeds) do
+            if not s.isRoka and (tonumber(s.amount) or 0) >= 1 then
+                consider(s, false)
+            end
+        end
+    end
+    return best
 end
 
 -- Считает в инвентаре (JSON или уже распарсенная таблица): горшки, землю, удобрение, быстрые семена, любые семена
@@ -15294,23 +15429,35 @@ function garden.countSupplies(invRaw)
     return out
 end
 
--- Выбор самого быстрого доступного не-Roka семени среди офферов магазина Big Chop
-function garden.pickCheapestFastSeedOffer(offers, coins)
+-- Выбор подходящего не-Roka семени в магазине Big Chop с учётом выбранного тира (seedTier).
+function garden.pickShopSeedOffer(offers, coins, seedTier)
     if type(offers) ~= "table" then return nil end
+    local mode = tostring(seedTier or "Lowest Tier")
+    local exactRank = garden.GRADE_RANK[string.upper(mode)]
     local best, bestScore = nil, 1e18
     for _, o in ipairs(offers) do
         if type(o) == "table" and o.Kind == "Seed" and not o.Owned and not garden.isRokaSeed(o.Name) then
             local price = tonumber(o.Coins) or 0
             if coins == nil or coins >= price then
-                local rank = FAST_RANK[o.Name] or 50
-                local score = rank * 100000 + price
-                if score < bestScore then
-                    best, bestScore = o, score
+                local grade = normalizeGrade(o.Quality or o.Grade)
+                local gRank = garden.GRADE_RANK[grade] or 1
+                if exactRank == nil or gRank == exactRank then
+                    local fRank = FAST_RANK[o.Name] or 50
+                    local tierScore = (mode == "Best Tier") and (20 - gRank) or gRank
+                    local score = tierScore * 10000000 + fRank * 100000 + price
+                    if score < bestScore then
+                        best, bestScore = o, score
+                    end
                 end
             end
         end
     end
     return best
+end
+
+-- Совместимость со старым вызовом (самое быстрое/низкотирное не-Roka семя)
+function garden.pickCheapestFastSeedOffer(offers, coins)
+    return garden.pickShopSeedOffer(offers, coins, "Lowest Tier")
 end
 
 function garden.findSupplyOffer(offers, supplyId)
@@ -15514,6 +15661,11 @@ function garden.new(deps)
         wasInMinigame = false,
         dirtDragToken = nil,
         dirtDragStartedAt = 0,
+        selectedSeedKey = nil,
+        selectedSeedAt = -99,
+        selectSeedWaitUntil = 0,
+        shopMissTier = nil,
+        shopMissUntil = 0,
     }, Runner)
 end
 
@@ -15528,6 +15680,11 @@ function Runner:stop()
     self.wasInMinigame = false
     self.dirtDragToken = nil
     self.dirtDragStartedAt = 0
+    self.selectedSeedKey = nil
+    self.selectedSeedAt = -99
+    self.selectSeedWaitUntil = 0
+    self.shopMissTier = nil
+    self.shopMissUntil = 0
     if self.interact ~= nil then
         self.interact:stop()
     end
@@ -15646,13 +15803,20 @@ function Runner:_stepShop(now, st, wantKind, wantId, myX, myY, myZ)
     -- Покупка (supply:pot / supply:dirt / seed)
     local offer = nil
     if wantKind == "seed" then
-        offer = garden.pickCheapestFastSeedOffer(snap.Offers, st.coins)
+        offer = garden.pickShopSeedOffer(snap.Offers, st.coins, wantId)
     else
         offer = garden.findSupplyOffer(snap.Offers, wantId)
     end
     if offer == nil then
         if d.sendShopClose ~= nil then d.sendShopClose(shop.token) end
-        self.statusText = wantKind == "seed" and "Сад: нет доступных семян в магазине" or ("Сад: не найден товар " .. tostring(wantId))
+        if wantKind == "seed" and wantId ~= nil and garden.GRADE_RANK[string.upper(tostring(wantId))] ~= nil then
+            -- В текущей ротации Big Chop нет семян этого точного тира -> пауза 45с, чтобы не спамить открытием магазина
+            self.shopMissTier = tostring(wantId)
+            self.shopMissUntil = now + 45.0
+            self.statusText = "Сад: нет семян тира " .. tostring(wantId)
+        else
+            self.statusText = wantKind == "seed" and "Сад: нет доступных семян в магазине" or ("Сад: не найден товар " .. tostring(wantId))
+        end
         return false
     end
     local price = tonumber(offer.Coins) or 0
@@ -15712,6 +15876,55 @@ function Runner:_talkBigChop(now, myX, myY, myZ)
     return true
 end
 
+function Runner:_plantInPot(now, dirtPot, st, seeds, seedTier, autoBuy, allowFallback, myX, myY, myZ)
+    local d = self.deps
+    local chosen = garden.pickSeedForTier(seeds, seedTier, allowFallback)
+    if chosen == nil then
+        local tierStr = tostring(seedTier or "Best Tier")
+        local exactMiss = (self.shopMissTier == tierStr) and (now < (self.shopMissUntil or 0))
+        if autoBuy and not exactMiss then
+            if self:_stepShop(now, st, "seed", tierStr, myX, myY, myZ) then
+                return true
+            end
+        end
+        if st.shop ~= nil and st.shop.token ~= nil and d.sendShopClose ~= nil then
+            d.sendShopClose(st.shop.token)
+        end
+        if garden.GRADE_RANK[string.upper(tierStr)] ~= nil then
+            self.statusText = "Сад: нет семян тира " .. tierStr
+        else
+            self.statusText = "Сад: нет семян в инвентаре"
+        end
+        self.busy = false
+        return false
+    end
+
+    if st.shop ~= nil and st.shop.token ~= nil and d.sendShopClose ~= nil then
+        d.sendShopClose(st.shop.token)
+    end
+
+    -- Перед GardenWork выбираем точный стак семени через Remotes.Gardening:FireServer("SelectSeed", { Name, ID })
+    local selKey = chosen.name .. "|" .. tostring(chosen.id or "") .. "|" .. chosen.quality
+    if d.sendSelectSeed ~= nil then
+        if self.selectedSeedKey ~= selKey or now - (self.selectedSeedAt or -99) >= 8.0 then
+            self.selectedSeedKey = selKey
+            self.selectedSeedAt = now
+            self.selectSeedWaitUntil = now + 0.25
+            d.sendSelectSeed(chosen.name, chosen.id)
+            self.statusText = string.format("Сад: выбираем %s (%s)", chosen.crop, chosen.quality)
+            self.busy = true
+            return true
+        end
+        if now < (self.selectSeedWaitUntil or 0) then
+            self.statusText = string.format("Сад: выбираем %s (%s)...", chosen.crop, chosen.quality)
+            self.busy = true
+            return true
+        end
+    end
+
+    return self:_interactPrompt(now, dirtPot.workPrompt, myX, myY, myZ, string.format("Сад: сажаем %s (%s)", chosen.crop, chosen.quality))
+end
+
 -- Основной тик. Возвращает true если Auto Garden активно занят действием (не ждёт роста).
 function Runner:update(now, cfg, myX, myY, myZ)
     local d = self.deps
@@ -15721,6 +15934,7 @@ function Runner:update(now, cfg, myX, myY, myZ)
     local autoFertilize = cfg.autoFertilize == true
     local autoSell = cfg.autoSell == true
     local dailyOnly = cfg.dailyOnly == true
+    local seedTier = cfg.seedTier or "Best Tier"
 
     local st = d.readState ~= nil and d.readState() or {}
 
@@ -15786,6 +16000,7 @@ function Runner:update(now, cfg, myX, myY, myZ)
     if self.wasInMinigame then
         self.wasInMinigame = false
         self.dirtDragToken = nil
+        self.selectedSeedKey = nil
         self.postMinigameUntil = now + 0.45
     end
     if now < (self.postMinigameUntil or 0) then
@@ -15805,6 +16020,7 @@ function Runner:update(now, cfg, myX, myY, myZ)
     local pots = st.pots or {}
     local spots = st.spots or {}
     local inv = garden.countSupplies(st.inventoryRaw)
+    local seeds = garden.parseSeeds(st.inventoryRaw)
     local activeSet = stand_out_quests.parseCompletedSet(st.activeQuest or "")
     local hasDaily = activeSet["BIG_CHOP_DAILY_GARDEN"] == true
     local dailyDoneToday = stand_out_quests.isDailyDoneToday(st.dailyJson, "BIG_CHOP_DAILY_GARDEN", st.todayDay)
@@ -15911,19 +16127,7 @@ function Runner:update(now, cfg, myX, myY, myZ)
         if not objDone("GardenDaily_Seed") then
             local dirtPot = garden.findPotByStage(pots, "DirtReady")
             if dirtPot ~= nil and dirtPot.workPrompt ~= nil then
-                if inv.fastSeeds < 1 then
-                    if autoBuy then
-                        return self:_stepShop(now, st, "seed", nil, myX, myY, myZ)
-                    end
-                    if inv.anySeeds < 1 then
-                        self.statusText = "Сад: нет семян в инвентаре"
-                        return false
-                    end
-                end
-                if st.shop ~= nil and st.shop.token ~= nil and d.sendShopClose ~= nil then
-                    d.sendShopClose(st.shop.token)
-                end
-                return self:_interactPrompt(now, dirtPot.workPrompt, myX, myY, myZ, "Сад: сажаем семя")
+                return self:_plantInPot(now, dirtPot, st, seeds, seedTier, autoBuy, true, myX, myY, myZ)
             end
         end
 
@@ -15956,22 +16160,16 @@ function Runner:update(now, cfg, myX, myY, myZ)
         return self:_interactPrompt(now, emptyPot.workPrompt, myX, myY, myZ, "Сад: сыплем землю")
     end
 
-    -- 7б) Горшки с землёй -> сажаем семя
+    -- 7б) Горшки с землёй -> сажаем семя выбранного тира
     local dirtPot = garden.findPotByStage(pots, "DirtReady")
     if dirtPot ~= nil and dirtPot.workPrompt ~= nil then
-        if inv.fastSeeds < 1 then
-            if autoBuy then
-                return self:_stepShop(now, st, "seed", nil, myX, myY, myZ)
-            end
-            if inv.anySeeds < 1 then
-                self.statusText = "Сад: нет семян"
-                return false
-            end
+        if self:_plantInPot(now, dirtPot, st, seeds, seedTier, autoBuy, false, myX, myY, myZ) then
+            return true
         end
-        if st.shop ~= nil and st.shop.token ~= nil and d.sendShopClose ~= nil then
-            d.sendShopClose(st.shop.token)
+        -- Если выбранного точного тира семян нет, проверяем нет ли других растущих горшков
+        if #pots >= garden.MAX_POTS then
+            return false
         end
-        return self:_interactPrompt(now, dirtPot.workPrompt, myX, myY, myZ, "Сад: сажаем семя")
     end
 
     -- 7в) Стоит меньше 2 горшков -> ставим ещё горшок
@@ -16460,6 +16658,17 @@ function bridge.create(ctx)
                 end
             end
             pcall(function() r:FireServer("GrowingInput", outPkt) end)
+        end,
+
+        sendSelectSeed = function(name, id)
+            local r = ensureRemote()
+            if r == nil or type(name) ~= "string" or name == "" then return end
+            pcall(function()
+                r:FireServer("SelectSeed", {
+                    Name = name,
+                    ID = id,
+                })
+            end)
         end,
 
         sendShopOpen = function(requestId)
